@@ -34,7 +34,8 @@ export async function createApp({ database, seed = true } = {}) {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000');
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
-      if ((config.production || req.headers.origin) && req.headers.origin !== config.origin) return next(fail(403, 'Request origin is not allowed.'));
+      const allowed = [config.origin, req.headers.host ? `https://${req.headers.host}` : null].filter(Boolean);
+      if ((config.production && !req.headers.origin) || (req.headers.origin && !allowed.includes(req.headers.origin))) return next(fail(403, 'Request origin is not allowed.'));
     }
     const sessionId = req.headers.cookie?.split('; ').find(v => v.startsWith('sp_session='))?.slice(11);
     if (sessionId) {
