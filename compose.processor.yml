@@ -1,0 +1,33 @@
+services:
+  processor:
+    build:
+      context: .
+      dockerfile: processor/Dockerfile
+    environment:
+      PROCESSOR_SECRET: ${PROCESSOR_SECRET:?Set PROCESSOR_SECRET}
+      CLAMAV_HOST: clamav
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks: [processing]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 80
+    restart: unless-stopped
+    depends_on: [clamav]
+  clamav:
+    image: clamav/clamav:stable
+    volumes: [clam-data:/var/lib/clamav]
+    networks: [processing, updates]
+    mem_limit: 2048m
+    restart: unless-stopped
+networks:
+  processing:
+    internal: true
+  updates: {}
+volumes:
+  clam-data: {}

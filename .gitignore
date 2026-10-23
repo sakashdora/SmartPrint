@@ -1,0 +1,18 @@
+node_modules/
+.env
+.env.*
+!.env.example
+!.env.processor.example
+.data/
+*.log
+test-output/
+public/vendor/
+.vercel/
+connector/*.xml
+*.submitted
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,268 @@
+import express from 'express';
+import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import QRCode from 'qrcode';
+import { openDatabase } from './db.js';
+import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt } from './security.js';
+import { price, validateOptions } from './print-options.js';
+import { configuration } from './config.js';
+import { authRoutes } from './auth.js';
+import { limitRate } from './security.js';
+import { processDocument } from './process-client.js';
+import { deviceRoutes, sweepLeases, queuePreparation } from './devices.js';
+import { paymentRoutes } from './payments.js';
+import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
+
+const now = () => new Date().toISOString();
+const fail = (status, message) => Object.assign(new Error(message), { status });
+export async function createApp({ database, seed = true } = {}) {
+  const config = configuration();
+  const db = database ?? await openDatabase();
+  if (!process.env.DATABASE_URL || database) await db.migrate();
+  const key = loadKey();
+  if (seed && !process.env.DATABASE_URL && !config.production) {
+    for (const [id, email, role] of [['owner-demo', 'owner@smartprint.local', 'owner'], ['admin-demo', 'admin@smartprint.local', 'admin']]) {
+      await db.query('INSERT INTO users (id,email,password,role) VALUES ($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [id, email, await hashPassword('SmartPrintDemo!2026'), role]);
+    }
+    await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ('shop-demo','owner-demo','campus-print','Campus Print Studio','Ground floor · Near the main gate','active') ON CONFLICT(id) DO NOTHING");
+  }
+  const app = express();
+  app.disable('x-powered-by');
+  if (config.production) app.set('trust proxy', 'loopback, linklocal, uniquelocal');
+  app.use(async (req, res, next) => {
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self' https://checkout.razorpay.com; style-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob: https://api.razorpay.com; connect-src 'self' https://api.razorpay.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" });
+    if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+    if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000');
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
+      if ((config.production || req.headers.origin) && req.headers.origin !== config.origin) return next(fail(403, 'Request origin is not allowed.'));
+    }
+    const sessionId = req.headers.cookie?.split('; ').find(v => v.startsWith('sp_session='))?.slice(11);
+    if (sessionId) {
+      req.sessionId = digest(sessionId);
+      const [user] = await db.query('SELECT u.id,u.email,u.role,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
+      if (user) { req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: config.production && !user.mfa }; }
+    }
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook') await limitRate(db, 'mutations', req.ip, 120);
+    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 30, 900);
+    if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', req.ip, 40, 900);
+    next();
+  });
+  const requireRole = role => (req, res, next) => !req.user ? next(fail(401, 'Please sign in.')) : req.user.mfaRequired ? next(fail(403, 'Set up your authenticator before using this workspace.')) : req.user.role !== role ? next(fail(403, 'This action is not available for your account.')) : next();
+  const audit = (tx, actor, action, target) => tx.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), actor, action, target, now()]);
+  const ownerShop = async req => { const [shop] = await db.query('SELECT * FROM shops WHERE owner_id=$1', [req.user.id]); if (!shop) throw fail(404, 'Shop not found.'); return shop; };
+  const ownerOrder = async req => { const shop = await ownerShop(req); const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]); if (!order) throw fail(404, 'Order not found.'); return order; };
+  const bearer = req => req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+  const publicOrder = row => { const { token: secret, document_id, provider_order, ...safe } = row; return { ...safe, options: JSON.parse(row.options) }; };
+  const collect = async (tx, order, reference) => {
+    const changed = await tx.query("UPDATE orders SET payment='paid', status=CASE WHEN status='awaiting_payment' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) THEN 'queued' ELSE 'payment_review' END WHERE id=$1 AND payment='pending' RETURNING id", [order.id, now()]);
+    if (!changed.length) return;
+    await tx.query('INSERT INTO transactions (id,order_id,shop_id,amount,method,reference,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), order.id, order.shop_id, order.amount, order.method, reference, now()]);
+  };
+  app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!secret) throw fail(503, 'Online payments are not configured.');
+    const expected = createHmac('sha256', secret).update(req.body).digest('hex');
+    const signature = req.headers['x-razorpay-signature'] ?? '';
+    if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw fail(401, 'Invalid signature.');
+    const event = JSON.parse(req.body.toString());
+    const eventId = req.headers['x-razorpay-event-id'];
+    if (!eventId) throw fail(400, 'Missing event id.');
+    if (event.event !== 'payment.captured') return res.json({ received: true });
+    const payment = event.payload?.payment?.entity;
+    await db.transaction(async tx => {
+      const inserted = await tx.query('INSERT INTO payment_events (id,created) VALUES ($1,$2) ON CONFLICT(id) DO NOTHING RETURNING id', [eventId, now()]);
+      if (!inserted.length) return;
+      const [order] = await tx.query('SELECT * FROM orders WHERE provider_order=$1', [payment?.order_id ?? '']);
+      if (!order || payment.status !== 'captured' || payment.currency !== 'INR' || payment.amount !== order.amount || order.method !== 'online') throw fail(409, 'Payment does not match order.');
+      await collect(tx, order, payment.id);
+      await audit(tx, 'gateway', 'payment.captured', order.id);
+    });
+    res.json({ received: true });
+  });
+  app.use(express.json({ limit: config.production ? '2mb' : '29mb' }));
+  app.use((req, res, next) => { req.body ??= {}; next(); });
+  app.get('/api/health', (req, res) => res.json({ mode: config.production ? 'production' : 'development', payments: config.payments, automaticPrinting: true, office: config.production || process.env.CONNECTOR_PROCESSING === 'true' || Boolean(process.env.PROCESSOR_URL), demo: !process.env.DATABASE_URL && !config.production }));
+  authRoutes(app, db, key, config);
+  uploadRoutes(app, db, key);
+  deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance: () => maintain() });
+  paymentRoutes(app, { db, ownerOrder, requireRole, collect, audit });
+  app.post('/api/auth/register', async (req, res) => {
+    const email = String(req.body.email ?? '').trim().toLowerCase(), password = String(req.body.password ?? ''), name = String(req.body.name ?? '').trim(), location = String(req.body.location ?? '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || password.length < 12 || password.length > 128 || name.length < 2 || name.length > 100 || !location || location.length > 200) throw fail(400, 'Use a valid email, 12–128 character password, shop name and location.');
+    const id = randomUUID(), shopId = randomUUID();
+    try { await db.transaction(async tx => {
+      await tx.query("INSERT INTO users (id,email,password,role) VALUES ($1,$2,$3,'owner')", [id, email, await hashPassword(password)]);
+      await tx.query('INSERT INTO shops (id,owner_id,slug,name,location) VALUES ($1,$2,$3,$4,$5)', [shopId, id, `shop-${shopId.slice(0, 8)}`, name, location]);
+      await audit(tx, id, 'shop.registered', shopId);
+    }); } catch (error) { if (String(error.message).toLowerCase().includes('unique')) throw fail(409, 'This email is already registered.'); throw error; }
+    res.status(201).json({ message: 'Shop registered. Sign in to configure prices while an admin reviews your shop.' });
+  });
+  app.get('/api/shops/:slug', async (req, res) => {
+    const [shop] = await db.query("SELECT s.id,s.slug,s.name,s.location,s.bw,s.color,s.version,s.status,p.upi_id FROM shops s LEFT JOIN shop_payments p ON p.shop_id=s.id WHERE s.slug=$1 AND s.status='active'", [req.params.slug]);
+    if (!shop) throw fail(404, 'This shop is not accepting new orders.'); res.json(shop);
+  });
+  let processing = 0;
+  app.post('/api/quotes', async (req, res) => {
+    if (processing >= 2) throw fail(429, 'Document processing is busy. Please try again shortly.');
+    const [shop] = await db.query("SELECT * FROM shops WHERE slug=$1 AND status='active'", [req.body.slug]);
+    if (!shop) throw fail(404, 'This shop is not accepting orders.');
+    if (config.production || process.env.CONNECTOR_PROCESSING === 'true') return res.status(202).json(await queuePreparation(req, db, shop));
+    let options, prepared;
+    processing++;
+    try { options = validateOptions(req.body.options); const files = await resolveUploads(req.body.files, shop.id, db, key); prepared = await processDocument(files, options); }
+    catch (error) { throw fail(400, `Unable to prepare file: ${error.message}`); } finally { processing--; }
+    const quote = { id: randomUUID(), token: token(), ...price(prepared.pages, options, shop), pages: prepared.pages, options, expires: new Date(Date.now() + 15 * 60000).toISOString() };
+    const documentId = randomUUID(), sealed = encrypt(prepared.bytes, key);
+    await db.transaction(async tx => {
+      await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [documentId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
+      await tx.query('INSERT INTO quotes (id,shop_id,document_id,token,options,pages,sides,sheets,amount,version,expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [quote.id, shop.id, documentId, digest(quote.token), JSON.stringify(options), quote.pages, quote.sides, quote.sheets, quote.amount, shop.version, quote.expires]);
+      for (const file of req.body.files) if (file.uploadId) await tx.query('DELETE FROM uploads WHERE id=$1 AND token=$2', [file.uploadId, digest(file.token)]);
+    });
+    res.status(201).json(quote);
+  });
+  app.get('/api/quotes/:id/preview', async (req, res) => {
+    const [quote] = await db.query('SELECT * FROM quotes WHERE id=$1 AND token=$2 AND expires>$3 AND used=0', [req.params.id, digest(bearer(req)), now()]);
+    if (!quote) throw fail(404, 'Preview expired. Prepare it again.');
+    const [doc] = await db.query('SELECT * FROM documents WHERE id=$1', [quote.document_id]);
+    if (!doc) throw fail(404, 'File has expired.'); sendPdf(req, res, decrypt(doc, key));
+  });
+  app.post('/api/orders', async (req, res) => {
+    if (!['cash', 'upi', 'online'].includes(req.body.method)) throw fail(400, 'Choose UPI or cash payment.');
+    if (req.body.method === 'online' && !config.payments) throw fail(503, 'Online payments are not configured. Please pay at the counter.');
+    const receipt = token(), id = randomUUID();
+    await db.transaction(async tx => {
+      const [quote] = await tx.query('SELECT q.* FROM quotes q JOIN shops s ON s.id=q.shop_id JOIN documents d ON d.id=q.document_id WHERE q.id=$1 AND q.token=$2 AND q.expires>$3 AND q.used=0 AND s.status=\'active\' AND d.expires>$3', [req.body.quoteId, digest(bearer(req)), now()]);
+      if (!quote) throw fail(409, 'Quote expired or already used. Prepare a new preview.');
+      const claimed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [quote.id]);
+      if (!claimed.length) throw fail(409, 'This quote has already been ordered.');
+      await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), quote.options, quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
+      if (req.body.method === 'upi') {
+        const [payee] = await tx.query('SELECT * FROM shop_payments WHERE shop_id=$1', [quote.shop_id]);
+        if (!payee) throw fail(409, 'This shop has not set up UPI. Choose cash.');
+        await tx.query('INSERT INTO upi_receipts (order_id,upi_id,payee) VALUES ($1,$2,$3)', [id, payee.upi_id, payee.payee]);
+      }
+    });
+    res.status(201).json({ id, token: receipt });
+  });
+  app.get('/api/orders/:id', async (req, res) => {
+    const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND token=$2', [req.params.id, digest(bearer(req))]);
+    if (!order) throw fail(404, 'Order not found. Use your private receipt.'); res.json(publicOrder(order));
+  });
+  app.post('/api/orders/:id/payment', async (req, res) => {
+    const [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND method='online' AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
+    if (!order) throw fail(404, 'Payable order not found.');
+    const keyId = process.env.RAZORPAY_KEY_ID, secret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keyId || !secret) throw fail(503, 'Online payments are unavailable.');
+    if (!order.provider_order) {
+      // Ambiguous provider failures require reconciliation, not a blind retry.
+      const marker = `creating:${randomUUID()}`;
+      const claimed = await db.query('UPDATE orders SET provider_order=$1 WHERE id=$2 AND provider_order IS NULL RETURNING id', [marker, order.id]);
+      if (!claimed.length) throw fail(409, 'Payment setup is in progress. Refresh shortly.');
+      const response = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', headers: { Authorization: `Basic ${Buffer.from(`${keyId}:${secret}`).toString('base64')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: order.amount, currency: 'INR', receipt: order.id }), signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw fail(503, 'Payment setup needs reconciliation. Contact the shop; do not pay twice.');
+      const provider = await response.json();
+      if (typeof provider.id !== 'string' || !provider.id.startsWith('order_')) throw fail(503, 'Payment setup could not be verified.');
+      await db.query('UPDATE orders SET provider_order=$1 WHERE id=$2 AND provider_order=$3', [provider.id, order.id, marker]); order.provider_order = provider.id;
+    }
+    if (order.provider_order.startsWith('creating:')) throw fail(409, 'Payment setup needs reconciliation. Contact the shop.');
+    res.json({ key: keyId, order_id: order.provider_order, amount: order.amount, currency: 'INR' });
+  });
+  app.use('/api/owner', requireRole('owner'));
+  app.get('/api/owner/shop', async (req, res) => res.json(await ownerShop(req)));
+  app.get('/api/owner/orders', async (req, res) => { const shop = await ownerShop(req); res.json((await db.query('SELECT o.*,CASE WHEN EXISTS (SELECT order_id FROM print_leases WHERE order_id=o.id) THEN 1 ELSE 0 END AS automatic FROM orders o WHERE o.shop_id=$1 ORDER BY o.created DESC LIMIT 200', [shop.id])).map(publicOrder)); });
+  app.get('/api/owner/transactions', async (req, res) => {
+    const shop = await ownerShop(req), limit = Number(req.query.limit || 100), offset = Number(req.query.offset || 0);
+    const until = String(req.query.until || now());
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !Number.isSafeInteger(offset) || offset < 0) throw fail(400, 'Invalid transaction page.');
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(until) || !Number.isFinite(Date.parse(until))) throw fail(400, 'Invalid ledger snapshot.');
+    res.set('X-Snapshot-At', until);
+    res.json(await db.query('SELECT t.*,r.amount AS refund_amount,r.reference AS refund_reference FROM transactions t LEFT JOIN refunds r ON r.order_id=t.order_id WHERE t.shop_id=$1 AND t.created<=$4 ORDER BY t.created DESC,t.id DESC LIMIT $2 OFFSET $3', [shop.id, limit, offset, until]));
+  });
+  app.get('/api/owner/summary', async (req, res) => {
+    const shop = await ownerShop(req);
+    const [[collections], [refunds], [orders]] = await Promise.all([
+      db.query('SELECT COUNT(*) AS count,COALESCE(SUM(amount),0) AS amount FROM transactions WHERE shop_id=$1', [shop.id]),
+      db.query('SELECT COALESCE(SUM(amount),0) AS amount FROM refunds WHERE shop_id=$1', [shop.id]),
+      db.query("SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN status='awaiting_payment' THEN 1 ELSE 0 END),0) AS awaiting_payment,COALESCE(SUM(CASE WHEN status IN ('queued','printing','awaiting_confirmation','needs_review') THEN 1 ELSE 0 END),0) AS active,COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed FROM orders WHERE shop_id=$1", [shop.id])
+    ]);
+    res.json({ collected: Number(collections.amount), refunded: Number(refunds.amount), net: Number(collections.amount) - Number(refunds.amount), transactions: Number(collections.count), ...Object.fromEntries(Object.entries(orders).map(([k,v]) => [k, Number(v)])) });
+  });
+  app.post('/api/owner/orders/:id/cash', async (req, res) => {
+    const order = await ownerOrder(req);
+    if (order.method !== 'cash' || order.status !== 'awaiting_payment') throw fail(409, 'This order is not awaiting cash payment.');
+    await db.transaction(async tx => {
+      const [doc] = await tx.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
+      if (!doc) throw fail(409, 'The file has expired. Do not collect payment. Ask for a new upload.');
+      await collect(tx, order, 'counter'); await audit(tx, req.user.id, 'cash.collected', order.id);
+    }); res.json({ ok: true });
+  });
+  app.post('/api/owner/orders/:id/start', async (req, res) => {
+    const order = await ownerOrder(req);
+    const changed = await db.query("UPDATE orders SET status='printing' WHERE id=$1 AND payment='paid' AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
+    if (!changed.length) throw fail(409, 'Only a paid queued order with an available file can start.');
+    await audit(db, req.user.id, 'print.started', order.id); res.json({ ok: true });
+  });
+  app.get('/api/owner/orders/:id/document', async (req, res) => {
+    const order = await ownerOrder(req);
+    if (order.payment !== 'paid' || order.status !== 'printing') throw fail(409, 'Start a paid order before opening its print file.');
+    if ((await db.query('SELECT order_id FROM print_leases WHERE order_id=$1', [order.id])).length) throw fail(409, 'The connector is handling this print. Check its physical output before taking further action.');
+    const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
+    if (!doc) throw fail(404, 'File no longer available.');
+    sendPdf(req, res, decrypt(doc, key));
+  });
+  app.post('/api/owner/orders/:id/complete', async (req, res) => {
+    const order = await ownerOrder(req);
+    if (req.body.confirmed !== true) throw fail(400, 'Confirm that the physical print is successful.');
+    await db.transaction(async tx => {
+      const changed = await tx.query("UPDATE orders SET status='completed',deleted_at=$1 WHERE id=$2 AND status IN ('printing','awaiting_confirmation','needs_review') AND payment='paid' RETURNING id", [now(), order.id]);
+      if (!changed.length) throw fail(409, 'Only a printing order can be completed.');
+      await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
+      await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
+      await audit(tx, req.user.id, 'print.confirmed.file_deleted', order.id);
+    }); res.json({ ok: true });
+  });
+  app.put('/api/owner/prices', async (req, res) => {
+    const shop = await ownerShop(req), { bw, color } = req.body;
+    if (![bw, color].every(n => Number.isInteger(n) && n >= 1 && n <= 100000)) throw fail(400, 'Prices must be ₹0.01–₹1,000 per side.');
+    await db.transaction(async tx => { await tx.query('UPDATE shops SET bw=$1,color=$2,version=version+1 WHERE id=$3', [bw, color, shop.id]); await audit(tx, req.user.id, 'prices.updated', shop.id); }); res.json({ ok: true });
+  });
+  app.get('/api/owner/qr', async (req, res) => { const shop = await ownerShop(req); const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, process.env.PUBLIC_BASE_URL || 'http://localhost:3000').href; res.json({ url, image: await QRCode.toDataURL(url, { width: 320, margin: 2 }) }); });
+  app.use('/api/admin', requireRole('admin'));
+  app.get('/api/admin/shops', async (req, res) => res.json(await db.query('SELECT s.*,u.email FROM shops s JOIN users u ON u.id=s.owner_id ORDER BY s.name')));
+  app.get('/api/admin/audit', async (req, res) => res.json(await db.query('SELECT id,actor,action,target,created FROM audit ORDER BY created DESC LIMIT 100')));
+  app.post('/api/admin/shops/:id/status', async (req, res) => {
+    if (!['active', 'suspended'].includes(req.body.status)) throw fail(400, 'Choose active or suspended.');
+    await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
+  });
+  app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
+  app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
+  app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
+  app.use('/vendor/pdfjs-wasm', express.static('node_modules/pdfjs-dist/wasm', { index: false }));
+  app.use(express.static('public'));
+  const cleanup = async () => db.transaction(async tx => {
+    await tx.query('DELETE FROM uploads WHERE expires<=$1', [now()]);
+    await tx.query('DELETE FROM preparations WHERE expires<=$1', [now()]);
+    const expired = await tx.query('SELECT id FROM documents WHERE expires<=$1', [now()]);
+    for (const doc of expired) {
+      await tx.query("UPDATE orders SET status='expired',deleted_at=$1 WHERE document_id=$2 AND status<>'completed'", [now(), doc.id]);
+      await tx.query('DELETE FROM documents WHERE id=$1', [doc.id]); await audit(tx, 'cleanup', 'file.expired.deleted', doc.id);
+    }
+  });
+  const maintain = async () => { await cleanup(); await sweepLeases(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
+  app.get('/maintenance', async (req, res) => { if (!process.env.CRON_SECRET || digest(req.headers.authorization || '') !== digest(`Bearer ${process.env.CRON_SECRET}`)) return res.sendStatus(401); await maintain(); res.json({ ok: true }); });
+  app.get('/readyz', async (req, res) => { const [row] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); const ready = row && Date.now() - Date.parse(row.last_success) < 180000; res.status(ready ? 200 : 503).json({ ready: Boolean(ready) }); });
+  app.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    const status = error.status ?? (error.type === 'entity.too.large' ? 413 : 500);
+    if (status === 500) console.error('Request failed:', error.code ?? error.name);
+    res.status(status).json({ error: status === 500 ? 'Something went wrong. Please try again.' : error.message });
+  });
+  const timer = setInterval(() => { maintain().catch(() => console.error('Maintenance failed; check database and cleanup alerts.')); }, 60000);
+  timer.unref(); await maintain();
+  return { app, db, cleanup, close: async () => { clearInterval(timer); await db.close(); } };
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { app } = await createApp();
+  const port = Number(process.env.PORT || 3000);
+  app.listen(port, process.env.HOST || '127.0.0.1', () => console.log(`SmartPrint listening on port ${port}`));
+}

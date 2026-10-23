@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "functions": { "api/index.js": { "maxDuration": 60, "excludeFiles": "{node_modules/@img/**,node_modules/sharp/**,node_modules/@napi-rs/**,node_modules/pdfjs-dist/**,server/printing.js,server/process-worker.js,public/**}" } },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index" },
+    { "source": "/maintenance", "destination": "/api/index" },
+    { "source": "/readyz", "destination": "/api/index" }
+  ],
+  "crons": [{ "path": "/maintenance", "schedule": "0 0 * * *" }],
+  "headers": [{ "source": "/(.*)", "headers": [
+    { "key": "X-Content-Type-Options", "value": "nosniff" },
+    { "key": "Referrer-Policy", "value": "no-referrer" },
+    { "key": "X-Frame-Options", "value": "DENY" },
+    { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" }
+  ]}]
+}

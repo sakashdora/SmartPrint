@@ -1,0 +1,31 @@
+{
+  "name": "smartprint",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch server/index.js",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test",
+    "check": "node scripts/check.mjs",
+    "migrate": "node --env-file-if-exists=.env server/migrate.js",
+    "build": "node scripts/build.mjs",
+    "admin:create": "node --env-file-if-exists=.env scripts/provision-admin.js",
+    "demo": "node server/index.js",
+    "test:neon": "node --env-file-if-exists=.env scripts/neon-integration.mjs",
+    "env:check": "node --env-file-if-exists=.env scripts/env-status.mjs",
+    "account:recover": "node --env-file-if-exists=.env scripts/recover-account.mjs"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.13",
+    "express": "^5.1.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299",
+    "pg": "^8.16.3",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.35.5"
+  }
+}

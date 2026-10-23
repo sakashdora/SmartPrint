@@ -1,0 +1,8 @@
+.env*
+.data
+docs
+test
+connector
+processor
+compose.processor.yml
+node_modules
