@@ -21,7 +21,24 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
     // Only acquisition retries. Once SQL starts, never replay an ambiguous write.
     const query = async (sql, params = []) => { const client = await connect(); try { return (await client.query(qualify(sql), params)).rows; } finally { client.release(); } };
     return { kind: 'Neon/PostgreSQL', query,
-      migrate: async () => { const client = await connect(); try { await client.query('BEGIN'); await client.query('CREATE SCHEMA IF NOT EXISTS smartprint'); await client.query(qualify(schema)); await client.query('COMMIT'); } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); } }, close: () => pool.end(),
+      migrate: async () => {
+        const client = await connect();
+        try {
+          await client.query('BEGIN');
+          await client.query('CREATE SCHEMA IF NOT EXISTS smartprint');
+          await client.query(qualify(schema));
+          await client.query(`
+            ALTER TABLE smartprint.orders ADD COLUMN IF NOT EXISTS file_name TEXT DEFAULT 'document.pdf';
+            ALTER TABLE smartprint.orders ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 0;
+            ALTER TABLE smartprint.devices ADD COLUMN IF NOT EXISTS status_note TEXT DEFAULT 'Ready';
+            ALTER TABLE smartprint.devices ADD COLUMN IF NOT EXISTS is_paused INTEGER DEFAULT 0;
+          `);
+          await client.query('COMMIT');
+        } catch(error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally { client.release(); }
+      }, close: () => pool.end(),
       transaction: async fn => {
         const client = await connect();
         try { await client.query('BEGIN'); const result = await fn({ query: async (s, p = []) => (await client.query(qualify(s), p)).rows }); await client.query('COMMIT'); return result; }
@@ -40,7 +57,13 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
   let tail = Promise.resolve();
   const serial = fn => { const result = tail.then(fn); tail = result.catch(() => {}); return result; };
   return { kind: 'SQLite development', query: (sql, params) => serial(() => direct(sql, params)),
-    migrate: () => serial(() => sqlite.exec(schema.replaceAll('BYTEA', 'BLOB'))),
+    migrate: () => serial(() => {
+      sqlite.exec(schema.replaceAll('BYTEA', 'BLOB'));
+      try { sqlite.exec("ALTER TABLE orders ADD COLUMN file_name TEXT DEFAULT 'document.pdf';"); } catch {}
+      try { sqlite.exec("ALTER TABLE orders ADD COLUMN priority INTEGER DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN status_note TEXT DEFAULT 'Ready';"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN is_paused INTEGER DEFAULT 0;"); } catch {}
+    }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {
       sqlite.exec('BEGIN IMMEDIATE');

@@ -52,7 +52,16 @@ export async function createApp({ database, seed = true } = {}) {
   const ownerShop = async req => { const [shop] = await db.query('SELECT * FROM shops WHERE owner_id=$1', [req.user.id]); if (!shop) throw fail(404, 'Shop not found.'); return shop; };
   const ownerOrder = async req => { const shop = await ownerShop(req); const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]); if (!order) throw fail(404, 'Order not found.'); return order; };
   const bearer = req => req.headers.authorization?.replace(/^Bearer /, '') ?? '';
-  const publicOrder = row => { const { token: secret, document_id, provider_order, ...safe } = row; return { ...safe, options: JSON.parse(row.options) }; };
+  const publicOrder = row => {
+    const { token: secret, document_id, provider_order, ...safe } = row;
+    const parsedOptions = typeof row.options === 'string' ? JSON.parse(row.options) : (row.options || {});
+    return {
+      ...safe,
+      file_name: parsedOptions.file_name || row.file_name || 'document.pdf',
+      priority: parsedOptions.priority ?? row.priority ?? 0,
+      options: parsedOptions
+    };
+  };
   const collect = async (tx, order, reference) => {
     const changed = await tx.query("UPDATE orders SET payment='paid', status=CASE WHEN status='awaiting_payment' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) THEN 'queued' ELSE 'payment_review' END WHERE id=$1 AND payment='pending' RETURNING id", [order.id, now()]);
     if (!changed.length) return;
@@ -95,22 +104,65 @@ export async function createApp({ database, seed = true } = {}) {
       await tx.query('INSERT INTO shops (id,owner_id,slug,name,location) VALUES ($1,$2,$3,$4,$5)', [shopId, id, `shop-${shopId.slice(0, 8)}`, name, location]);
       await audit(tx, id, 'shop.registered', shopId);
     }); } catch (error) { if (String(error.message).toLowerCase().includes('unique')) throw fail(409, 'This email is already registered.'); throw error; }
-    res.status(201).json({ message: 'Shop registered. Sign in to configure prices while an admin reviews your shop.' });
+    res.status(201).json({ message: 'Shop registered successfully! Platform admin approval is required before your shop can accept customer orders. Sign in to configure prices and connect printers.' });
+  });
+  app.get('/api/shops', async (req, res) => {
+    res.json(await db.query("SELECT s.slug, s.name, s.location, s.bw, s.color FROM shops s WHERE s.status='active' ORDER BY s.name LIMIT 10"));
   });
   app.get('/api/shops/:slug', async (req, res) => {
     const [shop] = await db.query("SELECT s.id,s.slug,s.name,s.location,s.bw,s.color,s.version,s.status,p.upi_id FROM shops s LEFT JOIN shop_payments p ON p.shop_id=s.id WHERE s.slug=$1 AND s.status='active'", [req.params.slug]);
     if (!shop) throw fail(404, 'This shop is not accepting new orders.'); res.json(shop);
   });
-  let processing = 0;
+  class ConcurrencyQueue {
+    constructor(maxConcurrent = 8, timeoutMs = 30000) {
+      this.maxConcurrent = maxConcurrent;
+      this.timeoutMs = timeoutMs;
+      this.active = 0;
+      this.waiting = [];
+    }
+    async acquire() {
+      if (this.active < this.maxConcurrent) {
+        this.active++;
+        return;
+      }
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = this.waiting.findIndex(item => item.resolve === resolve);
+          if (idx !== -1) this.waiting.splice(idx, 1);
+          reject(fail(429, 'Document processing is busy with several concurrent files. Please try again shortly.'));
+        }, this.timeoutMs);
+        this.waiting.push({ resolve, timer });
+      });
+    }
+    release() {
+      this.active--;
+      if (this.waiting.length > 0) {
+        const next = this.waiting.shift();
+        clearTimeout(next.timer);
+        this.active++;
+        next.resolve();
+      }
+    }
+  }
+  const documentQueue = new ConcurrencyQueue(8, 30000);
   app.post('/api/quotes', async (req, res) => {
-    if (processing >= 2) throw fail(429, 'Document processing is busy. Please try again shortly.');
     const [shop] = await db.query("SELECT * FROM shops WHERE slug=$1 AND status='active'", [req.body.slug]);
     if (!shop) throw fail(404, 'This shop is not accepting orders.');
-    if (config.production || process.env.CONNECTOR_PROCESSING === 'true') return res.status(202).json(await queuePreparation(req, db, shop));
+    if (config.production || process.env.CONNECTOR_PROCESSING === 'true') {
+      const [onlineDevice] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2', [shop.id, new Date(Date.now() - 90000).toISOString()]);
+      if (onlineDevice) return res.status(202).json(await queuePreparation(req, db, shop));
+    }
+    await documentQueue.acquire();
     let options, prepared;
-    processing++;
-    try { options = validateOptions(req.body.options); const files = await resolveUploads(req.body.files, shop.id, db, key); prepared = await processDocument(files, options); }
-    catch (error) { throw fail(400, `Unable to prepare file: ${error.message}`); } finally { processing--; }
+    try {
+      options = validateOptions(req.body.options);
+      const files = await resolveUploads(req.body.files, shop.id, db, key);
+      prepared = await processDocument(files, options);
+    } catch (error) {
+      throw fail(400, `Unable to prepare file: ${error.message}`);
+    } finally {
+      documentQueue.release();
+    }
     const quote = { id: randomUUID(), token: token(), ...price(prepared.pages, options, shop), pages: prepared.pages, options, expires: new Date(Date.now() + 15 * 60000).toISOString() };
     const documentId = randomUUID(), sealed = encrypt(prepared.bytes, key);
     await db.transaction(async tx => {
@@ -130,12 +182,16 @@ export async function createApp({ database, seed = true } = {}) {
     if (!['cash', 'upi', 'online'].includes(req.body.method)) throw fail(400, 'Choose UPI or cash payment.');
     if (req.body.method === 'online' && !config.payments) throw fail(503, 'Online payments are not configured. Please pay at the counter.');
     const receipt = token(), id = randomUUID();
+    const fileName = String(req.body.fileName || 'document.pdf').slice(0, 150);
     await db.transaction(async tx => {
       const [quote] = await tx.query('SELECT q.* FROM quotes q JOIN shops s ON s.id=q.shop_id JOIN documents d ON d.id=q.document_id WHERE q.id=$1 AND q.token=$2 AND q.expires>$3 AND q.used=0 AND s.status=\'active\' AND d.expires>$3', [req.body.quoteId, digest(bearer(req)), now()]);
       if (!quote) throw fail(409, 'Quote expired or already used. Prepare a new preview.');
       const claimed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [quote.id]);
       if (!claimed.length) throw fail(409, 'This quote has already been ordered.');
-      await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), quote.options, quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
+      const opts = JSON.parse(quote.options);
+      opts.file_name = fileName;
+      opts.priority = 0;
+      await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), JSON.stringify(opts), quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
       if (req.body.method === 'upi') {
         const [payee] = await tx.query('SELECT * FROM shop_payments WHERE shop_id=$1', [quote.shop_id]);
         if (!payee) throw fail(409, 'This shop has not set up UPI. Choose cash.');
@@ -146,7 +202,14 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.get('/api/orders/:id', async (req, res) => {
     const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND token=$2', [req.params.id, digest(bearer(req))]);
-    if (!order) throw fail(404, 'Order not found. Use your private receipt.'); res.json(publicOrder(order));
+    if (!order) throw fail(404, 'Order not found. Use your private receipt.');
+    const activeOrders = await db.query("SELECT id, options, created FROM orders WHERE shop_id=$1 AND status IN ('queued','printing')", [order.shop_id]);
+    const currentPriority = JSON.parse(order.options).priority || 0;
+    const queueAhead = (activeOrders || []).filter(o => {
+      const p = JSON.parse(o.options).priority || 0;
+      return p > currentPriority || (p === currentPriority && o.created <= order.created);
+    }).length;
+    res.json({ ...publicOrder(order), queue_position: Math.max(1, queueAhead) });
   });
   app.post('/api/orders/:id/payment', async (req, res) => {
     const [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND method='online' AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
@@ -169,7 +232,13 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.use('/api/owner', requireRole('owner'));
   app.get('/api/owner/shop', async (req, res) => res.json(await ownerShop(req)));
-  app.get('/api/owner/orders', async (req, res) => { const shop = await ownerShop(req); res.json((await db.query('SELECT o.*,CASE WHEN EXISTS (SELECT order_id FROM print_leases WHERE order_id=o.id) THEN 1 ELSE 0 END AS automatic FROM orders o WHERE o.shop_id=$1 ORDER BY o.created DESC LIMIT 200', [shop.id])).map(publicOrder)); });
+  app.get('/api/owner/orders', async (req, res) => {
+    const shop = await ownerShop(req);
+    const rows = await db.query('SELECT o.*, CASE WHEN EXISTS (SELECT order_id FROM print_leases WHERE order_id=o.id) THEN 1 ELSE 0 END AS automatic, (SELECT name FROM devices d JOIN print_leases pl ON pl.device_id=d.id WHERE pl.order_id=o.id LIMIT 1) AS printer_name FROM orders o WHERE o.shop_id=$1 ORDER BY o.created DESC LIMIT 200', [shop.id]);
+    const formatted = rows.map(publicOrder);
+    formatted.sort((a, b) => (b.priority - a.priority) || b.created.localeCompare(a.created));
+    res.json(formatted);
+  });
   app.get('/api/owner/transactions', async (req, res) => {
     const shop = await ownerShop(req), limit = Number(req.query.limit || 100), offset = Number(req.query.offset || 0);
     const until = String(req.query.until || now());
@@ -234,6 +303,10 @@ export async function createApp({ database, seed = true } = {}) {
     if (!['active', 'suspended'].includes(req.body.status)) throw fail(400, 'Choose active or suspended.');
     await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
   });
+  app.get('/connector-setup.ps1', (req, res) => {
+    const { resolve } = import.meta.resolve ? { resolve: p => new URL(p, import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1') } : { resolve: p => p };
+    res.type('text/plain').sendFile(new URL('../connector/setup-wizard.ps1', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+  });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -254,7 +327,7 @@ export async function createApp({ database, seed = true } = {}) {
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     const status = error.status ?? (error.type === 'entity.too.large' ? 413 : 500);
-    if (status === 500) console.error('Request failed:', error.code ?? error.name);
+    if (status === 500) console.error('Request failed:', error);
     res.status(status).json({ error: status === 500 ? 'Something went wrong. Please try again.' : error.message });
   });
   const timer = setInterval(() => { maintain().catch(() => console.error('Maintenance failed; check database and cleanup alerts.')); }, 60000);

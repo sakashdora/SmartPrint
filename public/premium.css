@@ -36,6 +36,8 @@ small { font-size: 12px; }
 .brand { display: inline-flex; align-items: center; gap: 12px; color: #101b2c; font-size: 25px; font-weight: 750; letter-spacing: -.9px; white-space: nowrap; text-decoration: none; }
 .brand:hover { text-decoration: none; }
 .brand .icon { width: 32px; height: 32px; stroke-width: 1.7; }
+.brand-img { height: 36px; width: auto; max-width: 170px; object-fit: contain; display: block; }
+.sidebar-brand .brand-img { height: 32px; }
 .topbar { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px max(4vw, 24px); background: white; border-bottom: 1px solid var(--line); }
 .toplinks { display: flex; align-items: center; gap: 28px; }
 .toplinks a { display: inline-flex; align-items: center; gap: 10px; color: #243146; min-height: 44px; }
@@ -429,3 +431,89 @@ td .primary, td .secondary, td .danger { font-size: 11px; padding: 8px 11px; min
   .welcome-footer { flex-direction: column; gap: 8px; align-items: center; }
   .tracking .panel { padding: 24px 20px; }
 }
+
+/* Quick Connect Hero & Printer Hub */
+.quick-connect-hero { background: linear-gradient(135deg, #f0f6ff 0%, #ffffff 100%); border: 1px solid #bfdbfe; }
+.hero-header { margin-bottom: 18px; }
+.hero-badge { display: inline-block; padding: 4px 10px; background: #2563eb; color: white; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 8px; }
+.connect-options-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 14px; }
+.connect-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }
+.connect-card strong { display: block; margin-bottom: 6px; font-size: 14px; color: #1e293b; }
+.code-copy-box { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: #0f172a; color: #38bdf8; padding: 10px 14px; border-radius: 6px; font-family: monospace; font-size: 12px; margin-top: 10px; overflow-x: auto; }
+.code-copy-box code { white-space: nowrap; }
+
+/* Printer Cards Grid */
+.printer-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; margin-top: 16px; }
+.printer-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; background: white; transition: box-shadow 0.2s, border-color 0.2s; }
+.printer-card:hover { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); }
+.printer-card.is-online { border-color: #86efac; border-left: 4px solid #22c55e; }
+.printer-card.is-offline { border-color: #e2e8f0; border-left: 4px solid #94a3b8; }
+.printer-card.is-paused { border-color: #fde047; border-left: 4px solid #eab308; }
+.printer-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.printer-title { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.live-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot-online { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25); animation: pulseDot 2s infinite; }
+.dot-paused { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, 0.25); }
+.dot-offline { background: #94a3b8; }
+@keyframes pulseDot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.15); } }
+.capability-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 16px; }
+.chip { padding: 3px 8px; background: #f1f5f9; color: #475569; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.printer-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.small { min-height: 32px !important; padding: 6px 12px !important; font-size: 12px !important; }
+
+/* Rush Orders & Queue Elements */
+.rush-badge { background: #fef08a; color: #854d0e; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; border: 1px solid #facc15; animation: rushGlow 1.8s infinite; }
+@keyframes rushGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.5); } 50% { box-shadow: 0 0 8px rgba(250, 204, 21, 0.7); } }
+.order-cell-head { display: flex; align-items: center; gap: 8px; }
+.order-filename-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 13px; color: #334155; font-weight: 500; }
+.order-filename-row .icon { width: 14px; height: 14px; color: #64748b; }
+.printer-row-title { display: flex; align-items: center; gap: 8px; }
+.connection.paused { color: #854d0e; background: #fef9c3; }
+
+/* Tracking Live Stepper */
+.live-stepper { display: flex; align-items: center; justify-content: space-between; margin: 24px 0 28px; position: relative; padding: 0 8px; }
+.live-stepper::before { content: ''; position: absolute; top: 16px; left: 24px; right: 24px; height: 3px; background: #e2e8f0; z-index: 1; }
+.stepper-node { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; flex: 1; }
+.stepper-circle { width: 32px; height: 32px; border-radius: 50%; background: #f8fafc; border: 2px solid #cbd5e1; color: #64748b; display: grid; place-items: center; font-weight: 700; font-size: 12px; transition: all 0.3s; }
+.stepper-node.is-complete .stepper-circle { background: #22c55e; border-color: #22c55e; color: white; }
+.stepper-node.is-current .stepper-circle { background: #2563eb; border-color: #2563eb; color: white; box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.2); }
+.stepper-label { font-size: 11px; font-weight: 600; color: #64748b; white-space: nowrap; }
+.stepper-node.is-complete .stepper-label, .stepper-node.is-current .stepper-label { color: #0f172a; }
+
+/* Queue Position Callout */
+.queue-notice-card { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 14px 18px; margin: 18px 0; }
+.queue-stat { display: flex; align-items: center; gap: 14px; }
+.queue-pos-num { font-size: 28px; font-weight: 800; color: #1d4ed8; }
+.order-specs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 18px 0; }
+.order-specs-grid div { display: flex; flex-direction: column; gap: 2px; }
+.order-specs-grid span { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600; }
+.order-specs-grid strong { font-size: 13px; color: #1e293b; }
+
+/* Drag and Drop Hover */
+.preview-panel.is-dragging { border-color: #2563eb; background: #eff6ff; }
+
+/* Shop Picker Grid */
+.shop-picker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 24px; text-align: left; }
+.shop-picker-card { display: flex; flex-direction: column; gap: 8px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; transition: transform 0.2s, box-shadow 0.2s; text-decoration: none; color: inherit; }
+/* Real-Time Hardware Discovery Styles */
+.scanner-panel { margin-bottom: 24px; border-left: 4px solid #2563eb; }
+.scanned-printers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-top: 18px; }
+.scanned-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.2s, box-shadow 0.2s; position: relative; }
+.scanned-card:hover { border-color: #cbd5e1; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04); }
+.scanned-card.is-default { border-color: #93c5fd; background: #f0f7ff; }
+.scanned-card-header { display: flex; gap: 12px; align-items: flex-start; }
+.scanned-icon { width: 38px; height: 38px; border-radius: 8px; display: grid; place-items: center; font-size: 18px; flex-shrink: 0; }
+.scanned-icon.icon-wifi { background: #e0f2fe; }
+.scanned-icon.icon-wired { background: #fef3c7; }
+.scanned-icon.icon-printer { background: #f1f5f9; }
+.scanned-title-box { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.scanned-title-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.connection-label { font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; padding: 2px 6px; }
+.label-wifi { background: #dbeafe; color: #1e40af; }
+.label-wired { background: #fef3c7; color: #92400e; }
+.label-virtual { background: #f1f5f9; color: #475569; }
+.chip-gold { background: #fef08a; color: #854d0e; font-weight: 700; border: 1px solid #facc15; }
+.scanned-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.scanned-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px dashed #e2e8f0; }
+
+

@@ -1,8 +1,40 @@
 import { showDocument, downloadPdf } from './viewer.js';
 import { icon } from './ui.js';
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
-  const slug = new URLSearchParams(location.search).get('shop') || (health.demo ? 'campus-print' : '');
-  if (!slug) { mount(`<main class="welcome"><div class="welcome-icon">${icon('qr')}</div><span class="eyebrow">PRINT, SIMPLIFIED</span><h1>Your next print starts here.</h1><p class="muted">Scan the SmartPrint QR at your shop to choose a file, check the preview and pay.</p><div class="welcome-steps"><span>${icon('upload')} Upload your file</span><span>${icon('file')} Check your preview</span><span>${icon('printer')} Pay & collect</span></div><div class="welcome-footer"><span>Own a print shop?</span><a href="#register">Register your shop ${icon('arrow')}</a></div></main>`); return; }
+  let slug = new URLSearchParams(location.search).get('shop');
+  if (!slug) {
+    let activeShops = [];
+    try { activeShops = await api('/api/shops'); } catch {}
+    if (activeShops.length === 1) {
+      slug = activeShops[0].slug;
+    } else if (activeShops.length > 1) {
+      mount(`<main class="welcome">
+        <div class="welcome-icon">${icon('shop')}</div>
+        <span class="eyebrow">SMARTPRINT HUBS</span>
+        <h1>Select your print shop</h1>
+        <p class="muted">Choose an active print shop near you to upload, preview and print.</p>
+        <div class="shop-picker-grid">
+          ${activeShops.map(s => `<a class="shop-picker-card" href="/?shop=${encodeURIComponent(s.slug)}">
+            <div class="shop-picker-head">
+              <strong>${escape(s.name)}</strong>
+              <span class="badge active">Open</span>
+            </div>
+            <p class="muted small">${escape(s.location)}</p>
+            <div class="shop-picker-rates">
+              <span>B&W: ${money(s.bw)}</span> · <span>Color: ${money(s.color)}</span>
+            </div>
+            <span class="primary small">Print here →</span>
+          </a>`).join('')}
+        </div>
+      </main>`);
+      return;
+    } else if (health.demo) {
+      slug = 'campus-print';
+    } else {
+      mount(`<main class="welcome"><div class="welcome-icon">${icon('qr')}</div><span class="eyebrow">PRINT, SIMPLIFIED</span><h1>Your next print starts here.</h1><p class="muted">Scan the SmartPrint QR at your shop to choose a file, check the preview and pay.</p><div class="welcome-steps"><span>${icon('upload')} Upload your file</span><span>${icon('file')} Check your preview</span><span>${icon('printer')} Pay & collect</span></div><div class="welcome-footer"><span>Own a print shop?</span><a href="#register">Register your shop ${icon('arrow')}</a></div></main>`);
+      return;
+    }
+  }
   const shop = await api(`/api/shops/${encodeURIComponent(slug)}`);
   let files = [], quote, viewer, revision = 0, generating = false, output;
   mount(`<main class="customer-shell">
@@ -88,7 +120,23 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   place.onclick = async () => {
     if (!quote || Date.parse(quote.expires) <= Date.now()) { invalidate(); notify('The price quote expired. Update your preview.'); return; }
     place.disabled = true;
-    try { const result = await api('/api/orders', { method: 'POST', token: quote.token, body: { quoteId: quote.id, method: document.querySelector('#method').value } }); viewer?.destroy(); onOrder(result); }
+    try {
+      const fileName = files.map(f => f.name).join(' + ') || 'document.pdf';
+      const result = await api('/api/orders', { method: 'POST', token: quote.token, body: { quoteId: quote.id, method: document.querySelector('#method').value, fileName } });
+      viewer?.destroy();
+      onOrder(result);
+    }
     catch (error) { document.querySelector('#print-error').textContent = error.message; place.disabled = false; }
   };
+  const dropPanel = document.querySelector('.preview-panel');
+  if (dropPanel) {
+    ['dragenter', 'dragover'].forEach(name => dropPanel.addEventListener(name, e => { e.preventDefault(); dropPanel.classList.add('is-dragging'); }));
+    ['dragleave', 'drop'].forEach(name => dropPanel.addEventListener(name, e => { e.preventDefault(); dropPanel.classList.remove('is-dragging'); }));
+    dropPanel.addEventListener('drop', e => {
+      if (e.dataTransfer?.files?.length) {
+        document.querySelector('#files').files = e.dataTransfer.files;
+        document.querySelector('#files').dispatchEvent(new Event('change'));
+      }
+    });
+  }
 }

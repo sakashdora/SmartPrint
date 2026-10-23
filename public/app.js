@@ -8,7 +8,7 @@ const app = document.querySelector('#app');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const money = n => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n / 100);
 const time = value => new Date(value).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-const statusLabels = { awaiting_payment: 'Awaiting payment', queued: 'Ready', awaiting_confirmation: 'Check output', needs_review: 'Needs review', payment_review: 'Payment review', bw: 'B&W', upi: 'UPI', cash: 'Cash' };
+const statusLabels = { awaiting_payment: 'Awaiting payment', queued: 'Ready', awaiting_confirmation: 'Check output', needs_review: 'Needs review', payment_review: 'Payment review', bw: 'B&W', upi: 'UPI', cash: 'Cash', pending: 'Pending Approval', active: 'Approved & Active', suspended: 'Suspended' };
 const badge = value => `<span class="badge ${escape(value)}">${escape(statusLabels[value] || value.replaceAll('_', ' '))}</span>`;
 let health, me, receipt, transactionOffset = 0, queueFilter = 'all', shopFilter = 'all';
 try { receipt = JSON.parse(sessionStorage.getItem('receipt') || 'null'); } catch { sessionStorage.removeItem('receipt'); }
@@ -69,7 +69,20 @@ async function owner(view) {
     if (action === 'upi-confirm') { reference = prompt('Check the credit in your OWN UPI or bank app, then enter its 12-digit reference:'); if (!reference) return; }
     if (action === 'refund') { reference = prompt('Return the money first. Enter the refund reference (or cash receipt reference):'); if (!reference) return; }
     if (action === 'cancel' && !confirm('Cancel this order and delete its file? Any collected payment still needs a refund.')) return;
-    await api(`/api/owner/orders/${id}/${action}`, { method: 'POST', body: { confirmed: true, reference } }); notify(action === 'complete' ? 'Print completed. Live file deleted.' : 'Order updated.'); await owner(view);
+    await api(`/api/owner/orders/${id}/${action}`, { method: 'POST', body: { confirmed: true, reference } });
+    const actionMessages = {
+      complete: 'Print confirmed. Live file securely deleted.',
+      priority: '⚡ Job marked as Rush & moved to front of queue!',
+      retry: '🔄 Job re-queued for printer.',
+      start: 'Print started. File ready for printing.',
+      cash: 'Cash payment collected. Order moved to print queue.',
+      'upi-confirm': 'UPI payment confirmed. Order moved to print queue.',
+      'resolve-failed': 'Print marked as stopped/failed. File retained for refund/retry.',
+      cancel: 'Order cancelled and file deleted.',
+      refund: 'Refund recorded.'
+    };
+    notify(actionMessages[action] || 'Order updated.');
+    await owner(view);
   }));
 }
 function empty(title, body) { return `<div class="empty"><strong>${title}</strong><span class="muted">${body}</span></div>`; }

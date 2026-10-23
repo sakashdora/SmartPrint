@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { token, digest, decrypt, encrypt } from './security.js';
 import { sendPdf } from './uploads.js';
 import { price, validateOptions } from './print-options.js';
+import { generateTestPage } from './test-page.js';
+
+const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
 const fail = (status, message) => Object.assign(new Error(message), { status });
+
 export async function queuePreparation(req, db, shop) {
   const files = req.body.files;
   if (!Array.isArray(files) || files.length < 1 || files.length > 2) throw fail(400, 'Choose one document or two images.');
@@ -14,7 +22,7 @@ export async function queuePreparation(req, db, shop) {
   await db.transaction(async tx => {
     await tx.query('UPDATE shops SET version=version WHERE id=$1 RETURNING id', [shop.id]);
     const pending = await tx.query("SELECT files FROM preparations WHERE shop_id=$1 AND state IN ('queued','processing') AND expires>$2", [shop.id, now()]);
-    if (pending.length >= 20) throw fail(429, 'This shop is preparing several files. Please try again shortly.');
+    if (pending.length >= 50) throw fail(429, 'This shop is preparing several files. Please try again shortly.');
     const [device] = await tx.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 AND (color=1 OR $3=0) AND (duplex=1 OR $4=0)', [shop.id, new Date(Date.now() - 90000).toISOString(), options.color === 'color' ? 1 : 0, options.duplex ? 1 : 0]);
     if (!device) throw fail(503, 'No online shop printer supports these settings. Ask the shop to connect a compatible printer or choose different colour/sides settings.');
     for (const file of files) {
@@ -30,15 +38,184 @@ export async function queuePreparation(req, db, shop) {
   });
   return { pending: true, id, token: secret };
 }
+
+export async function scanWindowsPrinters() {
+  try {
+    const script = `Get-CimInstance Win32_Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Default, Network | ConvertTo-Json -Compress`;
+    const { stdout } = await runExec('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 8000 });
+    if (!stdout || !stdout.trim()) return [];
+    const parsed = JSON.parse(stdout);
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    return list.filter(p => p && p.Name && !/OneNote|Fax|XPS/i.test(p.Name)).map(p => {
+      const port = String(p.PortName || '').trim();
+      let connectionType = 'Local';
+      let isWifi = false;
+      let isWired = false;
+      if (/^USB/i.test(port) || /^DOT4/i.test(port) || /^LPT/i.test(port)) {
+        connectionType = 'Wired USB';
+        isWired = true;
+      } else if (/^WSD/i.test(port) || /^TCP/i.test(port) || /^IP_/i.test(port) || /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(port) || p.Network) {
+        connectionType = 'WiFi / Wireless Network';
+        isWifi = true;
+      } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(p.Name)) {
+        connectionType = 'Virtual / PDF';
+      }
+      const isColor = !/mono|black/i.test(p.DriverName || p.Name);
+      const isDuplex = /DCP-|MFC-|LaserJet|Duplex/i.test(p.DriverName || p.Name);
+      return {
+        name: p.Name,
+        portName: port,
+        driverName: p.DriverName || '',
+        connectionType,
+        isWifi,
+        isWired,
+        isDefault: Boolean(p.Default),
+        status: p.PrinterStatus === 3 ? 'Ready' : 'Normal',
+        color: isColor,
+        duplex: isDuplex
+      };
+    });
+  } catch (err) {
+    return [];
+  }
+}
+
+export const deviceMetadata = new Map();
+
 export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance }) {
   const owner = requireRole('owner');
-  app.get('/api/owner/devices', owner, async (req, res) => { const shop = await ownerShop(req); res.json(await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1', [shop.id])); });
+
+  app.get('/api/owner/printers/scan', owner, async (req, res) => {
+    const list = await scanWindowsPrinters();
+    res.json(list);
+  });
+
+  app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const printerName = String(req.body.name || '').trim();
+    if (!printerName) throw fail(400, 'Choose a printer.');
+
+    let [device] = await db.query('SELECT id, name, active FROM devices WHERE shop_id=$1 AND name=$2', [shop.id, printerName]);
+    let secret;
+    if (!device) {
+      const id = randomUUID();
+      secret = token();
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex) VALUES ($1,$2,$3,$4,$5,$6)', [
+        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0
+      ]);
+      device = { id, name: printerName, active: 1 };
+    } else {
+      secret = token();
+      await db.query('UPDATE devices SET active=1, token=$1 WHERE id=$2', [digest(secret), device.id]);
+    }
+
+    deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
+
+    const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
+    mkdirSync(connectorRoot, { recursive: true });
+    const settingsPath = join(connectorRoot, 'settings.json');
+    writeFileSync(settingsPath, JSON.stringify({
+      Url: process.env.PUBLIC_BASE_URL || 'http://localhost:3000',
+      Token: secret,
+      Printer: printerName
+    }, null, 2));
+
+    try {
+      const child = spawn(process.execPath, ['connector/index.js'], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          SMARTPRINT_URL: 'http://localhost:3000',
+          SMARTPRINT_DEVICE_TOKEN: secret,
+          SMARTPRINT_PRINTER: printerName
+        }
+      });
+      child.unref();
+    } catch {}
+
+    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2', [now(), device.id]);
+    await audit(db, req.user.id, 'device.autoconnected', device.id);
+    res.json({ ok: true, id: device.id, name: device.name, token: secret, message: `${printerName} connected successfully!` });
+  });
+  app.get('/api/owner/devices', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    res.json(rows.map(d => {
+      const meta = deviceMetadata.get(d.id) || {};
+      const isOnline = d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 90000);
+      return {
+        ...d,
+        is_paused: meta.is_paused ?? 0,
+        status_note: meta.status_note ?? (meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
+      };
+    }));
+  });
   app.post('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req), name = String(req.body.name || '').trim();
     if (name.length < 2 || name.length > 100) throw fail(400, 'Enter a printer name.');
     const id = randomUUID(), secret = token();
     await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex) VALUES ($1,$2,$3,$4,$5,$6)', [id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0]);
-    await audit(db, req.user.id, 'device.paired', id); res.status(201).json({ id, token: secret });
+    deviceMetadata.set(id, { is_paused: 0, status_note: 'Ready' });
+    await audit(db, req.user.id, 'device.paired', id);
+    res.status(201).json({ id, token: secret });
+  });
+  app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT id FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Device not found.');
+    const current = deviceMetadata.get(device.id)?.is_paused ?? 0;
+    const nextState = current ? 0 : 1;
+    deviceMetadata.set(device.id, { is_paused: nextState, status_note: nextState ? 'Paused by owner' : 'Ready' });
+    await audit(db, req.user.id, nextState ? 'device.paused' : 'device.resumed', device.id);
+    res.json({ ok: true, is_paused: nextState });
+  });
+  app.post('/api/owner/devices/:id/test-print', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Active device not found.');
+    const testBytes = await generateTestPage(shop.name, device.name);
+    const docId = randomUUID(), orderId = randomUUID(), receipt = token();
+    const sealed = encrypt(testBytes, key);
+    const options = { color: device.color ? 'color' : 'bw', duplex: false, copies: 1, layout: 'single', range: '', file_name: 'SmartPrint_Diagnostic_Test.pdf', priority: 100 };
+    await db.transaction(async tx => {
+      await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [docId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
+      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid','queued',$11)", [orderId, shop.id, docId, digest(receipt), JSON.stringify(options), 1, 1, 1, 0, 'cash', now()]);
+      await audit(tx, req.user.id, 'device.test_printed', device.id);
+    });
+    res.json({ ok: true, orderId, message: 'Test page queued for printer!' });
+  });
+  app.get('/api/owner/devices/:id/setup-script', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Device not found.');
+    const baseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
+    res.setHeader('Content-Disposition', `attachment; filename="smartprint-setup-${device.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.bat"`);
+    res.type('text/plain').send(`@echo off\r\nchcp 65001 >nul\r\necho ====================================================\r\necho   SmartPrint Printer Connector Auto-Setup\r\necho   Shop: ${shop.name}\r\necho   Device: ${device.name}\r\necho ====================================================\r\necho.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_PRINTER='${device.name}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"\r\npause\r\n`);
+  });
+  app.post('/api/owner/orders/:id/priority', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [order] = await db.query('SELECT id, options FROM orders WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    if (!order) throw fail(404, 'Order not found.');
+    const opts = JSON.parse(order.options);
+    opts.priority = 10;
+    await db.query('UPDATE orders SET options=$1 WHERE id=$2', [JSON.stringify(opts), order.id]);
+    await audit(db, req.user.id, 'order.prioritized', req.params.id);
+    res.json({ ok: true });
+  });
+  app.post('/api/owner/orders/:id/retry', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    await db.transaction(async tx => {
+      const [order] = await tx.query("SELECT id, options FROM orders WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','failed','awaiting_confirmation','printing')", [req.params.id, shop.id]);
+      if (!order) throw fail(400, 'Order cannot be retried in current status.');
+      await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
+      const opts = JSON.parse(order.options);
+      opts.priority = 5;
+      await tx.query("UPDATE orders SET status='queued', options=$1 WHERE id=$2", [JSON.stringify(opts), order.id]);
+      await audit(tx, req.user.id, 'order.retried', order.id);
+    });
+    res.json({ ok: true });
   });
   app.delete('/api/owner/devices/:id', owner, async (req, res) => { const shop = await ownerShop(req); const changed = await db.query('UPDATE devices SET active=0 WHERE id=$1 AND shop_id=$2 RETURNING id', [req.params.id, shop.id]); if (!changed.length) throw fail(404, 'Device not found.'); await audit(db, req.user.id, 'device.revoked', req.params.id); res.json({ ok: true }); });
   app.get('/api/preparations/:id', async (req, res) => {
@@ -103,8 +280,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const result = await db.transaction(async tx => {
       // Serialize claims from duplicated connector processes using the same credential.
       await tx.query('UPDATE devices SET heartbeat=$1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
+      if (deviceMetadata.get(req.device.id)?.is_paused) return null;
       const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted')", [req.device.id]); if (existing) return null;
-      const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created LIMIT 200", [req.device.shop_id]);
+      const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
+      candidates.sort((a, b) => {
+        const pA = JSON.parse(a.options).priority || 0;
+        const pB = JSON.parse(b.options).priority || 0;
+        return (pB - pA) || (a.created.localeCompare(b.created));
+      });
       const order = candidates.find(o => { const options = JSON.parse(o.options); return (options.color !== 'color' || req.device.color) && (!options.duplex || req.device.duplex); });
       if (!order) return null;
       const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]); if (!changed.length) return null;

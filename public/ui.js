@@ -26,4 +26,4 @@ const paths = {
 export function icon(name, className = '') {
   return `<svg class="icon ${className}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
-export const brand = () => `<a class="brand" href="#print" aria-label="SmartPrint home">${icon('printer')}<span>SmartPrint</span></a>`;
+export const brand = () => `<a class="brand" href="#print" aria-label="SmartPrint home"><img class="brand-img" src="/logo.png" alt="SmartPrint"></a>`;
