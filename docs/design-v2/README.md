@@ -1,6 +1,6 @@
 # SmartPrint — premium interface concepts
 
-23 October 2026. Image mockups created before implementing the next visual redesign. These images contain fictional sample data and describe a design direction, not completed application screens.
+23 October 2026. These image mockups preceded the approved visual redesign. Their fictional sample data remains illustrative. The design is now implemented in the application; see [current page specification](../05-page-designs.md) and [actual screenshots](../screenshots/premium/). API-backed totals and available destinations replace illustrative metrics and links.
 
 ## Screens
 

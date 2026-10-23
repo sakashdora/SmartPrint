@@ -8,7 +8,7 @@ export function watchUpdates(load, initial, changed, milliseconds = 5000) {
     if (cancelled) return;
     try {
       // Preserve typed references and account forms while they are being edited.
-      if (!document.hidden && !document.querySelector('dialog[open],button[data-action]:disabled') && !document.activeElement?.matches('input,select,textarea')) {
+      if (!document.hidden && !document.querySelector('dialog[open],button[data-action]:disabled,button[data-shop]:disabled,#nav-toggle[aria-expanded="true"]') && !document.activeElement?.matches('input,select,textarea')) {
         const next = await load(), value = JSON.stringify(next);
         if (!cancelled && value !== signature) { signature = value; await changed(next); }
       }

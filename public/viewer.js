@@ -21,7 +21,7 @@ export async function showDocument(container, blob, { title = 'Print preview' } 
   label.setAttribute('aria-live', 'polite'); tools.append(previous, label, next);
   const frame = document.createElement('div'); frame.className = 'paper-frame';
   const canvas = document.createElement('canvas'); canvas.setAttribute('aria-label', title); canvas.setAttribute('role', 'img'); frame.append(canvas);
-  container.replaceChildren(tools, frame);
+  container.replaceChildren(frame, tools);
   async function draw() {
     previous.disabled = next.disabled = true;
     if (rendering) { rendering.cancel(); try { await rendering.promise; } catch {} }
