@@ -4,13 +4,18 @@ export function configuration() {
 
   // If in production and PUBLIC_BASE_URL is missing or pointing to localhost:
   if (production && (!rawUrl || rawUrl.includes('localhost'))) {
-    if (process.env.VERCEL_URL) {
+    if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+      rawUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+    } else if (process.env.RAILWAY_STATIC_URL) {
+      rawUrl = `https://${process.env.RAILWAY_STATIC_URL}`;
+    } else if (process.env.VERCEL_URL) {
       rawUrl = `https://${process.env.VERCEL_URL}`;
     }
   }
 
   if (!rawUrl) {
-    rawUrl = production ? (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://smartprint.vercel.app') : 'http://localhost:3000';
+    const defaultHost = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || process.env.VERCEL_URL;
+    rawUrl = production ? (defaultHost ? `https://${defaultHost}` : 'https://smartprint.up.railway.app') : 'http://localhost:3000';
   }
 
   // Ensure protocol

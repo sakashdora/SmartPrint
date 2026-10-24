@@ -345,5 +345,6 @@ export async function createApp({ database, seed = true } = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { app } = await createApp();
   const port = Number(process.env.PORT || 3000);
-  app.listen(port, process.env.HOST || '127.0.0.1', () => console.log(`SmartPrint listening on port ${port}`));
+  const host = process.env.HOST || (process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
+  app.listen(port, host, () => console.log(`SmartPrint listening on ${host}:${port}`));
 }
