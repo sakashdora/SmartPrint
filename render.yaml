@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: smartprint
+    runtime: node
+    plan: free
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: DATABASE_URL
+        sync: false
+      - key: FILE_ENCRYPTION_KEY
+        sync: false
+      - key: CRON_SECRET
+        sync: false

@@ -4,7 +4,13 @@ export function configuration() {
 
   // If in production and PUBLIC_BASE_URL is missing or pointing to localhost:
   if (production && (!rawUrl || rawUrl.includes('localhost'))) {
-    if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    if (process.env.RENDER_EXTERNAL_URL) {
+      rawUrl = process.env.RENDER_EXTERNAL_URL;
+    } else if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+      rawUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
+    } else if (process.env.KOYEB_PUBLIC_DOMAIN) {
+      rawUrl = `https://${process.env.KOYEB_PUBLIC_DOMAIN}`;
+    } else if (process.env.RAILWAY_PUBLIC_DOMAIN) {
       rawUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
     } else if (process.env.RAILWAY_STATIC_URL) {
       rawUrl = `https://${process.env.RAILWAY_STATIC_URL}`;
@@ -14,8 +20,8 @@ export function configuration() {
   }
 
   if (!rawUrl) {
-    const defaultHost = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || process.env.VERCEL_URL;
-    rawUrl = production ? (defaultHost ? `https://${defaultHost}` : 'https://smartprint.up.railway.app') : 'http://localhost:3000';
+    const defaultHost = process.env.RENDER_EXTERNAL_HOSTNAME || process.env.KOYEB_PUBLIC_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || process.env.VERCEL_URL;
+    rawUrl = production ? (defaultHost ? `https://${defaultHost}` : (process.env.RENDER_EXTERNAL_URL || 'https://smartprint.onrender.com')) : 'http://localhost:3000';
   }
 
   // Ensure protocol
