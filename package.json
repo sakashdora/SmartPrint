@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env --watch server/index.js",
     "start": "node --env-file-if-exists=.env server/migrate.js && node --env-file-if-exists=.env server/index.js",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
     "check": "node scripts/check.mjs",
     "migrate": "node --env-file-if-exists=.env server/migrate.js",
     "build": "node scripts/build.mjs",

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { token, digest, decrypt, encrypt } from './security.js';
 import { sendPdf } from './uploads.js';
 import { price, validateOptions } from './print-options.js';
-import { generateTestPage } from './test-page.js';
+import { generateTestPage } from './diagnostic-page.js';
 
 const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
