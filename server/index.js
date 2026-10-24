@@ -41,7 +41,7 @@ export async function createApp({ database, seed = true } = {}) {
     if (sessionId) {
       req.sessionId = digest(sessionId);
       const [user] = await db.query('SELECT u.id,u.email,u.role,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
-      if (user) { req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: config.production && !user.mfa }; }
+      if (user) { req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(process.env.ENFORCE_MFA === 'true' && !user.mfa) }; }
     }
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook') await limitRate(db, 'mutations', req.ip, 120);
     if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 30, 900);
@@ -296,7 +296,14 @@ export async function createApp({ database, seed = true } = {}) {
     if (![bw, color].every(n => Number.isInteger(n) && n >= 1 && n <= 100000)) throw fail(400, 'Prices must be ₹0.01–₹1,000 per side.');
     await db.transaction(async tx => { await tx.query('UPDATE shops SET bw=$1,color=$2,version=version+1 WHERE id=$3', [bw, color, shop.id]); await audit(tx, req.user.id, 'prices.updated', shop.id); }); res.json({ ok: true });
   });
-  app.get('/api/owner/qr', async (req, res) => { const shop = await ownerShop(req); const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, process.env.PUBLIC_BASE_URL || 'http://localhost:3000').href; res.json({ url, image: await QRCode.toDataURL(url, { width: 320, margin: 2 }) }); });
+  app.get('/api/owner/qr', async (req, res) => {
+    const shop = await ownerShop(req);
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const base = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
+    const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, base).href;
+    res.json({ url, image: await QRCode.toDataURL(url, { width: 320, margin: 2 }) });
+  });
   app.use('/api/admin', requireRole('admin'));
   app.get('/api/admin/shops', async (req, res) => res.json(await db.query('SELECT s.*,u.email FROM shops s JOIN users u ON u.id=s.owner_id ORDER BY s.name')));
   app.get('/api/admin/audit', async (req, res) => res.json(await db.query('SELECT id,actor,action,target,created FROM audit ORDER BY created DESC LIMIT 100')));

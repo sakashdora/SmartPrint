@@ -70,6 +70,11 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, fi
         <span class="connection ${isDevOnline ? (device.is_paused ? 'paused' : 'online') : 'offline'}">${isDevOnline ? (device.is_paused ? 'Paused' : 'Online') : 'Offline'}</span>
       </div>`;
     }).join('') : `<div class="quiet-state">${icon('printer')}<strong>No printers connected</strong><p>Connect your Windows shop computer to receive print jobs.</p><a href="#printers">Set up a printer ${icon('arrow')}</a></div>`}</section>
+    <section class="panel qr-spotlight-panel">
+      <div class="panel-heading"><h2>Shop Counter QR</h2><a href="#settings">Settings</a></div>
+      <p class="muted small">Display this QR code at your shop counter. Customers scan it with their phone camera to order.</p>
+      <a class="primary wide qr-action-btn" href="#settings">${icon('qr')} View & Print Shop QR Card →</a>
+    </section>
     <p class="aside-note">${icon('lock')} Files are deleted after confirmed printing. Transaction records stay available.</p></aside></div>`;
 }
 

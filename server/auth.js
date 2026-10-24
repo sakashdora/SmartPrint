@@ -8,7 +8,7 @@ export function authRoutes(app, db, key, config) {
     const secret = token();
     await db.query('INSERT INTO sessions (id,user_id,expires,mfa) VALUES ($1,$2,$3,$4)', [digest(secret), user.id, new Date(Date.now() + 8 * 3600000).toISOString(), mfa ? 1 : 0]);
     res.cookie('sp_session', secret, cookieOptions);
-    return { id: user.id, email: user.email, role: user.role, mfaRequired: config.production && !mfa };
+    return { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(process.env.ENFORCE_MFA === 'true' && !mfa) };
   }
   const requireSession = (req, res, next) => req.user ? next() : next(fail(401, 'Please sign in.'));
   app.post('/api/auth/login', async (req, res) => {

@@ -3,39 +3,58 @@ import { icon } from './ui.js';
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
   if (!slug) {
-    let activeShops = [];
-    try { activeShops = await api('/api/shops'); } catch {}
-    if (activeShops.length === 1) {
-      slug = activeShops[0].slug;
-    } else if (activeShops.length > 1) {
-      mount(`<main class="welcome">
-        <div class="welcome-icon">${icon('shop')}</div>
-        <span class="eyebrow">SMARTPRINT HUBS</span>
-        <h1>Select your print shop</h1>
-        <p class="muted">Choose an active print shop near you to upload, preview and print.</p>
-        <div class="shop-picker-grid">
-          ${activeShops.map(s => `<a class="shop-picker-card" href="/?shop=${encodeURIComponent(s.slug)}">
-            <div class="shop-picker-head">
-              <strong>${escape(s.name)}</strong>
-              <span class="badge active">Open</span>
-            </div>
-            <p class="muted small">${escape(s.location)}</p>
-            <div class="shop-picker-rates">
-              <span>B&W: ${money(s.bw)}</span> · <span>Color: ${money(s.color)}</span>
-            </div>
-            <span class="primary small">Print here →</span>
-          </a>`).join('')}
+    mount(`<main class="welcome">
+      <div class="welcome-icon">${icon('qr')}</div>
+      <span class="eyebrow">SMARTPRINT · CONTACTLESS SCAN & PRINT</span>
+      <h1>Scan shop QR code to print</h1>
+      <p class="muted">To print your documents, please scan the official SmartPrint QR code placed at your print shop counter. Each shop has its own unique QR code.</p>
+      
+      <div class="welcome-steps">
+        <div class="welcome-step-card">
+          <span class="step-badge">Step 1</span>
+          <strong>${icon('qr')} Scan at Counter</strong>
+          <p class="muted small">Scan the shop's counter QR code with your phone camera.</p>
         </div>
-      </main>`);
-      return;
-    } else if (health.demo) {
-      slug = 'campus-print';
-    } else {
-      mount(`<main class="welcome"><div class="welcome-icon">${icon('qr')}</div><span class="eyebrow">PRINT, SIMPLIFIED</span><h1>Your next print starts here.</h1><p class="muted">Scan the SmartPrint QR at your shop to choose a file, check the preview and pay.</p><div class="welcome-steps"><span>${icon('upload')} Upload your file</span><span>${icon('file')} Check your preview</span><span>${icon('printer')} Pay & collect</span></div><div class="welcome-footer"><span>Own a print shop?</span><a href="#register">Register your shop ${icon('arrow')}</a></div></main>`);
-      return;
-    }
+        <div class="welcome-step-card">
+          <span class="step-badge">Step 2</span>
+          <strong>${icon('file')} Upload & Options</strong>
+          <p class="muted small">Upload your PDF or image, pick B&W or Colour and pages.</p>
+        </div>
+        <div class="welcome-step-card">
+          <span class="step-badge">Step 3</span>
+          <strong>${icon('printer')} Pay & Collect</strong>
+          <p class="muted small">Pay by UPI or cash, then collect your printed document.</p>
+        </div>
+      </div>
+
+      <div class="landing-portal-actions">
+        <a class="primary wide" href="#register">Register Your Shop →</a>
+        <a class="secondary wide" href="#login">Shop & Admin Sign In</a>
+      </div>
+
+      <div class="welcome-footer">
+        <span>Already placed an order?</span>
+        <a href="#track">Track order progress ${icon('arrow')}</a>
+      </div>
+    </main>`);
+    return;
   }
-  const shop = await api(`/api/shops/${encodeURIComponent(slug)}`);
+  let shop;
+  try {
+    shop = await api(`/api/shops/${encodeURIComponent(slug)}`);
+  } catch (err) {
+    mount(`<main class="welcome">
+      <div class="welcome-icon">${icon('alert')}</div>
+      <span class="eyebrow">SHOP NOT FOUND</span>
+      <h1>Unable to open this print shop</h1>
+      <p class="muted">${escape(err.message || 'This shop is currently unavailable or pending approval.')}</p>
+      <div class="landing-portal-actions">
+        <a class="primary" href="/">Return to Home</a>
+        <a class="secondary" href="#register">Register Your Shop</a>
+      </div>
+    </main>`);
+    return;
+  }
   let files = [], quote, viewer, revision = 0, generating = false, output;
   mount(`<main class="customer-shell">
     <div class="shop-context">${icon('shop')}<strong>${escape(shop.name)}</strong><span class="badge active">Open</span><span class="shop-location">${escape(shop.location)}</span></div>

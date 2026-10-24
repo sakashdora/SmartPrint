@@ -516,4 +516,18 @@ td .primary, td .secondary, td .danger { font-size: 11px; padding: 8px 11px; min
 .scanned-meta { display: flex; flex-wrap: wrap; gap: 6px; }
 .scanned-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px dashed #e2e8f0; }
 
+/* Landing QR Portal Styles */
+.welcome-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 32px 0 28px; text-align: left; }
+.welcome-step-card { background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.02); }
+.step-badge { align-self: flex-start; font-size: 11px; font-weight: 700; background: #e0e7ff; color: #4338ca; padding: 2px 8px; border-radius: 12px; }
+.welcome-step-card strong { display: flex; align-items: center; gap: 8px; font-size: 15px; color: #0f172a; }
+.landing-portal-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 24px 0 32px; }
+.landing-portal-actions .primary, .landing-portal-actions .secondary { min-width: 200px; padding: 14px 24px; font-size: 15px; border-radius: 8px; text-align: center; }
+
+/* Shop Counter QR Spotlight */
+.qr-spotlight-panel { border-left: 4px solid #10b981; background: #f0fdf4; border-color: #bbf7d0; }
+.qr-spotlight-panel h2 { color: #065f46; }
+.qr-action-btn { background: #059669; border-color: #059669; margin-top: 12px; }
+.qr-action-btn:hover { background: #047857; }
+
 

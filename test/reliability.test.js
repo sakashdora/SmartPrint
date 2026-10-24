@@ -40,9 +40,9 @@ test('prepared card artwork remains visible and black-and-white output really ha
 });
 
 test('production sessions survive app instances, require MFA, enforce origin and revoke after password change', async t => {
-  const names = ['NODE_ENV','DATABASE_URL','PUBLIC_BASE_URL','FILE_ENCRYPTION_KEY','CRON_SECRET'];
+  const names = ['NODE_ENV','DATABASE_URL','PUBLIC_BASE_URL','FILE_ENCRYPTION_KEY','CRON_SECRET','ENFORCE_MFA'];
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
-  Object.assign(process.env, { NODE_ENV: 'production', DATABASE_URL: 'postgresql://fixture:fixture@localhost/fixture?sslmode=verify-full', PUBLIC_BASE_URL: 'https://smartprint.example', FILE_ENCRYPTION_KEY: 'a'.repeat(64), CRON_SECRET: 'b'.repeat(32) });
+  Object.assign(process.env, { NODE_ENV: 'production', ENFORCE_MFA: 'true', DATABASE_URL: 'postgresql://fixture:fixture@localhost/fixture?sslmode=verify-full', PUBLIC_BASE_URL: 'https://smartprint.example', FILE_ENCRYPTION_KEY: 'a'.repeat(64), CRON_SECRET: 'b'.repeat(32) });
   const db = await openDatabase({ url: null, path: ':memory:' }); await db.migrate();
   const password = 'Example-long-password!2026', hash = await hashPassword(password);
   assert.ok(hash.startsWith('scrypt$')); assert.equal(await checkPassword('wrong', hash), false); assert.equal(await checkPassword(password, 'invalid'), false);
