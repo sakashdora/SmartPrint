@@ -51,15 +51,7 @@ function workspace(content, active, admin = false) {
   document.querySelector('.sidebar').onkeydown = event => { if (event.key === 'Escape') { toggle.setAttribute('aria-expanded', 'false'); document.querySelector('.sidebar').classList.remove('is-open'); toggle.focus(); } };
 }
 
-let deviceHeartbeatTimer = null;
-function ensureOwnerDeviceHeartbeat() {
-  if (deviceHeartbeatTimer) return;
-  deviceHeartbeatTimer = setInterval(() => {
-    if (me && me.role === 'owner') {
-      api('/api/owner/devices/heartbeat', { method: 'POST' }).catch(() => {});
-    }
-  }, 20000);
-}
+// Device heartbeats are strictly reported by the Windows Print Agent, not the web browser.
 
 const directPrintedOrders = new Set();
 async function triggerDirectPrint(id) {
@@ -96,7 +88,6 @@ async function triggerDirectPrint(id) {
 
 async function owner(view) {
   if (!me) { location.hash = 'login'; return; } if (me.role === 'admin') { location.hash = 'admin'; return; }
-  ensureOwnerDeviceHeartbeat();
   if (view === 'payments') return paymentsPage({ api, workspace, escape, notify });
   if (view === 'printers') return printersPage({ api, workspace, escape, notify });
   const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices')]);

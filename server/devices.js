@@ -198,15 +198,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   });
 
   app.post('/api/owner/devices/heartbeat', owner, async (req, res) => {
-    const shop = await ownerShop(req);
-    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE shop_id=$2 AND active=1', [now(), shop.id]);
-    res.json({ ok: true, heartbeat: now() });
+    // Owner web view check-in: return true without spoofing physical hardware heartbeat
+    res.json({ ok: true });
   });
 
   app.post('/api/owner/devices/:id/heartbeat', owner, async (req, res) => {
-    const shop = await ownerShop(req);
-    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 AND shop_id=$3', [now(), req.params.id, shop.id]);
-    res.json({ ok: true, heartbeat: now() });
+    res.json({ ok: true });
   });
 
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
@@ -221,114 +218,129 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     let secret = token();
     if (!device) {
       const id = randomUUID();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
-        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now()
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat,status_note,is_paused) VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,0)', [
+        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now(), 'Ready'
       ]);
       device = { id, name: printerName, active: 1 };
     } else {
-      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
+      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3, status_note=$4, is_paused=0 WHERE id=$5', [printerName, digest(secret), now(), 'Ready', device.id]);
       device.name = printerName;
       device.active = 1;
     }
 
-    deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
+    const serverUrl = process.env.PUBLIC_BASE_URL || (req.headers.host ? `https://${req.headers.host}` : `http://localhost:${process.env.PORT || 3000}`);
 
-    const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
-    mkdirSync(connectorRoot, { recursive: true });
-    const settingsPath = join(connectorRoot, 'settings.json');
-    let existingSumatra = '';
-    try {
-      if (existsSync(settingsPath)) {
-        const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
-        if (raw) existingSumatra = JSON.parse(raw).Sumatra || '';
-      }
-    } catch {}
-
-    const serverUrl = process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-    writeFileSync(settingsPath, JSON.stringify({
-      Url: serverUrl,
-      Token: secret,
-      Printer: printerName,
-      Sumatra: existingSumatra,
-      LastUpdated: new Date().toISOString()
-    }, null, 2), 'utf8');
-
-    // Terminate any previous connector process to prevent token or device conflict
-    const pidFile = join(connectorRoot, 'connector.pid');
-    try {
-      if (existsSync(pidFile)) {
-        const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-        if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
-          try { process.kill(oldPid, 'SIGTERM'); } catch {}
-          if (process.platform === 'win32') {
-            try { spawn('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true }); } catch {}
-          }
-        }
-      }
-    } catch {}
-
-    try {
-      const connectorScript = fileURLToPath(new URL('../connector/index.js', import.meta.url));
-      const logPath = join(connectorRoot, 'connector.log');
-      let outFd = 'ignore';
+    // If running on a local Windows machine, update local connector configuration and launch
+    if (process.platform === 'win32') {
       try {
-        const { openSync } = await import('node:fs');
-        outFd = openSync(logPath, 'a');
-      } catch {}
-      const child = spawn(process.execPath, [connectorScript], {
-        cwd: resolve(fileURLToPath(new URL('../', import.meta.url))),
-        detached: true,
-        stdio: ['ignore', outFd, outFd],
-        env: {
-          ...process.env,
-          SMARTPRINT_URL: serverUrl,
-          SMARTPRINT_DEVICE_TOKEN: secret,
-          SMARTPRINT_PRINTER: printerName
+        const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
+        mkdirSync(connectorRoot, { recursive: true });
+        const settingsPath = join(connectorRoot, 'settings.json');
+        let existingSumatra = '';
+        try {
+          if (existsSync(settingsPath)) {
+            const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
+            if (raw) existingSumatra = JSON.parse(raw).Sumatra || '';
+          }
+        } catch {}
+
+        writeFileSync(settingsPath, JSON.stringify({
+          Url: serverUrl,
+          Token: secret,
+          Printer: printerName,
+          Sumatra: existingSumatra,
+          LastUpdated: new Date().toISOString()
+        }, null, 2), 'utf8');
+
+        // Terminate any previous connector process to prevent token or device conflict
+        const pidFile = join(connectorRoot, 'connector.pid');
+        try {
+          if (existsSync(pidFile)) {
+            const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+            if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
+              try { process.kill(oldPid, 'SIGTERM'); } catch {}
+              try { spawn('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true }); } catch {}
+            }
+          }
+        } catch {}
+
+        const connectorScript = fileURLToPath(new URL('../connector/index.js', import.meta.url));
+        const logPath = join(connectorRoot, 'connector.log');
+        let outFd = 'ignore';
+        try {
+          const { openSync } = await import('node:fs');
+          outFd = openSync(logPath, 'a');
+        } catch {}
+        const child = spawn(process.execPath, [connectorScript], {
+          cwd: resolve(fileURLToPath(new URL('../', import.meta.url))),
+          detached: true,
+          stdio: ['ignore', outFd, outFd],
+          env: {
+            ...process.env,
+            SMARTPRINT_URL: serverUrl,
+            SMARTPRINT_DEVICE_TOKEN: secret,
+            SMARTPRINT_PRINTER: printerName
+          }
+        });
+        if (child.pid) {
+          writeFileSync(pidFile, String(child.pid), 'utf8');
         }
-      });
-      if (child.pid) {
-        writeFileSync(pidFile, String(child.pid), 'utf8');
+        child.unref();
+      } catch (err) {
+        console.error('[Autoconnect] Could not spawn local connector process:', err.message);
       }
-      child.unref();
-    } catch (err) {
-      console.error('[Autoconnect] Could not spawn connector process:', err.message);
     }
 
     await audit(db, req.user.id, 'device.autoconnected', device.id);
-    res.json({ ok: true, id: device.id, name: device.name, token: secret, message: `${printerName} connected successfully!` });
+    res.json({
+      ok: true,
+      id: device.id,
+      name: device.name,
+      token: secret,
+      url: serverUrl,
+      printer: printerName,
+      message: `${printerName} connected successfully!`
+    });
   });
+
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,status_note,is_paused FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(d => {
-      const meta = deviceMetadata.get(d.id) || {};
-      const isOnline = d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000);
+      const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 90000));
       return {
         ...d,
-        is_paused: meta.is_paused ?? 0,
-        status_note: meta.status_note ?? (meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
+        is_paused: d.is_paused ?? 0,
+        status_note: d.status_note ?? (d.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
       };
     }));
   });
+
   app.post('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req), name = String(req.body.name || '').trim();
     if (name.length < 2 || name.length > 100) throw fail(400, 'Enter a printer name.');
     const id = randomUUID(), secret = token();
-    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex) VALUES ($1,$2,$3,$4,$5,$6)', [id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0]);
-    deviceMetadata.set(id, { is_paused: 0, status_note: 'Ready' });
+    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,status_note,is_paused) VALUES ($1,$2,$3,$4,$5,$6,1,$7,0)', [
+      id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0, 'Ready'
+    ]);
     await audit(db, req.user.id, 'device.paired', id);
     res.status(201).json({ id, token: secret });
   });
+
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT id FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    const [device] = await db.query('SELECT id, is_paused FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Device not found.');
-    const current = deviceMetadata.get(device.id)?.is_paused ?? 0;
-    const nextState = current ? 0 : 1;
-    deviceMetadata.set(device.id, { is_paused: nextState, status_note: nextState ? 'Paused by owner' : 'Ready' });
+    const nextState = device.is_paused ? 0 : 1;
+    await db.query('UPDATE devices SET is_paused=$1, status_note=$2 WHERE id=$3', [
+      nextState,
+      nextState ? 'Paused by owner' : 'Ready',
+      device.id
+    ]);
     await audit(db, req.user.id, nextState ? 'device.paused' : 'device.resumed', device.id);
     res.json({ ok: true, is_paused: nextState });
   });
+
   app.post('/api/owner/devices/:id/test-print', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
@@ -355,18 +367,52 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     await audit(db, req.user.id, 'order.prioritized', req.params.id);
     res.json({ ok: true });
   });
+
   app.post('/api/owner/orders/:id/retry', owner, async (req, res) => {
     const shop = await ownerShop(req);
     await db.transaction(async tx => {
-      const [order] = await tx.query("UPDATE orders SET status='queued' WHERE id=$1 AND shop_id=$2 AND status='failed' AND payment='paid' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$3) RETURNING id, options", [req.params.id, shop.id, now()]);
-      if (!order) throw fail(409, 'Confirm the previous print is stopped before retrying a paid order with an unexpired file.');
-      await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
-      const opts = JSON.parse(order.options);
-      opts.priority = 5;
-      await tx.query("UPDATE orders SET status='queued', options=$1 WHERE id=$2", [JSON.stringify(opts), order.id]);
+      const [order] = await tx.query(
+        "SELECT o.*, (SELECT id FROM documents WHERE id=o.document_id AND expires>$3) AS doc_valid FROM orders o WHERE o.id=$1 AND o.shop_id=$2",
+        [req.params.id, shop.id, now()]
+      );
+      if (!order) throw fail(404, 'Order not found.');
+      if (order.payment !== 'paid') throw fail(409, 'Only paid orders can be printed or retried.');
+      if (!order.doc_valid) throw fail(409, 'The document file has expired. Ask the customer to re-upload.');
+
+      const [lease] = await tx.query("SELECT * FROM print_leases WHERE order_id=$1", [order.id]);
+      const isLeaseActive = lease && (lease.state === 'claimed' || lease.state === 'submitted') && new Date(lease.expires).getTime() > Date.now();
+
+      if (isLeaseActive && req.body.force !== true) {
+        throw fail(409, 'A print attempt is currently in progress. If it is stuck, please wait or check your printer.');
+      }
+
+      await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
+
+      const opts = typeof order.options === 'string' ? JSON.parse(order.options) : (order.options || {});
+      opts.priority = Math.max((opts.priority || 0), 5);
+      const nextAttempt = (order.attempts || 1) + 1;
+      opts.attempt = nextAttempt;
+
+      await tx.query(
+        "UPDATE orders SET status='queued', options=$1, attempts=$2 WHERE id=$3",
+        [JSON.stringify(opts), nextAttempt, order.id]
+      );
+
+      try {
+        await tx.query("SAVEPOINT retry_hist_sp");
+        await tx.query(
+          "INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+          [randomUUID(), order.id, order.status, 'queued', req.user.id, 'order.retried', `Attempt ${nextAttempt}`, now()]
+        );
+        await tx.query("RELEASE SAVEPOINT retry_hist_sp");
+      } catch (histErr) {
+        await tx.query("ROLLBACK TO SAVEPOINT retry_hist_sp").catch(() => {});
+        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed:', histErr.message);
+      }
+
       await audit(tx, req.user.id, 'order.retried', order.id);
     });
-    res.json({ ok: true });
+    res.json({ ok: true, message: 'Print job re-queued for your shop printer.' });
   });
   app.delete('/api/owner/devices/:id', owner, async (req, res) => { const shop = await ownerShop(req); const changed = await db.query('UPDATE devices SET active=0 WHERE id=$1 AND shop_id=$2 RETURNING id', [req.params.id, shop.id]); if (!changed.length) throw fail(404, 'Device not found.'); await audit(db, req.user.id, 'device.revoked', req.params.id); res.json({ ok: true }); });
   app.get('/api/preparations/:id', async (req, res) => {
@@ -452,9 +498,11 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const leaseToken = token();
     const result = await db.transaction(async tx => {
       // Serialize claims from duplicated connector processes using the same credential.
-      await tx.query('UPDATE devices SET heartbeat=$1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
-      if (deviceMetadata.get(req.device.id)?.is_paused) return null;
-      const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]); if (existing) return null;
+      await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
+      const [devRow] = await tx.query('SELECT is_paused FROM devices WHERE id=$1', [req.device.id]);
+      if (devRow?.is_paused) return null;
+      const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]);
+      if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
       candidates.sort((a, b) => {
         try {
@@ -476,10 +524,18 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         }
       });
       if (!order) return null;
-      const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]); if (!changed.length) return null;
-      await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires) VALUES ($1,$2,$3,$4)", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);
-      return { id: order.id, token: leaseToken, options: JSON.parse(order.options) };
-    }); res.json(result);
+      const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id, attempts", [order.id, now()]);
+      if (!changed.length) return null;
+      await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
+      await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires,state) VALUES ($1,$2,$3,$4,'claimed')", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);
+      return {
+        id: order.id,
+        token: leaseToken,
+        attempt: changed[0].attempts || 1,
+        options: typeof order.options === 'string' ? JSON.parse(order.options) : order.options
+      };
+    });
+    res.json(result);
   });
   const ownLease = async req => { const [row] = await db.query('SELECT o.*,l.state AS lease_state FROM print_leases l JOIN orders o ON o.id=l.order_id WHERE l.order_id=$1 AND l.device_id=$2 AND l.token=$3 AND l.expires>$4', [req.params.id, req.device.id, digest(req.headers['x-lease-token'] || ''), now()]); if (!row) throw fail(404, 'Print lease expired or does not belong to this device.'); return row; };
   app.get('/api/device/jobs/:id/document', async (req, res) => { const order = await ownLease(req); if (order.lease_state !== 'claimed') throw fail(409, 'Document already submitted.'); const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]); if (!doc) throw fail(404, 'Document expired.'); sendPdf(req, res, decrypt(doc, key)); });
@@ -489,21 +545,23 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (event === 'submitted' && order.lease_state !== 'claimed') throw fail(409, 'Job was already submitted. Do not reprint.');
     if (event === 'awaiting_confirmation' && order.lease_state !== 'submitted') throw fail(409, 'Job has not been submitted.');
     await db.transaction(async tx => {
-      const targetStatus = event === 'failed' ? 'needs_review' : event === 'submitted' ? 'printing' : event;
+      const targetStatus = event === 'failed' ? (order.lease_state === 'submitted' ? 'needs_review' : 'failed') : event === 'submitted' ? 'printing' : event;
       const current = await tx.query("UPDATE orders SET status=$1 WHERE id=$2 AND status='printing' AND payment='paid' RETURNING id", [targetStatus, order.id]);
       if (!current.length) throw fail(409, 'This print has already been resolved.');
-      const changed = await tx.query('UPDATE print_leases SET state=$1,expires=$2 WHERE order_id=$3 AND state=$4 RETURNING order_id', [event, new Date(Date.now() + 600000).toISOString(), order.id, order.lease_state]);
+      const errorMsg = String(req.body.error || '');
+      const changed = await tx.query('UPDATE print_leases SET state=$1,expires=$2,detail=$3 WHERE order_id=$4 AND state=$5 RETURNING order_id', [event, new Date(Date.now() + 600000).toISOString(), errorMsg, order.id, order.lease_state]);
       if (!changed.length) throw fail(409, 'Print state changed. Do not resubmit.');
       try {
         await tx.query('SAVEPOINT dev_hist_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, event, now()]);
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, errorMsg || event, now()]);
         await tx.query('RELEASE SAVEPOINT dev_hist_sp');
       } catch (histErr) {
         await tx.query('ROLLBACK TO SAVEPOINT dev_hist_sp').catch(() => {});
         console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed:', histErr.message);
       }
       await audit(tx, req.device.id, `device.${event}`, order.id);
-    }); res.json({ ok: true });
+    });
+    res.json({ ok: true });
   });
   app.post('/api/owner/orders/:id/resolve-failed', owner, async (req, res) => {
     if (req.body.confirmed !== true) throw fail(400, 'Check the physical output and stop any remaining Windows print queue job first.');
@@ -545,6 +603,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 export async function sweepLeases(db) {
   await db.transaction(async tx => {
     const leases = await tx.query("SELECT * FROM print_leases WHERE expires<$1 AND state IN ('claimed','submitted')", [now()]);
-    for (const lease of leases) { const changed = await tx.query("UPDATE print_leases SET state='uncertain' WHERE order_id=$1 AND state=$2 RETURNING order_id", [lease.order_id, lease.state]); if (changed.length) await tx.query("UPDATE orders SET status='needs_review' WHERE id=$1 AND status='printing'", [lease.order_id]); }
+    for (const lease of leases) {
+      const changed = await tx.query("UPDATE print_leases SET state='uncertain' WHERE order_id=$1 AND state=$2 RETURNING order_id", [lease.order_id, lease.state]);
+      if (changed.length) await tx.query("UPDATE orders SET status='needs_review' WHERE id=$1 AND status='printing'", [lease.order_id]);
+    }
+    const staleAwaiting = await tx.query("SELECT * FROM print_leases WHERE expires<$1 AND state='awaiting_confirmation'", [now()]);
+    for (const lease of staleAwaiting) {
+      await tx.query("UPDATE print_leases SET state='uncertain' WHERE order_id=$1 AND state='awaiting_confirmation'", [lease.order_id]);
+      await tx.query("UPDATE orders SET status='needs_review' WHERE id=$1 AND status='awaiting_confirmation'", [lease.order_id]);
+    }
   });
 }

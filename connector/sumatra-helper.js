@@ -77,24 +77,30 @@ export async function ensureSumatraPDF() {
 }
 
 export async function printPdfToWindowsPrinter({ pdfPath, printerName, options = {}, sumatraPath = null }) {
-  if (sumatraPath && existsSync(sumatraPath)) {
-    const settings = [
-      'paper=A4',
-      'noscale',
-      options.color === 'color' ? 'color' : 'monochrome',
-      options.duplex ? 'duplexlong' : 'simplex',
-      `${options.copies || 1}x`,
-      'collate'
-    ].join(',');
+  if (!existsSync(pdfPath)) {
+    throw new Error(`Print file not found at ${pdfPath}`);
+  }
+  if (!printerName) {
+    throw new Error('Printer name is required for Windows printing.');
+  }
 
+  const cleanSettings = [
+    options.color === 'color' ? 'color' : 'monochrome',
+    options.duplex ? 'duplex' : 'simplex',
+    `${Math.max(1, Number(options.copies) || 1)}x`,
+    'paper=A4',
+    'fit'
+  ].join(',');
+
+  if (sumatraPath && existsSync(sumatraPath)) {
     try {
       await run(sumatraPath, [
         '-print-to', printerName,
-        '-print-settings', settings,
+        '-print-settings', cleanSettings,
         '-silent',
         pdfPath
       ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
-      return { method: 'sumatrapdf' };
+      return { method: 'sumatrapdf-settings' };
     } catch (sumatraErr) {
       console.warn(`[Print Helper] SumatraPDF advanced settings print failed (${sumatraErr.message}). Retrying with simple print...`);
       try {
@@ -111,14 +117,14 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
   }
 
   const helper = await ensureSumatraPDF();
-  if (helper && existsSync(helper)) {
+  if (helper && existsSync(helper) && helper !== sumatraPath) {
     try {
       await run(helper, [
         '-print-to', printerName,
         '-silent',
         pdfPath
       ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
-      return { method: 'sumatrapdf' };
+      return { method: 'sumatrapdf-portable' };
     } catch (helperErr) {
       console.warn(`[Print Helper] Portable SumatraPDF failed: ${helperErr.message}`);
     }
@@ -132,9 +138,9 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
       await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCommand], { timeout: 60000, windowsHide: true });
       return { method: 'powershell-spooler' };
     } catch (psErr) {
-      console.error(`[Print Helper] Windows spooler fallback failed: ${psErr.message}`);
+      throw new Error(`Windows Print Spooler submission failed for "${printerName}": ${psErr.message}`);
     }
   }
 
-  return { method: 'direct-spooler' };
+  throw new Error(`Could not print document to "${printerName}". No working print engine available.`);
 }

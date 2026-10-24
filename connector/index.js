@@ -24,6 +24,23 @@ process.on('unhandledRejection', reason => {
   log(`[UnhandledRejection] ${reason?.stack || reason?.message || reason}`);
 });
 
+// Load .env file if present in working directory or repo root
+for (const envDir of [process.cwd(), resolve(process.cwd(), '..'), root]) {
+  const envCandidate = join(envDir, '.env');
+  if (existsSync(envCandidate)) {
+    try {
+      const content = readFileSync(envCandidate, 'utf8');
+      for (const line of content.split(/\r?\n/)) {
+        const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)?\s*$/);
+        if (match && !process.env[match[1]]) {
+          process.env[match[1]] = (match[2] || '').trim().replace(/^['"](.*)['"]$/, '$1');
+        }
+      }
+    } catch {}
+    break;
+  }
+}
+
 // Load persisted settings with BOM stripping
 const settingsPath = join(root, 'settings.json');
 export function loadConfig() {
@@ -57,16 +74,42 @@ if (!secret) {
   process.exit(1);
 }
 
-// Auto-detect printer if not specified
-if (!printer) {
+// Auto-detect printer if not specified or if configured printer doesn't exist
+async function checkPrinterExists(name) {
+  if (process.platform !== 'win32' || !name) return false;
+  try {
+    const { stdout } = await run('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`], { timeout: 1500, windowsHide: true });
+    if (stdout) return true;
+  } catch {}
+  try {
+    const { stdout } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices', '/v', name], { timeout: 1500, windowsHide: true });
+    if (stdout) return true;
+  } catch {}
+  return false;
+}
+
+if (!printer || !(await checkPrinterExists(printer))) {
   try {
     const { stdout: defOut } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
     const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
-    if (defMatch) printer = defMatch[1].trim();
+    if (defMatch && (await checkPrinterExists(defMatch[1].trim()))) {
+      printer = defMatch[1].trim();
+    }
   } catch {}
 }
+
+if (!printer || !(await checkPrinterExists(printer))) {
+  // Find any available printer
+  try {
+    const { stdout: devList } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
+    const candidates = devList.split(/\r?\n/).map(l => l.trim().split(/\s{2,}REG_SZ\s{2,}/)[0]).filter(n => n && !/OneNote|Fax|Microsoft XPS/i.test(n));
+    if (candidates.length) printer = candidates[0];
+  } catch {}
+}
+
 if (!printer) {
   console.error('\n[Error] No Windows printer detected. Please connect or install a printer first.\n');
+  cleanupPid();
   process.exit(1);
 }
 
@@ -239,17 +282,33 @@ async function printJob(job) {
   if (!/^[a-f0-9-]{36}$/.test(job.id)) throw new Error('Invalid job identifier.');
   const path = join(root, `${job.id}.pdf`), journal = join(root, `${job.id}.submitted`);
 
+  // Check if a previous journal exists for this job
+  let previousJournal = null;
   try {
-    await readFile(journal);
-    console.warn(`[Queue] Job ${job.id} was already submitted. Waiting for owner confirmation.`);
-    return;
+    const raw = await readFile(journal, 'utf8');
+    previousJournal = JSON.parse(raw);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
 
+  // If this job was recently submitted in the exact same attempt, wait for physical confirmation
+  if (previousJournal && (!job.attempt || job.attempt <= (previousJournal.attempt || 1))) {
+    const ageMs = Date.now() - new Date(previousJournal.submitted || 0).getTime();
+    if (ageMs < 180000) {
+      log(`[Queue] Job #${job.id.slice(0, 8).toUpperCase()} was recently submitted (${Math.round(ageMs/1000)}s ago). Waiting for owner confirmation.`);
+      return;
+    }
+  }
+
+  // If this is a retry or stale submission, clean up previous journal so printing can proceed
+  if (previousJournal) {
+    log(`[Queue] Re-processing job #${job.id.slice(0, 8).toUpperCase()} (Attempt ${job.attempt || 2}). Re-dispatching to printer.`);
+    await unlink(journal).catch(() => {});
+  }
+
   try {
-    console.log(`\n>>> [Incoming Job] #${job.id.slice(0, 8).toUpperCase()}`);
-    console.log(`    Options: ${job.options.color === 'color' ? 'Full Colour' : 'Black & White'}, ${job.options.copies || 1} copies, ${job.options.duplex ? 'Double-sided' : 'Single-sided'}`);
+    log(`\n>>> [Incoming Job] #${job.id.slice(0, 8).toUpperCase()} (Attempt ${job.attempt || 1})`);
+    log(`    Options: ${job.options.color === 'color' ? 'Full Colour' : 'Black & White'}, ${job.options.copies || 1} copies, ${job.options.duplex ? 'Double-sided' : 'Single-sided'}`);
 
     const chunks = [];
     let start = 0, total;
@@ -262,20 +321,31 @@ async function printJob(job) {
     } while (start < total);
 
     const bytes = Buffer.concat(chunks);
+    if (bytes.subarray(0, 5).toString() !== '%PDF-') {
+      throw new Error('Downloaded document is not a valid PDF file.');
+    }
     await writeFile(path, bytes, { mode: 0o600 });
 
     // Durable journal entry before submission
-    await writeFile(journal, JSON.stringify({ id: job.id, sha256: createHash('sha256').update(bytes).digest('hex'), submitted: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+    await writeFile(journal, JSON.stringify({
+      id: job.id,
+      attempt: job.attempt || 1,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      submitted: new Date().toISOString()
+    }), { flag: 'w', mode: 0o600 });
+
     await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'submitted' } });
 
-    console.log(`    Sending to physical printer: "${printer}"...`);
-    await printPdfToWindowsPrinter({ pdfPath: path, printerName: printer, options: job.options, sumatraPath: sumatra });
+    log(`    Sending to physical printer: "${printer}"...`);
+    const printResult = await printPdfToWindowsPrinter({ pdfPath: path, printerName: printer, options: job.options, sumatraPath: sumatra });
 
     await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'awaiting_confirmation' } });
-    console.log(`✓ [Print Queued] Job #${job.id.slice(0, 8).toUpperCase()} sent to printer. Confirm physical output in SmartPrint.\n`);
+    log(`✓ [Print Queued] Job #${job.id.slice(0, 8).toUpperCase()} sent to printer (${printResult.method}). Confirm physical output in SmartPrint.\n`);
   } catch (err) {
-    console.error(`! [Print Error] Failed to submit job #${job.id}: ${err.message}`);
-    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'failed' } }).catch(() => {});
+    log(`! [Print Error] Failed to submit job #${job.id}: ${err.message}`);
+    // Clean up journal on failure so retry will never be blocked
+    await unlink(journal).catch(() => {});
+    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'failed', error: err.message } }).catch(() => {});
   } finally {
     await unlink(path).catch(() => {});
   }
