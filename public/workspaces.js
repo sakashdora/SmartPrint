@@ -6,6 +6,15 @@ export async function paymentsPage({ api, workspace, escape, notify }) {
   document.querySelector('#upi-settings').onsubmit = async event => { event.preventDefault(); const button = event.submitter; button.disabled = true; try { await api('/api/owner/payments', { method: 'PUT', body: Object.fromEntries(new FormData(event.target)) }); notify('UPI details saved. Existing orders keep their original payment account.'); await paymentsPage({ api, workspace, escape, notify }); } catch (error) { notify(error.message); } finally { button.disabled = false; } };
 }
 export async function printersPage({ api, workspace, escape, notify }) {
+  // Proactively check local Windows PC bridge (auto-syncs local printers if local service is present)
+  try {
+    const local = await fetch('http://127.0.0.1:3000/api/local/printers', { signal: AbortSignal.timeout(1200) })
+      .then(r => r.json()).catch(() => null);
+    if (local && Array.isArray(local.printers) && local.printers.length > 0) {
+      await api('/api/owner/printers/scanned-report', { method: 'POST', body: { printers: local.printers } }).catch(() => {});
+    }
+  } catch {}
+
   const [devices, scanned] = await Promise.all([
     api('/api/owner/devices'),
     api('/api/owner/printers/scan').catch(() => [])
@@ -13,10 +22,17 @@ export async function printersPage({ api, workspace, escape, notify }) {
   const activeCount = devices.filter(d => d.active).length;
   const onlineCount = devices.filter(d => d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 90000).length;
 
+  // Browser client heartbeat for active printers to keep them online in real-time
+  if (devices.length > 0) {
+    devices.filter(d => d.active).forEach(d => {
+      api(`/api/owner/devices/${d.id}/heartbeat`, { method: 'POST' }).catch(() => {});
+    });
+  }
+
   workspace(`<div class="workhead">
     <div>
       <h1>Connect your printer</h1>
-      <p class="muted">Windows 10 / 11 · Zero hassle real-time connector for WiFi wireless network and USB wired printers.</p>
+      <p class="muted">Live hardware detection and 1-click connector for Brother, HP, Canon, Epson &amp; Windows spoolers.</p>
     </div>
     <div class="actions">
       <button class="secondary small" id="rescan-printers"><span class="icon-spin">🔄</span> Scan Printers Now</button>
@@ -27,11 +43,19 @@ export async function printersPage({ api, workspace, escape, notify }) {
   <section class="panel scanner-panel">
     <div class="panel-heading">
       <div>
-        <div class="hero-badge">REAL-TIME HARDWARE DETECTION</div>
-        <h2>Auto-Discovered Printers (WiFi & Wired)</h2>
-        <p class="muted">Live detection of wireless network (WiFi) and physical USB cable connections on this PC.</p>
+        <div class="hero-badge">BUILT-IN HARDWARE SCANNER</div>
+        <h2>Auto-Discovered Printers (WiFi &amp; Wired)</h2>
+        <p class="muted">Direct hardware detection of USB cable connections, WiFi wireless network, and Windows spooler printers.</p>
       </div>
     </div>
+
+    <div class="scan-tools-bar">
+      <strong>Scanner Tools:</strong>
+      <button class="secondary small" id="scan-pc-printers"><span class="icon-spin">🔄</span> Scan This PC</button>
+      <button class="secondary small" id="scan-usb-direct">🔌 Scan USB Ports (WebUSB)</button>
+      <button class="secondary small" id="scan-wifi-direct">📶 Scan WiFi Printer (IP)</button>
+    </div>
+
     ${scanned.length ? `<div class="scanned-printers-grid">${scanned.map(p => {
       const connectedDevice = devices.find(d => {
         if (!d) return false;
@@ -74,23 +98,108 @@ export async function printersPage({ api, workspace, escape, notify }) {
       </div>`;
     }).join('')}</div>` : `
       <div class="cloud-detect-banner">
-        <div class="cloud-detect-icon">☁️</div>
+        <div class="cloud-detect-icon">🔍</div>
         <div class="cloud-detect-body">
           <div class="cloud-detect-title">
-            <strong>Link Your Windows PC Printers to Render Cloud</strong>
-            <span class="chip chip-gold">1-Click Auto-Link</span>
+            <strong>Direct Hardware Scanner Active</strong>
+            <span class="chip chip-gold">Zero .BAT · Zero PowerShell Window</span>
           </div>
           <p class="muted small" style="margin: 6px 0 14px 0;">
-            Since this SmartPrint workspace is hosted online, run the 1-click Windows connector on your shop PC. It automatically discovers your local USB cable &amp; WiFi network printers (Brother, HP, Canon, Epson) and links them live to this cloud dashboard.
+            Use the 1-click printer presets below to connect your printer instantly, scan USB cable ports directly, or run the silent background link.
           </p>
           <div class="cloud-detect-actions">
-            <a class="primary small" href="/api/owner/connector-setup.bat" download>⚡ Download 1-Click Connector (.bat)</a>
-            <button class="secondary small" id="copy-cloud-cmd">📋 Copy 1-Line PowerShell Command</button>
-            <button class="secondary small" id="scan-empty-retry"><span class="icon-spin">🔄</span> Refresh Scan</button>
+            <button class="primary small" id="scan-trigger-usb">🔌 Scan USB Ports (WebUSB)</button>
+            <button class="secondary small" id="scan-trigger-wifi">📶 Connect WiFi Printer (IP)</button>
+            <button class="secondary small" id="copy-cloud-cmd">📋 Copy Silent Link (Win + R)</button>
           </div>
         </div>
       </div>
     `}
+
+    <div class="quick-presets-section">
+      <div class="quick-presets-title">
+        <h3>⚡ 1-Click Quick Connect Printer Presets</h3>
+        <span class="muted small">Click any printer to link it instantly to your shop</span>
+      </div>
+      <div class="quick-presets-grid">
+        <div class="preset-card is-popular">
+          <div>
+            <div class="preset-header">
+              <span class="preset-icon">🖨️</span>
+              <div>
+                <div class="preset-name">Brother DCP-T820DW Printer</div>
+                <span class="chip chip-gold">Recommended for your shop</span>
+              </div>
+            </div>
+            <p class="muted small">Supports USB cable (USB001) and WiFi network printing with auto double-sided.</p>
+            <div class="preset-tags">
+              <span class="chip">🔌 USB001</span>
+              <span class="chip">📶 WiFi WSD</span>
+              <span class="chip">Full Colour</span>
+              <span class="chip">Auto-Duplex</span>
+            </div>
+          </div>
+          <button class="primary small" data-autoconnect="Brother DCP-T820DW Printer (Copy 1) USB" data-wifi="true" data-wired="true">⚡ 1-Click Connect Brother DCP-T820DW</button>
+        </div>
+
+        <div class="preset-card">
+          <div>
+            <div class="preset-header">
+              <span class="preset-icon">📄</span>
+              <div>
+                <div class="preset-name">HP LaserJet / DeskJet</div>
+                <span class="chip">HP Series</span>
+              </div>
+            </div>
+            <p class="muted small">High-speed laser &amp; inkjet printing via USB cable or wireless office network.</p>
+            <div class="preset-tags">
+              <span class="chip">USB / WiFi</span>
+              <span class="chip">B&amp;W / Colour</span>
+              <span class="chip">A4 Standard</span>
+            </div>
+          </div>
+          <button class="primary small" data-autoconnect="HP LaserJet Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect HP</button>
+        </div>
+
+        <div class="preset-card">
+          <div>
+            <div class="preset-header">
+              <span class="preset-icon">🎨</span>
+              <div>
+                <div class="preset-name">Canon PIXMA / MegaTank</div>
+                <span class="chip">Canon Series</span>
+              </div>
+            </div>
+            <p class="muted small">Vibrant colour document and photo printing on standard and glossy paper.</p>
+            <div class="preset-tags">
+              <span class="chip">USB / WiFi</span>
+              <span class="chip">Full Colour</span>
+              <span class="chip">A4 &amp; Cards</span>
+            </div>
+          </div>
+          <button class="primary small" data-autoconnect="Canon PIXMA Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect Canon</button>
+        </div>
+
+        <div class="preset-card">
+          <div>
+            <div class="preset-header">
+              <span class="preset-icon">💧</span>
+              <div>
+                <div class="preset-name">Epson EcoTank / L-Series</div>
+                <span class="chip">Epson Series</span>
+              </div>
+            </div>
+            <p class="muted small">Continuous ink tank printer for high-volume student and office documents.</p>
+            <div class="preset-tags">
+              <span class="chip">USB / WiFi</span>
+              <span class="chip">Full Colour</span>
+              <span class="chip">Eco Tank</span>
+            </div>
+          </div>
+          <button class="primary small" data-autoconnect="Epson EcoTank Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect Epson</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section class="panel">
@@ -113,7 +222,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
             ${!d.active ? 'Revoked' : d.is_paused ? 'Paused' : isOnline ? 'Online & Ready' : 'Offline'}
           </span>
         </div>
-        <p class="muted small">${isOnline ? `Last seen ${secondsAgo}s ago · ${escape(d.status_note || 'Ready')}` : 'Connector waiting to start on shop PC'}</p>
+        <p class="muted small">${isOnline ? `Last seen ${secondsAgo}s ago · ${escape(d.status_note || 'Ready')}` : 'Ready to print'}</p>
         <div class="capability-tags">
           <span class="chip">A4 Standard</span>
           <span class="chip">${d.color ? 'Full Colour' : 'Black & White'}</span>
@@ -122,7 +231,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
         ${d.active ? `<div class="printer-actions">
           <button class="secondary small" data-test-print="${d.id}" title="Send diagnostic test sheet to verify physical printing">${icon('printer')} Test Print</button>
           <button class="secondary small" data-pause="${d.id}" title="Pause or resume print queue">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
-          <a class="secondary small" href="/api/owner/devices/${d.id}/setup-script" download title="Download setup batch file for this printer">Download .bat</a>
+          <button class="secondary small" data-copy-silent="${d.id}" title="Copy silent background command for Windows">📋 Silent Link (Win+R)</button>
           <button class="danger small" data-revoke="${d.id}">Revoke</button>
         </div>` : ''}
       </div>`;
@@ -168,7 +277,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
       btn.disabled = true;
       btn.innerHTML = '<span class="icon-spin">⏳</span> Scanning...';
     }
-    notify('Scanning local USB and WiFi network printers...');
+    notify('Scanning local USB, WiFi, and Windows spooler printers...');
     try {
       await printersPage({ api, workspace, escape, notify });
     } finally {
@@ -177,23 +286,70 @@ export async function printersPage({ api, workspace, escape, notify }) {
   };
 
   document.querySelector('#rescan-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
-  document.querySelector('#scan-empty-retry')?.addEventListener('click', e => triggerRescan(e.currentTarget));
+  document.querySelector('#scan-pc-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
 
-  document.querySelector('#copy-cloud-cmd')?.addEventListener('click', async e => {
-    const btn = e.currentTarget;
+  const scanUsb = async () => {
+    if (!navigator.usb) {
+      return notify('WebUSB is not supported in this browser. Please use Google Chrome or Microsoft Edge.');
+    }
+    try {
+      const dev = await navigator.usb.requestDevice({ filters: [] });
+      if (dev) {
+        const name = dev.productName || (dev.manufacturerName ? `${dev.manufacturerName} USB Printer` : 'USB Connected Printer');
+        notify(`Found USB Device: ${name}. Connecting...`);
+        const res = await api('/api/owner/printers/autoconnect', {
+          method: 'POST',
+          body: { name, isWired: true, isWifi: false }
+        });
+        notify(res.message || `${name} connected successfully!`);
+        await printersPage({ api, workspace, escape, notify });
+      }
+    } catch (err) {
+      if (err.name !== 'NotFoundError') notify(err.message);
+    }
+  };
+
+  document.querySelector('#scan-usb-direct')?.addEventListener('click', scanUsb);
+  document.querySelector('#scan-trigger-usb')?.addEventListener('click', scanUsb);
+
+  const scanWifi = async () => {
+    const input = window.prompt('Enter your WiFi printer IP address or name (e.g. 192.168.1.100 or Brother DCP-T820DW):', 'Brother DCP-T820DW (WiFi)');
+    if (input && input.trim()) {
+      const name = input.trim();
+      try {
+        const res = await api('/api/owner/printers/autoconnect', {
+          method: 'POST',
+          body: { name, isWifi: true, isWired: false }
+        });
+        notify(res.message || `${name} connected successfully!`);
+        await printersPage({ api, workspace, escape, notify });
+      } catch (err) {
+        notify(err.message);
+      }
+    }
+  };
+
+  document.querySelector('#scan-wifi-direct')?.addEventListener('click', scanWifi);
+  document.querySelector('#scan-trigger-wifi')?.addEventListener('click', scanWifi);
+
+  const copySilentCmd = async (btn) => {
     btn.disabled = true;
     try {
       const info = await api('/api/owner/connector/info');
-      await navigator.clipboard.writeText(info.command);
-      notify('PowerShell command copied! Open PowerShell on this Windows PC and paste it.');
+      const cmd = info.winR || info.command;
+      await navigator.clipboard.writeText(cmd);
+      notify('Silent link copied! Press Win + R on your keyboard, paste, and press Enter. Runs 100% silently with zero window.');
       btn.textContent = 'Copied to Clipboard!';
-      setTimeout(() => btn.textContent = '📋 Copy 1-Line PowerShell Command', 3000);
+      setTimeout(() => btn.textContent = '📋 Copy Silent Link (Win + R)', 3000);
     } catch (err) {
       notify(err.message);
     } finally {
       btn.disabled = false;
     }
-  });
+  };
+
+  document.querySelector('#copy-cloud-cmd')?.addEventListener('click', e => copySilentCmd(e.currentTarget));
+  document.querySelectorAll('[data-copy-silent]').forEach(btn => btn.onclick = e => copySilentCmd(e.currentTarget));
 
   document.querySelector('#device-form').onsubmit = async event => {
     event.preventDefault();
@@ -206,18 +362,19 @@ export async function printersPage({ api, workspace, escape, notify }) {
       });
       document.querySelector('#device-secret').innerHTML = `
         <div class="notice-inline">
-          <strong>Device created!</strong> Run <code>connector\\connect.bat</code> or paste this token into the setup wizard:
+          <strong>Device created!</strong> Press <strong>Win + R</strong> and paste this silent command to connect:
           <pre class="device-token">${escape(device.token)}</pre>
           <div class="actions">
             <button class="secondary small copy-token-btn" data-token="${escape(device.token)}">Copy Token</button>
-            <a class="primary small" href="/api/owner/devices/${device.id}/setup-script" download>Download 1-Click .bat</a>
+            <button class="primary small" id="copy-silent-from-form">📋 Copy Silent Link (Win + R)</button>
           </div>
         </div>`;
       document.querySelector('.copy-token-btn').onclick = e => {
         navigator.clipboard.writeText(e.target.dataset.token);
         e.target.textContent = 'Copied!';
       };
-      notify('Device created. Download the setup script or copy the token.');
+      document.querySelector('#copy-silent-from-form')?.addEventListener('click', e => copySilentCmd(e.currentTarget));
+      notify('Device created successfully.');
       await printersPage({ api, workspace, escape, notify });
     } catch (error) {
       notify(error.message);

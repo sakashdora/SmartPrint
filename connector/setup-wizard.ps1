@@ -80,13 +80,17 @@ if (-not $Printer) {
         Write-Host "  [$($i + 1)] $($p.Name) $typeTag · Port: $port$recTag"
     }
 
-    $selection = Read-Host "`nSelect your printer [1-$($installedPrinters.Count), Enter for default: $defaultPrinter]"
-    if ([string]::IsNullOrWhiteSpace($selection)) {
+    if ($Token -or $env:SMARTPRINT_SILENT -eq '1') {
         $Printer = $defaultPrinter
-    } elseif ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le $installedPrinters.Count) {
-        $Printer = $installedPrinters[[int]$selection - 1]
     } else {
-        $Printer = $selection.Trim()
+        $selection = Read-Host "`nSelect your printer [1-$($installedPrinters.Count), Enter for default: $defaultPrinter]"
+        if ([string]::IsNullOrWhiteSpace($selection)) {
+            $Printer = $defaultPrinter
+        } elseif ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le $installedPrinters.Count) {
+            $Printer = $installedPrinters[[int]$selection - 1]
+        } else {
+            $Printer = $selection.Trim()
+        }
     }
 }
 $env:SMARTPRINT_PRINTER = $Printer
@@ -192,4 +196,22 @@ if ($localIndex -and (Test-Path $localIndex)) {
     $runTarget = $remoteIndex
 }
 
-& node $runTarget
+if ($Token -or $env:SMARTPRINT_SILENT -eq '1') {
+    # Terminate any previous connector process
+    $pidFile = Join-Path $connectorRoot 'connector.pid'
+    if (Test-Path $pidFile) {
+        try {
+            $oldPid = (Get-Content $pidFile -Raw).Trim()
+            if ($oldPid -match '^\d+$') {
+                Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
+    }
+    Start-Process -FilePath "node.exe" -ArgumentList "`"$runTarget`"" -WindowStyle Hidden
+    Write-Host "`n✓ SmartPrint Connector is now running silently in the background!" -ForegroundColor Green
+    Write-Host "✓ Windows printers are connected. Closing setup window..." -ForegroundColor Cyan
+    Start-Sleep -Milliseconds 600
+    exit 0
+} else {
+    & node $runTarget
+}

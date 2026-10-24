@@ -141,6 +141,38 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json(Array.from(merged.values()));
   });
 
+  app.post('/api/owner/printers/scanned-report', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const list = Array.isArray(req.body.printers) ? req.body.printers : [];
+    if (list.length) {
+      const existing = shopScannedPrinters.get(shop.id) || [];
+      const map = new Map();
+      for (const p of [...existing, ...list]) {
+        if (p && p.name) map.set(p.name, p);
+      }
+      shopScannedPrinters.set(shop.id, Array.from(map.values()));
+    }
+    res.json({ ok: true, count: list.length });
+  });
+
+  app.get('/api/local/printers', async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    let printers = [];
+    if (process.platform === 'win32') {
+      try { printers = await scanWindowsPrinters(); } catch {}
+    }
+    res.json({ ok: true, platform: process.platform, printers });
+  });
+
+  app.post('/api/owner/devices/:id/heartbeat', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 AND shop_id=$3', [now(), req.params.id, shop.id]);
+    res.json({ ok: true, heartbeat: now() });
+  });
+
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const printerName = String(req.body.name || '').trim();
@@ -334,12 +366,14 @@ pause
     const host = req.headers['x-forwarded-host'] || req.headers.host;
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
     const baseUrl = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'https://smartprint-ieks.onrender.com';
-    const psCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
+    const psCommand = `powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
+    const winRCommand = `powershell -WindowStyle Hidden -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
     res.json({
       url: baseUrl,
       token: secret,
       deviceId: device.id,
-      command: psCommand
+      command: psCommand,
+      winR: winRCommand
     });
   });
 
