@@ -169,7 +169,7 @@ export async function createApp({ database, seed = true } = {}) {
     await db.transaction(async tx => {
       await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [documentId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
       await tx.query('INSERT INTO quotes (id,shop_id,document_id,token,options,pages,sides,sheets,amount,version,expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [quote.id, shop.id, documentId, digest(quote.token), JSON.stringify(options), quote.pages, quote.sides, quote.sheets, quote.amount, shop.version, quote.expires]);
-      for (const file of req.body.files) if (file.uploadId) await tx.query('DELETE FROM uploads WHERE id=$1 AND token=$2', [file.uploadId, digest(file.token)]);
+      // Keep encrypted source uploads until their short expiry so option edits do not re-upload them.
     });
     res.status(201).json(quote);
   });
@@ -303,11 +303,9 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.get('/api/owner/qr', async (req, res) => {
     const shop = await ownerShop(req);
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    const base = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
+    const base = config.production ? config.origin : `${req.protocol}://${req.headers.host}`;
     const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, base).href;
-    res.json({ url, image: await QRCode.toDataURL(url, { width: 600, margin: 2, errorCorrectionLevel: 'H' }) });
+    res.json({ url, image: await QRCode.toDataURL(url, { width: 1200, margin: 4, errorCorrectionLevel: 'H' }) });
   });
   app.use('/api/admin', requireRole('admin'));
   app.get('/api/admin/shops', async (req, res) => res.json(await db.query('SELECT s.*,u.email FROM shops s JOIN users u ON u.id=s.owner_id ORDER BY s.name')));

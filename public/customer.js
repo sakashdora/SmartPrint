@@ -1,4 +1,6 @@
 import { icon } from './ui.js';
+import { downloadPdf, showDocument } from './viewer.js';
+import { waitForQuote } from './preparation.js';
 
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
@@ -59,6 +61,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
   let files = [], quote = null, isCalculating = false, isOrdering = false;
+  let revision = 0, calculateTimer, preview, pendingPreparation;
+  const uploadsByFile = new WeakMap();
 
   function formatBytes(bytes) {
     if (!bytes) return '0 B';
@@ -107,7 +111,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple>
           </div>
 
-          <div class="selected-files-display" id="selected-files-display" style="display: none;">
+          <div class="selected-files-display" id="selected-files-display" hidden>
             <div class="selected-file-item">
               <div class="file-icon-wrap">${icon('file')}</div>
               <div class="file-meta-wrap">
@@ -190,6 +194,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <span>A4 standard <small>(210 × 297 mm)</small></span>
           </div>
         </form>
+        <section class="panel preview-panel">
+          <div class="row"><h2>Print preview</h2><button type="button" class="secondary" id="show-preview" disabled>View preview</button></div>
+          <p class="muted" id="preview-help">Choose a document to preview the prepared pages before ordering.</p>
+          <div id="document-preview"></div>
+        </section>
       </div>
 
       <!-- 3. Checkout & Summary Sidebar -->
@@ -200,7 +209,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
           <div class="summary-specs" id="summary-specs">
             <div class="spec-row">
               <span>Status</span>
-              <strong id="order-status-text" class="badge">Awaiting document</strong>
+            <strong id="order-status-text" class="badge" aria-live="polite">Awaiting document</strong>
             </div>
             <div class="spec-row">
               <span>Pages</span>
@@ -238,10 +247,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
           </button>
 
           <p class="inline-error" id="order-error" role="alert"></p>
+          <button type="button" class="secondary wide" id="retry-quote" hidden>Retry preparation</button>
 
           <div class="privacy-guarantee">
             ${icon('lock')}
-            <span>Your file is encrypted and automatically deleted after printing.</span>
+            <span>Your files are encrypted. Print files are deleted after printing; temporary uploads expire automatically.</span>
           </div>
         </section>
       </aside>
@@ -258,6 +268,37 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   const errorEl = document.querySelector('#order-error');
   const statusBadge = document.querySelector('#file-count-badge');
   const orderStatusText = document.querySelector('#order-status-text');
+  const previewButton = document.querySelector('#show-preview');
+  const retryButton = document.querySelector('#retry-quote');
+  retryButton.onclick = () => recalculateQuote();
+  previewButton.onclick = async () => {
+    const current = quote, generation = revision;
+    if (!current || isCalculating) return;
+    previewButton.disabled = true;
+    const help = document.querySelector('#preview-help');
+    help.textContent = 'Loading prepared pages…';
+    try {
+      const blob = await downloadPdf(`/api/quotes/${current.id}/preview`, current.token);
+      if (generation !== revision || !form.isConnected) return;
+      preview?.destroy();
+      preview = await showDocument(document.querySelector('#document-preview'), blob);
+      if (generation !== revision) { preview?.destroy(); return; }
+      help.textContent = 'These are the prepared pages for your selected print options.';
+    } catch (error) { if (generation === revision) help.textContent = error.message; }
+    finally { if (generation === revision) previewButton.disabled = !quote; }
+  };
+
+  function scheduleQuote() {
+    if (isOrdering) return;
+    revision++;
+    quote = null;
+    placeBtn.disabled = previewButton.disabled = true;
+    preview?.destroy();
+    document.querySelector('#preview-help').textContent = 'Preparing preview for your current options…';
+    orderStatusText.textContent = 'Updating options…';
+    clearTimeout(calculateTimer);
+    calculateTimer = setTimeout(recalculateQuote, 350);
+  }
 
   function updatePaymentHelp() {
     const isUpi = methodSelect.value === 'upi';
@@ -284,22 +325,24 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       const input = form.elements.copies;
       input.value = Math.max(1, Math.min(100, (Number(input.value) || 1) + Number(button.dataset.copy)));
       document.querySelector('#spec-copies').textContent = input.value;
-      recalculateQuote();
+      scheduleQuote();
     };
   });
 
   form.oninput = () => {
     document.querySelector('#spec-copies').textContent = form.elements.copies.value || '1';
-    recalculateQuote();
+    scheduleQuote();
   };
   form.onchange = () => {
     if (form.elements.layout.value === 'card') {
       form.querySelector('[name=duplex][value=false]').checked = true;
     }
-    recalculateQuote();
+    scheduleQuote();
   };
 
   async function upload(file) {
+    const cached = uploadsByFile.get(file);
+    if (cached && cached.expires > Date.now()) return cached.value;
     const info = await api('/api/uploads', { method: 'POST', body: { slug, name: file.name, size: file.size } });
     for (let start = 0, part = 0; start < file.size; start += info.chunkSize, part++) {
       const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer());
@@ -307,60 +350,71 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
       await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: btoa(binary) } });
     }
-    return { uploadId: info.id, token: info.token };
+    const value = { uploadId: info.id, token: info.token };
+    uploadsByFile.set(file, { value, expires: Date.now() + 25 * 60000 });
+    return value;
   }
 
   async function recalculateQuote() {
     if (!files.length || isCalculating || isOrdering) return;
+    if (!form.reportValidity()) return;
+    const generation = revision;
+    const selectedFiles = files;
     isCalculating = true;
+    clearTimeout(calculateTimer);
+    retryButton.hidden = true;
     quote = null;
     placeBtn.disabled = true;
     errorEl.textContent = '';
-    orderStatusText.textContent = 'Calculating...';
+    orderStatusText.textContent = 'Uploading document…';
     orderStatusText.className = 'badge pending';
     document.querySelector('#total-amount').textContent = '...';
 
     try {
       const settings = readOptions();
       const uploads = [];
-      for (const file of files) {
+      for (const file of selectedFiles) {
         uploads.push(await upload(file));
       }
-      let result = await api('/api/quotes', { method: 'POST', body: { slug, files: uploads, options: settings } });
-      if (result.pending) {
-        const pending = result;
-        const deadline = Date.now() + 120000;
-        while (result.pending && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 1500));
-          result = await api(`/api/preparations/${pending.id}`, { token: pending.token });
-        }
-        if (result.error) throw new Error(result.error);
-      }
+      orderStatusText.textContent = 'Preparing print file…';
+      const requestKey = JSON.stringify({ uploads, settings });
+      let result = pendingPreparation?.key === requestKey ? pendingPreparation.result : await api('/api/quotes', { method: 'POST', body: { slug, files: uploads, options: settings } });
+      if (result.pending) pendingPreparation = { key: requestKey, result };
+      result = await waitForQuote(result, api);
+      pendingPreparation = null;
+      if (generation !== revision || !form.isConnected) return;
       quote = result;
       document.querySelector('#spec-pages').textContent = String(result.pages);
       document.querySelector('#spec-sheets').textContent = String(result.sheets);
       document.querySelector('#spec-copies').textContent = String(settings.copies);
       document.querySelector('#total-amount').textContent = money(result.amount);
       document.querySelector('#price-subnote').textContent = `${result.pages} page${result.pages === 1 ? '' : 's'} · ${result.sides} side${result.sides === 1 ? '' : 's'} · ${result.sheets} sheet${result.sheets === 1 ? '' : 's'}`;
-      orderStatusText.textContent = 'Ready to print';
+      orderStatusText.textContent = 'Ready to order';
       orderStatusText.className = 'badge active';
       document.querySelector('#step-2').classList.add('complete');
       document.querySelector('#step-3').setAttribute('aria-current', 'step');
       placeBtn.disabled = false;
+      previewButton.disabled = false;
+      document.querySelector('#preview-help').textContent = 'Preview your prepared pages, then place your order.';
       placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${money(result.amount)} →`;
     } catch (err) {
+      if (generation !== revision || !form.isConnected) return;
       quote = null;
+      if (err.preparationFailed || [400, 404, 409].includes(err.status)) pendingPreparation = null;
+      if (!pendingPreparation) files.forEach(file => uploadsByFile.delete(file));
+      retryButton.hidden = false;
       errorEl.textContent = err.message || 'Could not calculate price.';
       orderStatusText.textContent = 'Calculation failed';
       orderStatusText.className = 'badge danger';
       document.querySelector('#total-amount').textContent = '—';
     } finally {
       isCalculating = false;
+      if (generation !== revision && form.isConnected) recalculateQuote();
     }
   }
 
   fileInput.onchange = async event => {
-    if (isCalculating || isOrdering) return;
+    if (isOrdering) return;
     const next = [...event.target.files];
     if (!next.length) return;
 
@@ -376,8 +430,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     }
 
     files = next;
-    dropzone.style.display = 'none';
-    fileDisplay.style.display = 'block';
+    dropzone.hidden = true;
+    fileDisplay.hidden = false;
 
     const names = files.map(f => f.name).join(' + ');
     const totalSize = files.reduce((sum, f) => sum + f.size, 0);
@@ -389,9 +443,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     if (files.length === 2) {
       form.elements.layout.value = 'card';
       form.querySelector('[name=duplex][value=false]').checked = true;
+    } else if (form.elements.layout.value === 'card') {
+      form.elements.layout.value = 'single';
     }
 
-    await recalculateQuote();
+    scheduleQuote();
   };
 
   if (dropPanel) {
@@ -404,7 +460,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       dropPanel.classList.remove('is-dragging');
     }));
     dropPanel.addEventListener('drop', e => {
-      if (!isCalculating && !isOrdering && e.dataTransfer?.files?.length) {
+      if (!isOrdering && e.dataTransfer?.files?.length) {
         fileInput.files = e.dataTransfer.files;
         fileInput.dispatchEvent(new Event('change'));
       }
@@ -412,11 +468,14 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   }
 
   placeBtn.onclick = async () => {
+    if (isOrdering || isCalculating) return;
     if (!quote || Date.parse(quote.expires) <= Date.now()) {
       await recalculateQuote();
       if (!quote) return;
     }
     isOrdering = true;
+    form.inert = true;
+    methodSelect.disabled = true;
     placeBtn.disabled = true;
     placeBtn.innerHTML = `Submitting order...`;
     errorEl.textContent = '';
@@ -438,6 +497,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       placeBtn.disabled = false;
       placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${quote ? money(quote.amount) : ''} →`;
       isOrdering = false;
+      form.inert = false;
+      methodSelect.disabled = false;
     }
   };
 }

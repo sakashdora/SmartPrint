@@ -361,7 +361,11 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   app.get('/api/preparations/:id', async (req, res) => {
     const [prep] = await db.query('SELECT * FROM preparations WHERE id=$1 AND token=$2 AND expires>$3', [req.params.id, digest(req.headers.authorization?.replace(/^Bearer /, '') || ''), now()]);
     if (!prep) throw fail(404, 'Preview preparation expired. Try again.');
-    if (prep.state === 'ready') { const [quote] = await db.query('SELECT id,options,pages,sides,sheets,amount,expires FROM quotes WHERE id=$1', [prep.id]); return res.json({ ...quote, options: JSON.parse(quote.options), token: req.headers.authorization.replace(/^Bearer /, '') }); }
+    if (prep.state === 'ready') {
+      const [quote] = await db.query('SELECT id,options,pages,sides,sheets,amount,expires FROM quotes WHERE id=$1 AND used=0 AND expires>$2', [prep.id, now()]);
+      if (!quote) throw fail(409, 'This preparation has expired or has already been ordered. Prepare a new quote.');
+      return res.json({ ...quote, options: JSON.parse(quote.options), token: req.headers.authorization.replace(/^Bearer /, '') });
+    }
     res.json({ pending: prep.state !== 'failed', state: prep.state, error: prep.error });
   });
   app.use('/api/device', async (req, res, next) => {
@@ -417,8 +421,10 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       const [shop] = await tx.query('SELECT * FROM shops WHERE id=$1', [prep.shop_id]), options = validateOptions(JSON.parse(prep.options));
       const quote = price(pages, options, shop), sealed = encrypt(bytes, key), documentId = randomUUID();
       await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [documentId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
-      await tx.query('INSERT INTO quotes (id,shop_id,document_id,token,options,pages,sides,sheets,amount,version,expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [prep.id, shop.id, documentId, prep.token, prep.options, pages, quote.sides, quote.sheets, quote.amount, shop.version, prep.expires]);
-      for (const id of [...JSON.parse(prep.files), upload.id]) await tx.query('DELETE FROM uploads WHERE id=$1', [id]);
+      const expires = new Date(Date.now() + 15 * 60000).toISOString();
+      await tx.query('UPDATE preparations SET expires=$1 WHERE id=$2', [expires, prep.id]);
+      await tx.query('INSERT INTO quotes (id,shop_id,document_id,token,options,pages,sides,sheets,amount,version,expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [prep.id, shop.id, documentId, prep.token, prep.options, pages, quote.sides, quote.sheets, quote.amount, shop.version, expires]);
+      await tx.query('DELETE FROM uploads WHERE id=$1', [upload.id]);
     }); res.json({ ok: true });
   });
   app.post('/api/device/preparations/:id/fail', async (req, res) => { const prep = await ownPrep(req); await db.transaction(async tx => { await tx.query("UPDATE preparations SET state='failed',error=$1 WHERE id=$2", [String(req.body.error || 'Unable to prepare this file. Export it as PDF and retry.').slice(0, 200), prep.id]); for (const id of [...JSON.parse(prep.files), `result-${prep.id}`]) await tx.query('DELETE FROM uploads WHERE id=$1', [id]); }); res.json({ ok: true }); });
