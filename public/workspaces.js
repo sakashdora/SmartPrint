@@ -73,12 +73,22 @@ export async function printersPage({ api, workspace, escape, notify }) {
         </div>
       </div>`;
     }).join('')}</div>` : `
-      <div class="notice-inline empty-scanned-notice">
-        <div>
-          <strong>No printers detected yet.</strong>
-          <p class="muted small" style="margin: 4px 0 10px 0;">Ensure your USB cable is plugged in or your WiFi printer is powered on and connected to the network, then click below to scan.</p>
+      <div class="cloud-detect-banner">
+        <div class="cloud-detect-icon">☁️</div>
+        <div class="cloud-detect-body">
+          <div class="cloud-detect-title">
+            <strong>Link Your Windows PC Printers to Render Cloud</strong>
+            <span class="chip chip-gold">1-Click Auto-Link</span>
+          </div>
+          <p class="muted small" style="margin: 6px 0 14px 0;">
+            Since this SmartPrint workspace is hosted online, run the 1-click Windows connector on your shop PC. It automatically discovers your local USB cable &amp; WiFi network printers (Brother, HP, Canon, Epson) and links them live to this cloud dashboard.
+          </p>
+          <div class="cloud-detect-actions">
+            <a class="primary small" href="/api/owner/connector-setup.bat" download>⚡ Download 1-Click Connector (.bat)</a>
+            <button class="secondary small" id="copy-cloud-cmd">📋 Copy 1-Line PowerShell Command</button>
+            <button class="secondary small" id="scan-empty-retry"><span class="icon-spin">🔄</span> Refresh Scan</button>
+          </div>
         </div>
-        <button class="primary small" id="scan-empty-retry"><span class="icon-spin">🔄</span> Scan Printers Now</button>
       </div>
     `}
   </section>
@@ -168,6 +178,22 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   document.querySelector('#rescan-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
   document.querySelector('#scan-empty-retry')?.addEventListener('click', e => triggerRescan(e.currentTarget));
+
+  document.querySelector('#copy-cloud-cmd')?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const info = await api('/api/owner/connector/info');
+      await navigator.clipboard.writeText(info.command);
+      notify('PowerShell command copied! Open PowerShell on this Windows PC and paste it.');
+      btn.textContent = 'Copied to Clipboard!';
+      setTimeout(() => btn.textContent = '📋 Copy 1-Line PowerShell Command', 3000);
+    } catch (err) {
+      notify(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   document.querySelector('#device-form').onsubmit = async event => {
     event.preventDefault();

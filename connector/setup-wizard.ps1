@@ -173,6 +173,23 @@ Write-Host "  Starting SmartPrint Background Connector..." -ForegroundColor Whit
 Write-Host "  Press Ctrl+C to stop at any time." -ForegroundColor DarkGray
 Write-Host "============================================================`n" -ForegroundColor Cyan
 
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$indexJs = Join-Path $scriptRoot 'index.js'
-& node $indexJs
+$scriptRoot = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
+$localIndex = if ($scriptRoot) { Join-Path $scriptRoot 'index.js' } else { $null }
+
+if ($localIndex -and (Test-Path $localIndex)) {
+    $runTarget = $localIndex
+} else {
+    Write-Host "Syncing connector engine files to $connectorRoot..." -ForegroundColor Cyan
+    $remoteIndex = Join-Path $connectorRoot 'index.js'
+    $remoteHelper = Join-Path $connectorRoot 'sumatra-helper.js'
+    try {
+        & curl.exe -s -L -o $remoteIndex "$Url/connector-files/index.js"
+        & curl.exe -s -L -o $remoteHelper "$Url/connector-files/sumatra-helper.js"
+    } catch {
+        Invoke-RestMethod -Uri "$Url/connector-files/index.js" -OutFile $remoteIndex -UseBasicParsing
+        Invoke-RestMethod -Uri "$Url/connector-files/sumatra-helper.js" -OutFile $remoteHelper -UseBasicParsing
+    }
+    $runTarget = $remoteIndex
+}
+
+& node $runTarget

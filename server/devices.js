@@ -279,6 +279,70 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.setHeader('Content-Disposition', `attachment; filename="smartprint-setup-${device.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.bat"`);
     res.type('text/plain').send(`@echo off\r\nchcp 65001 >nul\r\necho ====================================================\r\necho   SmartPrint Printer Connector Auto-Setup\r\necho   Shop: ${safeEchoShop}\r\necho   Device: ${safeEchoDevice}\r\necho ====================================================\r\necho.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${safeUrl}'; $env:SMARTPRINT_PRINTER='${safePrinter}'; iex (iwr '${safeUrl}/connector-setup.ps1' -UseBasicParsing)"\r\npause\r\n`);
   });
+  app.get('/api/owner/connector-setup.bat', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    let [device] = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1 ORDER BY heartbeat DESC LIMIT 1', [shop.id]);
+    let secret = token();
+    if (!device) {
+      const id = randomUUID();
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,1,1,1,$5)', [
+        id, shop.id, 'Shop Windows PC', digest(secret), now()
+      ]);
+      device = { id, name: 'Shop Windows PC' };
+    } else {
+      await db.query('UPDATE devices SET token=$1 WHERE id=$2', [digest(secret), device.id]);
+    }
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const baseUrl = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'https://smartprint-ieks.onrender.com';
+    const safeUrl = baseUrl.replace(/'/g, "''");
+    const safeSecret = secret.replace(/'/g, "''");
+    const safeEchoShop = shop.name.replace(/[&|<>^%]/g, '');
+
+    res.setHeader('Content-Disposition', `attachment; filename="smartprint-connector-${shop.slug || 'shop'}.bat"`);
+    res.type('text/plain').send(`@echo off
+title SmartPrint Windows Shop Connector
+chcp 65001 >nul
+echo ========================================================
+echo   SmartPrint Windows Shop Connector (Auto-Link)
+echo   Shop: ${safeEchoShop}
+echo   Server: ${safeUrl}
+echo ========================================================
+echo.
+echo Connecting your Windows USB and WiFi printers to your cloud dashboard...
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${safeUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${safeSecret}'; iex (iwr '${safeUrl}/connector-setup.ps1' -UseBasicParsing)"
+pause
+`);
+  });
+
+  app.get('/api/owner/connector/info', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    let [device] = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1 ORDER BY heartbeat DESC LIMIT 1', [shop.id]);
+    let secret;
+    if (!device) {
+      const id = randomUUID();
+      secret = token();
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,1,1,1,$5)', [
+        id, shop.id, 'Shop Windows PC', digest(secret), now()
+      ]);
+      device = { id, name: 'Shop Windows PC' };
+    } else {
+      secret = token();
+      await db.query('UPDATE devices SET token=$1 WHERE id=$2', [digest(secret), device.id]);
+    }
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const baseUrl = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'https://smartprint-ieks.onrender.com';
+    const psCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
+    res.json({
+      url: baseUrl,
+      token: secret,
+      deviceId: device.id,
+      command: psCommand
+    });
+  });
+
   app.post('/api/owner/orders/:id/priority', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const [order] = await db.query('SELECT id, options FROM orders WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);

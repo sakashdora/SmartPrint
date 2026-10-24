@@ -731,3 +731,46 @@ td .primary, td .secondary, td .danger { font-size: 11px; padding: 8px 11px; min
 }
 
 .crop-dialog{width:min(720px,94vw);max-height:92dvh;overflow:auto;border:1px solid #dce2e9;border-radius:12px;padding:20px;background:white;color:#1c2734}.crop-dialog::backdrop{background:#0009}.crop-canvas{display:block;max-width:100%;max-height:52dvh;width:auto;height:auto;margin:12px auto;touch-action:none;cursor:crosshair}.crop-fields{margin-top:16px}.crop-dialog .actions{position:sticky;bottom:0;background:white;padding:12px 0}.crop-dialog input{min-width:0}.crop-dialog h2{margin-top:0}
+
+.cloud-detect-banner {
+  display: flex;
+  gap: 16px;
+  background: linear-gradient(135deg, #f0f7ff 0%, #e6f1fe 100%);
+  border: 1.5px solid #bdd7f9;
+  border-radius: 14px;
+  padding: 22px;
+  margin: 16px 0;
+  box-shadow: 0 4px 16px rgba(21, 86, 184, 0.06);
+}
+.cloud-detect-icon {
+  font-size: 38px;
+  line-height: 1;
+}
+.cloud-detect-body {
+  flex: 1;
+}
+.cloud-detect-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cloud-detect-title strong {
+  font-size: 16px;
+  color: #123769;
+}
+.cloud-detect-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 12px;
+}
+@media (max-width: 600px) {
+  .cloud-detect-banner {
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+  }
+}
+

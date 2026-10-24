@@ -316,6 +316,12 @@ export async function createApp({ database, seed = true } = {}) {
   app.get('/connector-setup.ps1', (req, res) => {
     res.type('text/plain').sendFile(fileURLToPath(new URL('../connector/setup-wizard.ps1', import.meta.url)));
   });
+  app.get('/connector-files/:file', (req, res) => {
+    const allowed = ['index.js', 'sumatra-helper.js', 'setup-wizard.ps1'];
+    if (!allowed.includes(req.params.file)) return res.sendStatus(404);
+    const contentType = req.params.file.endsWith('.ps1') ? 'text/plain' : 'application/javascript';
+    res.type(contentType).sendFile(fileURLToPath(new URL(`../connector/${req.params.file}`, import.meta.url)));
+  });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
