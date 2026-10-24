@@ -15,9 +15,25 @@ let health, me, receipt, transactionOffset = 0, queueFilter = 'all', shopFilter 
 try { receipt = JSON.parse(sessionStorage.getItem('receipt') || 'null'); } catch { sessionStorage.removeItem('receipt'); }
 let noticeTimer;
 function notify(message) { document.querySelector('#notice').textContent = message; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => document.querySelector('#notice').textContent = '', 6500); }
-async function api(path, { method = 'GET', body, token, binary, snapshot } = {}) {
-  const response = await fetch(path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
-  if (!response.ok) { const error = await response.json(); throw Object.assign(new Error(error.error || 'Request failed.'), { status: response.status }); }
+async function api(path, { method = 'GET', body, token, binary, snapshot, headers = {} } = {}) {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...headers
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+  if (!response.ok) {
+    let errorMsg = 'Request failed.';
+    let errorDetails = {};
+    try {
+      errorDetails = await response.json();
+      errorMsg = errorDetails.error || errorDetails.message || errorMsg;
+    } catch {}
+    throw Object.assign(new Error(errorMsg), { status: response.status, details: errorDetails });
+  }
   return snapshot ? { rows: await response.json(), until: response.headers.get('X-Snapshot-At') } : binary ? response.blob() : response.json();
 }
 function environmentLabel() { return health?.mode === 'production' ? '' : `<div class="demo">${health?.demo ? 'Local demo · Sample accounts and data' : 'Development · Connected database'}</div>`; }

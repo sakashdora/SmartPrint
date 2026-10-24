@@ -123,10 +123,17 @@ export async function transitionOrder(tx, orderId, toStatus, {
   }
 
   const historyId = randomUUID();
-  await tx.query(
-    'INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-    [historyId, orderId, current.status, toStatus, String(actor).slice(0, 100), String(action).slice(0, 100), String(detail || '').slice(0, 255), now()]
-  );
+  try {
+    await tx.query('SAVEPOINT state_machine_hist_sp');
+    await tx.query(
+      'INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [historyId, orderId, current.status, toStatus, String(actor).slice(0, 100), String(action).slice(0, 100), String(detail || '').slice(0, 255), now()]
+    );
+    await tx.query('RELEASE SAVEPOINT state_machine_hist_sp');
+  } catch (histErr) {
+    await tx.query('ROLLBACK TO SAVEPOINT state_machine_hist_sp').catch(() => {});
+    console.warn('[SmartPrint StateMachine] Non-critical order_history insert failed in transitionOrder:', histErr.message);
+  }
 
   return updated;
 }

@@ -528,11 +528,17 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     placeBtn.innerHTML = `Submitting order...`;
     errorEl.textContent = '';
 
+    // Assign stable idempotency key per quote submission to prevent duplicates on retries
+    quote.idempotencyKey ??= (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : 'idemp-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+
     try {
       const fileName = files.map(f => f.name).join(' + ') || 'document.pdf';
       const result = await api('/api/orders', {
         method: 'POST',
         token: quote.token,
+        headers: {
+          'Idempotency-Key': quote.idempotencyKey
+        },
         body: {
           quoteId: quote.id,
           method: methodSelect.value,
@@ -541,7 +547,20 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       });
       onOrder(result);
     } catch (err) {
-      errorEl.textContent = err.message || 'Failed to place order.';
+      let friendlyMessage = err.message || 'Failed to place order.';
+      if (err.status === 409) {
+        friendlyMessage = 'Your quote or preview has expired. Recalculating price for you...';
+        setTimeout(() => recalculateQuote(), 1200);
+      } else if (err.status === 404) {
+        friendlyMessage = 'Upload session expired. Please select and upload your file again.';
+      } else if (err.status === 400) {
+        friendlyMessage = 'Please review your print settings and try placing the order again.';
+      } else if (err.status === 429) {
+        friendlyMessage = 'The print shop is currently busy. Please wait a few seconds and tap Place Print Order again.';
+      } else if (err.status >= 500) {
+        friendlyMessage = 'Temporary connection issue. Tap Place Print Order to retry safely.';
+      }
+      errorEl.textContent = friendlyMessage;
       placeBtn.disabled = false;
       placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${quote ? money(quote.amount) : ''} →`;
       isOrdering = false;

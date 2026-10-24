@@ -77,7 +77,14 @@ export function paymentRoutes(app, { db, ownerOrder, requireRole, collect, audit
         throw fail(409, 'Refund already recorded.');
       }
       await tx.query("INSERT INTO refunds (order_id,shop_id,amount,method,state,reference,reason,created) VALUES ($1,$2,$3,$4,'completed',$5,$6,$7)", [order.id, order.shop_id, order.amount, order.method, reference, 'Order not fulfilled', new Date().toISOString()]);
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'refunded', req.user.id, 'refund.manually_confirmed', reference, new Date().toISOString()]);
+      try {
+        await tx.query('SAVEPOINT refund_hist_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'refunded', req.user.id, 'refund.manually_confirmed', reference, new Date().toISOString()]);
+        await tx.query('RELEASE SAVEPOINT refund_hist_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT refund_hist_sp').catch(() => {});
+        console.warn('[SmartPrint Payments] Non-critical order_history audit insert failed in refund:', histErr.message);
+      }
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       await audit(tx, req.user.id, 'refund.manually_confirmed', order.id);

@@ -20,7 +20,12 @@ const fail = (status, message) => Object.assign(new Error(message), { status });
 export async function createApp({ database, seed = true } = {}) {
   const config = configuration();
   const db = database ?? await openDatabase();
-  if (!process.env.DATABASE_URL || database) await db.migrate();
+  try {
+    await db.migrate();
+    console.log(`[SmartPrint DB] Database schema verified and up to date (${db.kind}).`);
+  } catch (migrationError) {
+    console.warn('[SmartPrint DB] Automatic startup migration warning:', migrationError.message);
+  }
   const key = loadKey();
   if (seed && !process.env.DATABASE_URL && !config.production) {
     for (const [id, email, role] of [['owner-demo', 'owner@smartprint.local', 'owner'], ['admin-demo', 'admin@smartprint.local', 'admin']]) {
@@ -70,7 +75,14 @@ export async function createApp({ database, seed = true } = {}) {
     if (!changed.length) return;
     const targetStatus = changed[0].status;
     await tx.query('INSERT INTO transactions (id,order_id,shop_id,amount,method,reference,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), order.id, order.shop_id, order.amount, order.method, reference, now()]);
-    await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, 'system', 'payment.collected', reference, now()]);
+    try {
+      await tx.query('SAVEPOINT collect_hist_sp');
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, 'system', 'payment.collected', reference, now()]);
+      await tx.query('RELEASE SAVEPOINT collect_hist_sp');
+    } catch (histErr) {
+      await tx.query('ROLLBACK TO SAVEPOINT collect_hist_sp').catch(() => {});
+      console.warn('[SmartPrint] Non-critical order_history audit insert failed in collect:', histErr.message);
+    }
   };
   app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
@@ -207,6 +219,8 @@ export async function createApp({ database, seed = true } = {}) {
   app.post('/api/orders', async (req, res) => {
     if (!['cash', 'upi', 'online'].includes(req.body.method)) throw fail(400, 'Choose UPI or cash payment.');
     if (req.body.method === 'online' && !config.payments) throw fail(503, 'Online payments are not configured. Please pay at the counter.');
+    const quoteId = req.body.quoteId;
+    if (!quoteId) throw fail(400, 'Missing quote identifier. Prepare a preview first.');
     const idempKey = req.headers['idempotency-key'];
     if (idempKey) {
       const cached = await getIdempotentResult(db, idempKey, bearer(req) || req.ip, 'order.create');
@@ -215,25 +229,43 @@ export async function createApp({ database, seed = true } = {}) {
     const receipt = token(), id = randomUUID();
     const fileName = String(req.body.fileName || 'document.pdf').slice(0, 150);
     const result = await db.transaction(async tx => {
-      const [quote] = await tx.query('SELECT q.* FROM quotes q JOIN shops s ON s.id=q.shop_id JOIN documents d ON d.id=q.document_id WHERE q.id=$1 AND q.token=$2 AND q.expires>$3 AND q.used=0 AND s.status=\'active\' AND d.expires>$3', [req.body.quoteId, digest(bearer(req)), now()]);
+      const [quote] = await tx.query(
+        'SELECT q.* FROM quotes q JOIN shops s ON s.id=q.shop_id JOIN documents d ON d.id=q.document_id WHERE q.id=$1 AND q.token=$2 AND q.expires>$3 AND s.status=\'active\' AND d.expires>$3',
+        [quoteId, digest(bearer(req)), now()]
+      );
       if (!quote) throw fail(409, 'Quote expired or already used. Prepare a new preview.');
+      if (quote.used === 1) {
+        if (idempKey) {
+          const cached = await getIdempotentResult(tx, idempKey, bearer(req) || req.ip, 'order.create');
+          if (cached) return cached.body;
+        }
+        throw fail(409, 'This quote has already been ordered.');
+      }
       const claimed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [quote.id]);
       if (!claimed.length) throw fail(409, 'This quote has already been ordered.');
       const opts = JSON.parse(quote.options);
       opts.file_name = fileName;
       opts.priority = 0;
       await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), JSON.stringify(opts), quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, 'created', 'awaiting_payment', 'customer', 'order.created', req.body.method, now()]);
+      try {
+        await tx.query('SAVEPOINT order_history_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, 'created', 'awaiting_payment', 'customer', 'order.created', req.body.method, now()]);
+        await tx.query('RELEASE SAVEPOINT order_history_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT order_history_sp').catch(() => {});
+        console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
+      }
       if (req.body.method === 'upi') {
         const [payee] = await tx.query('SELECT * FROM shop_payments WHERE shop_id=$1', [quote.shop_id]);
         if (!payee) throw fail(409, 'This shop has not set up UPI. Choose cash.');
         await tx.query('INSERT INTO upi_receipts (order_id,upi_id,payee) VALUES ($1,$2,$3)', [id, payee.upi_id, payee.payee]);
       }
-      return { id, token: receipt };
+      const orderPayload = { id, token: receipt };
+      if (idempKey) {
+        await saveIdempotentResult(tx, idempKey, bearer(req) || req.ip, 'order.create', id, 201, orderPayload);
+      }
+      return orderPayload;
     });
-    if (idempKey) {
-      await saveIdempotentResult(db, idempKey, bearer(req) || req.ip, 'order.create', result.id, 201, result);
-    }
     res.status(201).json(result);
   });
   app.get('/api/orders/:id', async (req, res) => {
@@ -327,7 +359,11 @@ export async function createApp({ database, seed = true } = {}) {
       if (idempKey && order.status === 'printing') return res.json({ ok: true });
       throw fail(409, 'Only a paid queued order with an available file can start.');
     }
-    await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'manual', now()]);
+    try {
+      await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'manual', now()]);
+    } catch (histErr) {
+      console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
+    }
     await audit(db, req.user.id, 'print.started', order.id);
     const result = { ok: true };
     if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.start', order.id, 200, result);
@@ -338,7 +374,11 @@ export async function createApp({ database, seed = true } = {}) {
     if (order.payment !== 'paid' || !['printing', 'queued'].includes(order.status)) throw fail(409, 'Start a paid order before opening its print file.');
     if (order.status === 'queued') {
       await db.query("UPDATE orders SET status='printing' WHERE id=$1", [order.id]);
-      await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'download', now()]);
+      try {
+        await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'download', now()]);
+      } catch (histErr) {
+        console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
+      }
     }
     if ((await db.query('SELECT order_id FROM print_leases WHERE order_id=$1', [order.id])).length) throw fail(409, 'The connector is handling this print. Check its physical output before taking further action.');
     const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
@@ -359,7 +399,14 @@ export async function createApp({ database, seed = true } = {}) {
         if (idempKey && order.status === 'completed') return;
         throw fail(409, 'Only a printing order can be completed.');
       }
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'completed', req.user.id, 'print.confirmed.file_deleted', 'physical_output_verified', now()]);
+      try {
+        await tx.query('SAVEPOINT complete_hist_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'completed', req.user.id, 'print.confirmed.file_deleted', 'physical_output_verified', now()]);
+        await tx.query('RELEASE SAVEPOINT complete_hist_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT complete_hist_sp').catch(() => {});
+        console.warn('[SmartPrint] Non-critical order_history audit insert failed in complete:', histErr.message);
+      }
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       await audit(tx, req.user.id, 'print.confirmed.file_deleted', order.id);

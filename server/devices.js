@@ -457,7 +457,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       if (!current.length) throw fail(409, 'This print has already been resolved.');
       const changed = await tx.query('UPDATE print_leases SET state=$1,expires=$2 WHERE order_id=$3 AND state=$4 RETURNING order_id', [event, new Date(Date.now() + 600000).toISOString(), order.id, order.lease_state]);
       if (!changed.length) throw fail(409, 'Print state changed. Do not resubmit.');
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, event, now()]);
+      try {
+        await tx.query('SAVEPOINT dev_hist_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, event, now()]);
+        await tx.query('RELEASE SAVEPOINT dev_hist_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT dev_hist_sp').catch(() => {});
+        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed:', histErr.message);
+      }
       await audit(tx, req.device.id, `device.${event}`, order.id);
     }); res.json({ ok: true });
   });
@@ -468,7 +475,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       const changed = await tx.query("UPDATE orders SET status='failed' WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','awaiting_confirmation','printing') RETURNING id, status", [req.params.id, shop.id]);
       if (!changed.length) throw fail(409, 'This order does not need print review.');
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [req.params.id]);
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), req.params.id, changed[0].status, 'failed', req.user.id, 'print.stopped_by_owner', 'manual_stop', now()]);
+      try {
+        await tx.query('SAVEPOINT resolve_hist_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), req.params.id, changed[0].status, 'failed', req.user.id, 'print.stopped_by_owner', 'manual_stop', now()]);
+        await tx.query('RELEASE SAVEPOINT resolve_hist_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT resolve_hist_sp').catch(() => {});
+        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed in resolve-failed:', histErr.message);
+      }
       await audit(tx, req.user.id, 'print.stopped_by_owner', req.params.id);
     }); res.json({ ok: true });
   });
@@ -479,7 +493,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       if (!order) throw fail(409, 'This order cannot be cancelled while a print may be running.');
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
+      try {
+        await tx.query('SAVEPOINT cancel_hist_sp');
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
+        await tx.query('RELEASE SAVEPOINT cancel_hist_sp');
+      } catch (histErr) {
+        await tx.query('ROLLBACK TO SAVEPOINT cancel_hist_sp').catch(() => {});
+        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed in cancel:', histErr.message);
+      }
       await audit(tx, req.user.id, 'order.cancelled', order.id);
     }); res.json({ ok: true });
   });
