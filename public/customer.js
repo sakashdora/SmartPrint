@@ -1,6 +1,5 @@
-import { cropImage } from './crop.js';
-import { showDocument, downloadPdf } from './viewer.js';
 import { icon } from './ui.js';
+
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
   if (!slug) {
@@ -19,7 +18,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         <div class="welcome-step-card">
           <span class="step-badge">Step 2</span>
           <strong>${icon('file')} Upload & Options</strong>
-          <p class="muted small">Upload your PDF or image, pick B&W or Colour and pages.</p>
+          <p class="muted small">Upload your PDF or document, pick B&W or Colour and copies.</p>
         </div>
         <div class="welcome-step-card">
           <span class="step-badge">Step 3</span>
@@ -40,6 +39,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     </main>`);
     return;
   }
+
   let shop;
   try {
     shop = await api(`/api/shops/${encodeURIComponent(slug)}`);
@@ -56,145 +56,388 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     </main>`);
     return;
   }
+
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
-  const isPdf = file => /\.pdf$/i.test(file.name);
-  let files = [], originals = [], quote, viewer, revision = 0, generating = false, output, editing = false;
-  let selection = 0;
-  mount(`<main class="customer-shell">
-    <div class="shop-context">${icon('shop')}<strong>${escape(shop.name)}</strong><span class="badge active">Open</span><span class="shop-location">${escape(shop.location)}</span></div>
-    <div class="customer-heading"><div><h1>Upload your document</h1><p class="muted">Preview your file, choose your options, then pay.</p></div>
-    <ol class="simple-steps" aria-label="Print progress"><li aria-current="step"><b>1</b> Upload</li><li><b>2</b> Print options</li><li><b>3</b> Payment</li></ol></div>
-    <div class="print-layout">
-      <section class="preview-panel" aria-labelledby="preview-title">
-        <div class="file-bar"><div class="file-description">${icon('file')}<div><strong id="selected-file">Choose your document</strong><p class="muted">PDF, JPG, PNG${health.office ? ', Word, PowerPoint, Excel' : ''} · Up to 20 MB</p></div></div><label class="upload-button" for="files">${icon('upload')}<span id="upload-label">Choose file</span></label><input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple></div>
-        <div class="preview-heading"><h2 id="preview-title">Your preview</h2><span id="preview-status" class="badge">No file yet</span></div>
-        <div id="preview-area"><div class="preview-empty"><div class="empty-icon">${icon('file')}</div><strong>A clear view before you print.</strong><p>Choose your file to see it here. You can review every page before placing an order.</p><label class="secondary" for="files">${icon('upload')} Choose file</label></div></div>
-        <p class="preview-hint" id="preview-hint">Your prepared preview will show the print settings you choose.</p>
-      </section>
-      <aside class="settings-panel" aria-label="Print settings and checkout"><form id="print-form"><h2>Print options</h2>
-        <fieldset class="option-row"><legend>Colour</legend><div class="choices"><label class="choice"><input type="radio" name="color" value="bw" checked><span>Black & white</span></label><label class="choice"><input type="radio" name="color" value="color"><span>Colour</span></label></div></fieldset>
-        <fieldset class="option-row"><legend>Sides</legend><div class="choices"><label class="choice"><input type="radio" name="duplex" value="false" checked><span>One-sided</span></label><label class="choice"><input type="radio" name="duplex" value="true"><span>Both sides</span></label></div></fieldset>
-        <fieldset class="option-row"><legend>Layout</legend><div class="choices"><label class="choice"><input type="radio" name="layout" value="single" checked><span>Standard</span></label><label class="choice"><input type="radio" name="layout" value="two"><span>2 on 1</span></label><label class="choice"><input type="radio" name="layout" value="card"><span>ID card</span></label></div></fieldset>
-        <div class="option-line"><label for="copies">Copies</label><div class="stepper"><button type="button" data-copy="-1" aria-label="Fewer copies">−</button><input id="copies" name="copies" type="number" min="1" max="100" value="1" required><button type="button" data-copy="1" aria-label="More copies">+</button></div></div>
-        <label class="field option-line">Pages<input name="range" placeholder="All pages (or 1-3, 5)" aria-describedby="pages-help"></label><p id="pages-help" class="sr-only">Leave blank to print all pages, or enter page numbers and ranges.</p>
-        <div class="option-line paper-size"><span>Paper size</span><span>A4 <small>210 × 297 mm</small></span></div>
-        <details id="image-tools" hidden><summary>${icon('sliders')} Image adjustments</summary><p class="muted">Select the area to keep, then update your print preview.</p><label class="field">Image to crop<select id="crop-file"><option value="0">Image 1</option></select></label><div class="actions"><button type="button" class="secondary" id="crop-image">Select crop area</button><button type="button" class="secondary" id="reset-image">Reset image</button></div><div class="fields"><label class="field">Trim all edges (%)<input name="crop" type="number" min="0" max="20" value="0"></label><label class="field">Rotate<select name="rotate"><option value="0">No rotation</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label></div><label class="check"><input type="checkbox" name="smartCrop"><span>Smart crop <small>Remove blank borders</small></span></label><label class="check"><input type="checkbox" name="enhance"><span>Enhance <small>Improve contrast & sharpness</small></span></label></details>
-        <button class="secondary wide" id="prepare">${icon('refresh')} Update print preview</button><p id="prepare-status" class="muted prepare-status" aria-live="polite">Choose a file to begin.</p>
-      </form><section class="checkout-bar" aria-label="Order total"><p id="summary-text">Select a file to see the price</p><div class="checkout-total"><span>Total</span><strong id="total" aria-live="polite">—</strong></div><small>${money(shop.bw)} B&W / ${money(shop.color)} colour per side</small><div class="checkout-actions"><label class="field">Pay with<select id="method"><option value="cash">Cash at the shop</option><option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · shop verifies${shop.upi_id ? '' : ' · unavailable'}</option></select></label><button id="place" class="primary wide" disabled>Place order ${icon('arrow')}</button></div><p class="checkout-note" id="payment-help"></p></section><p class="inline-error" id="print-error" role="alert"></p></aside>
-    </div><p class="privacy-line">${icon('lock')}<span>Your live file is deleted after the shop confirms printing. Unprinted files expire after 24 hours.</span></p>
-  </main>`);
-  const form = document.querySelector('#print-form'), area = document.querySelector('#preview-area'), place = document.querySelector('#place'), status = document.querySelector('#prepare-status');
-  const method = document.querySelector('#method');
-  function paymentHelp() { document.querySelector('#payment-help').textContent = method.value === 'upi' ? 'Direct UPI needs the shop to verify the bank credit before printing.' : 'Pay at the counter. Printing starts after cash is collected.'; }
-  method.onchange = paymentHelp; paymentHelp();
-  function readOptions() { const data = new FormData(form); return { color: data.get('color'), duplex: data.get('duplex') === 'true', copies: Number(data.get('copies')), layout: data.get('layout'), range: data.get('range'), crop: Number(data.get('crop')), rotate: Number(data.get('rotate')), enhance: data.has('enhance'), smartCrop: data.has('smartCrop') }; }
-  function setStep(step) { document.querySelectorAll('.simple-steps li').forEach((li, index) => { li.classList.toggle('complete', index < step); if (index === step) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current'); }); }
-  function invalidate() { revision++; quote = null; place.disabled = true; document.querySelector('#total').textContent = '—'; document.querySelector('#summary-text').textContent = 'Update the preview to get your price'; document.querySelector('#preview-status').textContent = 'Update needed'; document.querySelector('#preview-status').className = 'badge pending'; status.textContent = 'Settings changed. Select “Update print preview”.'; setStep(files.length ? 1 : 0); }
-  form.oninput = event => { if (event.target.id !== 'crop-file') invalidate(); };
-  form.onchange = event => { if (event.target.id === 'crop-file') return; if (form.elements.layout.value === 'card') form.querySelector('[name=duplex][value=false]').checked = true; invalidate(); };
-  form.querySelectorAll('[data-copy]').forEach(button => button.onclick = () => { const input = form.elements.copies; input.value = Math.max(1, Math.min(100, (Number(input.value) || 1) + Number(button.dataset.copy))); invalidate(); });
-  async function previewFile(index = 0) {
-    const version = ++selection; viewer?.destroy(); viewer = null;
-    document.querySelector('#selected-file').textContent = files.map(file => file.name).join(' + ') || 'Choose your document';
-    document.querySelector('#preview-title').textContent = 'Selected image / original preview';
-    document.querySelector('#preview-status').textContent = files.length ? 'Update print preview' : 'No file yet';
-    document.querySelector('#preview-hint').textContent = 'Update the print preview to see the final crop, colour, layout and price.';
-    const file = files[index];
-    try {
-      if (file && (isImage(file) || isPdf(file))) {
-        const typed = file.type ? file : new Blob([file], { type: isPdf(file) ? 'application/pdf' : /\.png$/i.test(file.name) ? 'image/png' : 'image/jpeg' });
-        const result = await showDocument(area, typed, { title: 'Selected file before print settings' });
-        if (version !== selection || !document.contains(area)) { result.destroy(); return; } viewer = result;
-      } else area.innerHTML = '<div class="preview-empty"><strong>Update the print preview</strong><p>Choose a file, then prepare it to see the final output.</p></div>';
-    } catch { if (version === selection && document.contains(area)) area.innerHTML = '<p>Unable to show this file. Try updating the print preview, or choose another file.</p>'; }
+  let files = [], quote = null, isCalculating = false, isOrdering = false;
+
+  function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
   }
-  document.querySelector('#files').onchange = async event => {
-    if (generating || editing) return;
-    const next = [...event.target.files];
-    if (!next.length) return;
-    const validTypes = health.office ? /\.(pdf|png|jpe?g|docx|pptx|xlsx)$/i : /\.(pdf|png|jpe?g)$/i;
-    const error = next.length > 2 || next.some(file => !file.size || !validTypes.test(file.name)) || next.reduce((sum,file) => sum + file.size, 0) > 20 * 1048576 || (next.length === 2 && !next.every(isImage));
-    if (error) { event.target.value = ''; notify('Choose one supported document or two JPG/PNG card images, up to 20 MB total.'); return; }
-    files = next; originals = [...next]; invalidate();
-    document.querySelector('#print-error').textContent = '';
-    const imageTools = document.querySelector('#image-tools'); imageTools.hidden = !files.every(isImage); imageTools.open = !imageTools.hidden;
-    form.elements.crop.value = '0'; form.elements.rotate.value = '0'; form.elements.enhance.checked = false; form.elements.smartCrop.checked = false; form.elements.range.value = '';
-    if (files.length === 2) { form.elements.layout.value = 'card'; form.querySelector('[name=duplex][value=false]').checked = true; }
-    else if (form.elements.layout.value === 'card') form.elements.layout.value = 'single';
-    const picker = document.querySelector('#crop-file'); picker.replaceChildren(...files.map((file,index) => new Option(files.length === 2 ? (index === 0 ? 'Front image' : 'Back image') : 'Image', String(index))));
-    document.querySelector('#upload-label').textContent = 'Replace file';
-    await previewFile(); status.textContent = 'Check your settings, then update the print preview.';
+
+  mount(`<main class="customer-shell">
+    <div class="shop-context">
+      ${icon('shop')}
+      <strong>${escape(shop.name)}</strong>
+      <span class="badge active">Open</span>
+      <span class="shop-location">${escape(shop.location)}</span>
+      <span class="shop-rates-badge">${money(shop.bw)} B&W · ${money(shop.color)} Colour / page</span>
+    </div>
+
+    <div class="customer-heading">
+      <div>
+        <h1>Upload document to print</h1>
+        <p class="muted">Select your file, choose print options, and submit your order directly to the shop printer.</p>
+      </div>
+      <ol class="simple-steps" aria-label="Print progress">
+        <li id="step-1" class="complete"><b>1</b> Upload file</li>
+        <li id="step-2"><b>2</b> Print options</li>
+        <li id="step-3"><b>3</b> Pay & Print</li>
+      </ol>
+    </div>
+
+    <div class="customer-direct-layout">
+      <div class="customer-main-col">
+        <!-- 1. Document Upload Area -->
+        <section class="panel direct-upload-card" id="drop-panel">
+          <div class="panel-heading">
+            <h2>1. Select Document</h2>
+            <span class="badge" id="file-count-badge">No file chosen</span>
+          </div>
+          
+          <div class="direct-dropzone" id="direct-dropzone">
+            <div class="dropzone-icon">${icon('upload')}</div>
+            <strong class="dropzone-title">Drag & drop your document here</strong>
+            <p class="muted small">PDF, JPG, PNG${health.office ? ', Word, PowerPoint, Excel' : ''} · Up to 20 MB</p>
+            <label class="primary upload-cta-btn" for="files">
+              ${icon('file')} Browse files
+            </label>
+            <input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple>
+          </div>
+
+          <div class="selected-files-display" id="selected-files-display" style="display: none;">
+            <div class="selected-file-item">
+              <div class="file-icon-wrap">${icon('file')}</div>
+              <div class="file-meta-wrap">
+                <strong id="display-file-name">filename.pdf</strong>
+                <span class="muted small" id="display-file-size">0 KB</span>
+              </div>
+              <label class="secondary small change-file-btn" for="files">
+                ${icon('refresh')} Change
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. Print Settings Form -->
+        <form id="print-form" class="panel direct-settings-card">
+          <h2>2. Print Options</h2>
+
+          <fieldset class="option-row">
+            <legend>Colour</legend>
+            <div class="choices">
+              <label class="choice">
+                <input type="radio" name="color" value="bw" checked>
+                <span>Black & White (${money(shop.bw)})</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="color" value="color">
+                <span>Colour (${money(shop.color)})</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="option-row">
+            <legend>Sides</legend>
+            <div class="choices">
+              <label class="choice">
+                <input type="radio" name="duplex" value="false" checked>
+                <span>One-sided</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="duplex" value="true">
+                <span>Both sides (Duplex)</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="option-row">
+            <legend>Layout</legend>
+            <div class="choices">
+              <label class="choice">
+                <input type="radio" name="layout" value="single" checked>
+                <span>Standard</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="layout" value="two">
+                <span>2 pages on 1</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="layout" value="card">
+                <span>ID Card (Fit)</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="option-line">
+            <label for="copies">Copies</label>
+            <div class="stepper">
+              <button type="button" data-copy="-1" aria-label="Fewer copies">−</button>
+              <input id="copies" name="copies" type="number" min="1" max="100" value="1" required>
+              <button type="button" data-copy="1" aria-label="More copies">+</button>
+            </div>
+          </div>
+
+          <label class="field option-line">
+            Pages to print
+            <input name="range" placeholder="All pages (or e.g. 1-3, 5)">
+          </label>
+
+          <div class="option-line paper-size">
+            <span>Paper format</span>
+            <span>A4 standard <small>(210 × 297 mm)</small></span>
+          </div>
+        </form>
+      </div>
+
+      <!-- 3. Checkout & Summary Sidebar -->
+      <aside class="customer-sidebar-col">
+        <section class="panel checkout-summary-card">
+          <h2>Order Summary</h2>
+          
+          <div class="summary-specs" id="summary-specs">
+            <div class="spec-row">
+              <span>Status</span>
+              <strong id="order-status-text" class="badge">Awaiting document</strong>
+            </div>
+            <div class="spec-row">
+              <span>Pages</span>
+              <strong id="spec-pages">—</strong>
+            </div>
+            <div class="spec-row">
+              <span>Paper sheets</span>
+              <strong id="spec-sheets">—</strong>
+            </div>
+            <div class="spec-row">
+              <span>Copies</span>
+              <strong id="spec-copies">1</strong>
+            </div>
+          </div>
+
+          <div class="checkout-total-block">
+            <span>Total Amount</span>
+            <strong id="total-amount" class="total-price-tag">—</strong>
+            <small class="muted" id="price-subnote">Select a document to calculate price</small>
+          </div>
+
+          <div class="payment-method-block">
+            <label class="field">
+              Payment Method
+              <select id="method">
+                <option value="cash">Cash at counter</option>
+                <option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · Shop verifies${shop.upi_id ? '' : ' (unavailable)'}</option>
+              </select>
+            </label>
+            <p class="muted small" id="payment-note">Pay cash to shopkeeper when collecting your printed paper.</p>
+          </div>
+
+          <button id="place-order-btn" class="primary wide place-order-btn" disabled>
+            ${icon('printer')} Place Print Order →
+          </button>
+
+          <p class="inline-error" id="order-error" role="alert"></p>
+
+          <div class="privacy-guarantee">
+            ${icon('lock')}
+            <span>Your file is encrypted and automatically deleted after printing.</span>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>`);
+
+  const form = document.querySelector('#print-form');
+  const dropPanel = document.querySelector('#drop-panel');
+  const fileInput = document.querySelector('#files');
+  const dropzone = document.querySelector('#direct-dropzone');
+  const fileDisplay = document.querySelector('#selected-files-display');
+  const placeBtn = document.querySelector('#place-order-btn');
+  const methodSelect = document.querySelector('#method');
+  const errorEl = document.querySelector('#order-error');
+  const statusBadge = document.querySelector('#file-count-badge');
+  const orderStatusText = document.querySelector('#order-status-text');
+
+  function updatePaymentHelp() {
+    const isUpi = methodSelect.value === 'upi';
+    document.querySelector('#payment-note').textContent = isUpi
+      ? 'Pay directly to the shop’s UPI QR on the next screen. The shop verifies and prints immediately.'
+      : 'Pay cash at the shop counter. Printing starts as soon as payment is confirmed.';
+  }
+  methodSelect.onchange = updatePaymentHelp;
+  updatePaymentHelp();
+
+  function readOptions() {
+    const data = new FormData(form);
+    return {
+      color: data.get('color') || 'bw',
+      duplex: data.get('duplex') === 'true',
+      copies: Math.max(1, Math.min(100, Number(data.get('copies')) || 1)),
+      layout: data.get('layout') || 'single',
+      range: String(data.get('range') || '').trim()
+    };
+  }
+
+  form.querySelectorAll('[data-copy]').forEach(button => {
+    button.onclick = () => {
+      const input = form.elements.copies;
+      input.value = Math.max(1, Math.min(100, (Number(input.value) || 1) + Number(button.dataset.copy)));
+      document.querySelector('#spec-copies').textContent = input.value;
+      recalculateQuote();
+    };
+  });
+
+  form.oninput = () => {
+    document.querySelector('#spec-copies').textContent = form.elements.copies.value || '1';
+    recalculateQuote();
   };
-  document.querySelector('#crop-file').onchange = event => { invalidate(); previewFile(Number(event.target.value)); };
-  document.querySelector('#crop-image').onclick = async () => {
-    const index = Number(document.querySelector('#crop-file').value); if (generating || editing || !files[index] || !isImage(files[index])) return;
-    editing = true; const controls = [...form.elements, document.querySelector('#files')]; controls.forEach(control => control.disabled = true); place.disabled = true;
-    try {
-      const cropped = await cropImage(originals[index]);
-      if (cropped && document.contains(area)) { files[index] = cropped; form.elements.crop.value = '0'; form.elements.smartCrop.checked = false; invalidate(); await previewFile(index); }
-    } catch (error) { notify(error.message); }
-    finally { editing = false; controls.forEach(control => control.disabled = false); place.disabled = !quote; }
+  form.onchange = () => {
+    if (form.elements.layout.value === 'card') {
+      form.querySelector('[name=duplex][value=false]').checked = true;
+    }
+    recalculateQuote();
   };
-  document.querySelector('#reset-image').onclick = async () => { const index = Number(document.querySelector('#crop-file').value); if (!originals[index]) return; files[index] = originals[index]; form.elements.crop.value = '0'; form.elements.rotate.value = '0'; form.elements.smartCrop.checked = false; form.elements.enhance.checked = false; invalidate(); await previewFile(index); };
+
   async function upload(file) {
     const info = await api('/api/uploads', { method: 'POST', body: { slug, name: file.name, size: file.size } });
     for (let start = 0, part = 0; start < file.size; start += info.chunkSize, part++) {
-      const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer()); let binary = ''; for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
       await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: btoa(binary) } });
-      status.textContent = `Uploading… ${Math.round(Math.min(start + info.chunkSize, file.size) / file.size * 100)}%`;
     }
     return { uploadId: info.id, token: info.token };
   }
-  form.onsubmit = async event => {
-    event.preventDefault(); if (generating || editing) return; const requestRevision = revision; generating = true;
-    const controls = [...form.elements, document.querySelector('#files')]; const settings = readOptions(); selection++; quote = null; controls.forEach(c => c.disabled = true); place.disabled = true;
-    document.querySelector('#print-error').textContent = '';
+
+  async function recalculateQuote() {
+    if (!files.length || isCalculating || isOrdering) return;
+    isCalculating = true;
+    quote = null;
+    placeBtn.disabled = true;
+    errorEl.textContent = '';
+    orderStatusText.textContent = 'Calculating...';
+    orderStatusText.className = 'badge pending';
+    document.querySelector('#total-amount').textContent = '...';
+
     try {
-      if (!files.length || files.length > 2 || files.reduce((sum, f) => sum + f.size, 0) > 20 * 1048576) throw new Error('Choose one document or two card images, up to 20 MB in total.');
-      const uploads = []; for (const file of files) uploads.push(await upload(file));
-      status.textContent = 'Preparing your print preview…';
+      const settings = readOptions();
+      const uploads = [];
+      for (const file of files) {
+        uploads.push(await upload(file));
+      }
       let result = await api('/api/quotes', { method: 'POST', body: { slug, files: uploads, options: settings } });
       if (result.pending) {
         const pending = result;
-        const deadline = Date.now() + 180000;
-        while (result.pending && Date.now() < deadline && document.contains(area)) { status.textContent = 'The shop computer is preparing your preview…'; await new Promise(resolve => setTimeout(resolve, 2000)); result = await api(`/api/preparations/${pending.id}`, { token: pending.token }); }
+        const deadline = Date.now() + 120000;
+        while (result.pending && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 1500));
+          result = await api(`/api/preparations/${pending.id}`, { token: pending.token });
+        }
         if (result.error) throw new Error(result.error);
-        if (result.pending) throw new Error('Preparation is taking longer than expected. Ask the shop to check its connector.');
       }
-      if (revision !== requestRevision || !document.contains(area)) return;
-      output = await downloadPdf(`/api/quotes/${result.id}/preview`, result.token);
-      if (revision !== requestRevision || !document.contains(area)) return;
-      viewer?.destroy(); const preparedViewer = await showDocument(area, output, { title: 'Prepared print output' });
-      if (revision !== requestRevision || !document.contains(area)) { preparedViewer.destroy(); return; }
-      viewer = preparedViewer; quote = result;
-      document.querySelector('#preview-status').textContent = 'Ready to print'; document.querySelector('#preview-title').textContent = 'This is how it will print';
-      document.querySelector('#preview-status').className = 'badge active'; setStep(2);
-      document.querySelector('#preview-hint').textContent = `${settings.duplex ? 'Both sides of the paper' : 'One side of the paper'} · ${settings.copies} ${settings.copies === 1 ? 'copy' : 'copies'} · Paper and printer colours may vary slightly.`;
-      document.querySelector('#summary-text').textContent = `${result.pages} ${result.pages === 1 ? 'page' : 'pages'} · ${result.sides} printed ${result.sides === 1 ? 'side' : 'sides'} · ${result.sheets} ${result.sheets === 1 ? 'sheet' : 'sheets'}`;
-      document.querySelector('#total').textContent = money(result.amount); status.textContent = 'Preview ready. Check every page, then place your order.'; place.disabled = false;
-    } catch (error) { quote = null; if (document.contains(area)) { document.querySelector('#print-error').textContent = error.message; status.textContent = 'Preview not ready. Please try again.'; } }
-    finally { generating = false; controls.forEach(c => c.disabled = false); }
-  };
-  place.onclick = async () => {
-    if (!quote || Date.parse(quote.expires) <= Date.now()) { invalidate(); notify('The price quote expired. Update your preview.'); return; }
-    place.disabled = true;
-    try {
-      const fileName = files.map(f => f.name).join(' + ') || 'document.pdf';
-      const result = await api('/api/orders', { method: 'POST', token: quote.token, body: { quoteId: quote.id, method: document.querySelector('#method').value, fileName } });
-      viewer?.destroy();
-      onOrder(result);
+      quote = result;
+      document.querySelector('#spec-pages').textContent = String(result.pages);
+      document.querySelector('#spec-sheets').textContent = String(result.sheets);
+      document.querySelector('#spec-copies').textContent = String(settings.copies);
+      document.querySelector('#total-amount').textContent = money(result.amount);
+      document.querySelector('#price-subnote').textContent = `${result.pages} page${result.pages === 1 ? '' : 's'} · ${result.sides} side${result.sides === 1 ? '' : 's'} · ${result.sheets} sheet${result.sheets === 1 ? '' : 's'}`;
+      orderStatusText.textContent = 'Ready to print';
+      orderStatusText.className = 'badge active';
+      document.querySelector('#step-2').classList.add('complete');
+      document.querySelector('#step-3').setAttribute('aria-current', 'step');
+      placeBtn.disabled = false;
+      placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${money(result.amount)} →`;
+    } catch (err) {
+      quote = null;
+      errorEl.textContent = err.message || 'Could not calculate price.';
+      orderStatusText.textContent = 'Calculation failed';
+      orderStatusText.className = 'badge danger';
+      document.querySelector('#total-amount').textContent = '—';
+    } finally {
+      isCalculating = false;
     }
-    catch (error) { document.querySelector('#print-error').textContent = error.message; place.disabled = false; }
+  }
+
+  fileInput.onchange = async event => {
+    if (isCalculating || isOrdering) return;
+    const next = [...event.target.files];
+    if (!next.length) return;
+
+    const validTypes = health.office ? /\.(pdf|png|jpe?g|docx|pptx|xlsx)$/i : /\.(pdf|png|jpe?g)$/i;
+    const isTooBig = next.reduce((sum, f) => sum + f.size, 0) > 20 * 1048576;
+    const isBadType = next.some(f => !f.size || !validTypes.test(f.name));
+    const isBadCard = next.length === 2 && !next.every(isImage);
+
+    if (next.length > 2 || isTooBig || isBadType || isBadCard) {
+      event.target.value = '';
+      notify('Please choose 1 document or 2 card images (Front & Back), up to 20 MB total.');
+      return;
+    }
+
+    files = next;
+    dropzone.style.display = 'none';
+    fileDisplay.style.display = 'block';
+
+    const names = files.map(f => f.name).join(' + ');
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    document.querySelector('#display-file-name').textContent = names;
+    document.querySelector('#display-file-size').textContent = `${formatBytes(totalSize)} · ${files.length === 1 ? '1 file' : '2 files'}`;
+    statusBadge.textContent = `${files.length} file ready`;
+    statusBadge.className = 'badge active';
+
+    if (files.length === 2) {
+      form.elements.layout.value = 'card';
+      form.querySelector('[name=duplex][value=false]').checked = true;
+    }
+
+    await recalculateQuote();
   };
-  const dropPanel = document.querySelector('.preview-panel');
+
   if (dropPanel) {
-    ['dragenter', 'dragover'].forEach(name => dropPanel.addEventListener(name, e => { e.preventDefault(); dropPanel.classList.add('is-dragging'); }));
-    ['dragleave', 'drop'].forEach(name => dropPanel.addEventListener(name, e => { e.preventDefault(); dropPanel.classList.remove('is-dragging'); }));
+    ['dragenter', 'dragover'].forEach(name => dropPanel.addEventListener(name, e => {
+      e.preventDefault();
+      dropPanel.classList.add('is-dragging');
+    }));
+    ['dragleave', 'drop'].forEach(name => dropPanel.addEventListener(name, e => {
+      e.preventDefault();
+      dropPanel.classList.remove('is-dragging');
+    }));
     dropPanel.addEventListener('drop', e => {
-      if (!generating && !editing && e.dataTransfer?.files?.length) {
-        document.querySelector('#files').files = e.dataTransfer.files;
-        document.querySelector('#files').dispatchEvent(new Event('change'));
+      if (!isCalculating && !isOrdering && e.dataTransfer?.files?.length) {
+        fileInput.files = e.dataTransfer.files;
+        fileInput.dispatchEvent(new Event('change'));
       }
     });
   }
+
+  placeBtn.onclick = async () => {
+    if (!quote || Date.parse(quote.expires) <= Date.now()) {
+      await recalculateQuote();
+      if (!quote) return;
+    }
+    isOrdering = true;
+    placeBtn.disabled = true;
+    placeBtn.innerHTML = `Submitting order...`;
+    errorEl.textContent = '';
+
+    try {
+      const fileName = files.map(f => f.name).join(' + ') || 'document.pdf';
+      const result = await api('/api/orders', {
+        method: 'POST',
+        token: quote.token,
+        body: {
+          quoteId: quote.id,
+          method: methodSelect.value,
+          fileName
+        }
+      });
+      onOrder(result);
+    } catch (err) {
+      errorEl.textContent = err.message || 'Failed to place order.';
+      placeBtn.disabled = false;
+      placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${quote ? money(quote.amount) : ''} →`;
+      isOrdering = false;
+    }
+  };
 }

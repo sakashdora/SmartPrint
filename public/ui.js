@@ -22,6 +22,8 @@ const paths = {
   logout: '<path d="M9 3H3v18h6M9 12h12m-5-5 5 5-5 5"/>',
   sliders: '<path d="M3 6h4m6 0h8M3 18h10m6 0h2M7 3v6h6V3zM13 15v6h6v-6z"/>',
   crop: '<path d="M6 2v16h16M2 6h16v16"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };
 export function icon(name, className = '') {
   return `<svg class="icon ${className}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;

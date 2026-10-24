@@ -307,7 +307,7 @@ export async function createApp({ database, seed = true } = {}) {
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
     const base = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
     const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, base).href;
-    res.json({ url, image: await QRCode.toDataURL(url, { width: 320, margin: 2 }) });
+    res.json({ url, image: await QRCode.toDataURL(url, { width: 600, margin: 2, errorCorrectionLevel: 'H' }) });
   });
   app.use('/api/admin', requireRole('admin'));
   app.get('/api/admin/shops', async (req, res) => res.json(await db.query('SELECT s.*,u.email FROM shops s JOIN users u ON u.id=s.owner_id ORDER BY s.name')));
