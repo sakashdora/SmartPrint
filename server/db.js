@@ -35,18 +35,45 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       migrate: async () => {
         const client = await connect();
         try {
+          // Check if smartprint schema already exists before attempting CREATE SCHEMA.
+          // In PostgreSQL, CREATE SCHEMA IF NOT EXISTS requires database-level CREATE privilege
+          // even when the schema already exists, which throws 'permission denied for database'
+          // when connecting via a scoped application role.
+          const schemaCheck = await client.query("SELECT to_regnamespace('smartprint') AS oid").catch(() => ({ rows: [] }));
+          if (!schemaCheck.rows?.[0]?.oid) {
+            try {
+              await client.query('CREATE SCHEMA IF NOT EXISTS smartprint');
+            } catch (err) {
+              if (!err.message?.includes('permission denied')) throw err;
+            }
+          }
           await client.query('BEGIN');
-          await client.query('CREATE SCHEMA IF NOT EXISTS smartprint');
-          await client.query(qualify(schema));
-          await client.query(`
-            ALTER TABLE smartprint.orders ADD COLUMN IF NOT EXISTS file_name TEXT DEFAULT 'document.pdf';
-            ALTER TABLE smartprint.orders ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 0;
-            ALTER TABLE smartprint.devices ADD COLUMN IF NOT EXISTS status_note TEXT DEFAULT 'Ready';
-            ALTER TABLE smartprint.devices ADD COLUMN IF NOT EXISTS is_paused INTEGER DEFAULT 0;
-          `);
+          try {
+            await client.query('SAVEPOINT sp_schema');
+            await client.query(qualify(schema));
+            await client.query('RELEASE SAVEPOINT sp_schema');
+          } catch (err) {
+            await client.query('ROLLBACK TO SAVEPOINT sp_schema').catch(() => {});
+            if (!err.message?.includes('permission denied') && !err.message?.includes('must be owner')) throw err;
+          }
+          for (const [table, column, def] of [
+            ['orders', 'file_name', "TEXT DEFAULT 'document.pdf'"],
+            ['orders', 'priority', 'INTEGER DEFAULT 0'],
+            ['devices', 'status_note', "TEXT DEFAULT 'Ready'"],
+            ['devices', 'is_paused', 'INTEGER DEFAULT 0'],
+          ]) {
+            try {
+              await client.query(`SAVEPOINT sp_${table}_${column}`);
+              await client.query(`ALTER TABLE smartprint.${table} ADD COLUMN IF NOT EXISTS ${column} ${def}`);
+              await client.query(`RELEASE SAVEPOINT sp_${table}_${column}`);
+            } catch (err) {
+              await client.query(`ROLLBACK TO SAVEPOINT sp_${table}_${column}`).catch(() => {});
+              if (!err.message?.includes('permission denied') && !err.message?.includes('must be owner')) throw err;
+            }
+          }
           await client.query('COMMIT');
         } catch(error) {
-          await client.query('ROLLBACK');
+          await client.query('ROLLBACK').catch(() => {});
           throw error;
         } finally { client.release(); }
       }, close: () => pool.end(),
