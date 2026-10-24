@@ -216,7 +216,9 @@ export async function createApp({ database, seed = true } = {}) {
     const [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND method='online' AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
     if (!order) throw fail(404, 'Payable order not found.');
     const keyId = process.env.RAZORPAY_KEY_ID, secret = process.env.RAZORPAY_KEY_SECRET;
-    if (!keyId || !secret) throw fail(503, 'Online payments are unavailable.');
+    if (!config.payments || !keyId || !secret) throw fail(503, 'Online payments are unavailable.');
+    const [document] = await db.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
+    if (!document) throw fail(409, 'The print file expired. Upload it again before paying.');
     if (!order.provider_order) {
       // Ambiguous provider failures require reconciliation, not a blind retry.
       const marker = `creating:${randomUUID()}`;

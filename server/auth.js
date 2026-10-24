@@ -17,7 +17,7 @@ export function authRoutes(app, db, key, config) {
     const [user] = await db.query('SELECT * FROM users WHERE email=$1', [email]);
     const dummy = 'scrypt$32768$8$3$00000000000000000000000000000000$' + '00'.repeat(64);
     const valid = typeof password === 'string' && password.length <= 128 && await checkPassword(password, user?.password ?? dummy);
-    if (!user || !valid) throw fail(401, 'Email, password or verification code is incorrect.');
+    if (!user || !valid || (req.body.role && req.body.role !== user.role)) throw fail(401, 'Email, password or verification code is incorrect.');
     if (!user.password.startsWith('scrypt$')) await db.query('UPDATE users SET password=$1 WHERE id=$2 AND password=$3', [await hashPassword(password), user.id, user.password]);
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [user.id]);
     if (mfa) {

@@ -2,8 +2,8 @@ import { watchUpdates } from './live.js';
 import { icon } from './ui.js';
 export async function paymentsPage({ api, workspace, escape, notify }) {
   const saved = await api('/api/owner/payments');
-  workspace(`<div class="workhead"><div><h1>Accept UPI payments</h1><p class="muted">Payments go directly to your own UPI account.</p></div></div><section class="panel"><form id="upi-settings"><label class="field">Your UPI ID<input name="upi_id" placeholder="yourname@bank" value="${escape(saved?.upi_id || '')}" required maxlength="264"></label><label class="field">Account holder’s name<input name="payee" value="${escape(saved?.payee || '')}" required maxlength="100"></label><button class="primary">Save UPI details</button></form><p class="muted">Customers see this account and a payment QR. Check the credit in your own bank or UPI app before confirming payment. A customer’s reference or screenshot is not payment verification.</p></section>`, 'payments');
-  document.querySelector('#upi-settings').onsubmit = async event => { event.preventDefault(); const button = event.submitter; button.disabled = true; try { await api('/api/owner/payments', { method: 'PUT', body: Object.fromEntries(new FormData(event.target)) }); notify('UPI details saved. Existing orders keep their original payment account.'); } catch (error) { notify(error.message); } finally { button.disabled = false; } };
+  workspace(`<div class="workhead"><div><h1>Your shop’s UPI payments</h1><p class="muted">Receive payments directly through your PhonePe, Google Pay, Paytm or bank UPI ID.</p></div></div><section class="panel"><p class="notice-inline">${saved ? 'UPI is configured for your shop. Customers can pay your account using their preferred UPI app.' : 'Add your shop’s UPI ID to enable QR payments at customer checkout.'}</p><form id="upi-settings"><label class="field">Shop UPI ID<input name="upi_id" placeholder="yourname@bank" autocapitalize="none" spellcheck="false" value="${escape(saved?.upi_id || '')}" required maxlength="264"></label><label class="field">Account holder’s name<input name="payee" value="${escape(saved?.payee || '')}" required maxlength="100"></label><p class="muted">Copy the UPI ID linked to your shop’s receiving account from your payment app. Enter the account name customers should check before paying. Never enter a UPI PIN, OTP or password here.</p><button class="primary">Save UPI details</button></form><p class="muted">SmartPrint generates an order-specific QR with your UPI ID and the exact amount. No payment gateway account is required. Check the credit in your own bank or UPI app before confirming payment. A customer’s reference or screenshot is not payment verification.</p></section>`, 'payments');
+  document.querySelector('#upi-settings').onsubmit = async event => { event.preventDefault(); const button = event.submitter; button.disabled = true; try { await api('/api/owner/payments', { method: 'PUT', body: Object.fromEntries(new FormData(event.target)) }); notify('UPI details saved. Existing orders keep their original payment account.'); await paymentsPage({ api, workspace, escape, notify }); } catch (error) { notify(error.message); } finally { button.disabled = false; } };
 }
 export async function printersPage({ api, workspace, escape, notify }) {
   const [devices, scanned] = await Promise.all([
@@ -280,7 +280,7 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
   if (order.method === 'upi' && order.status === 'awaiting_payment') {
     const upi = await api(`/api/orders/${receipt.id}/upi`, { token: receipt.token });
     payment = `<section class="panel upi-card">
-      <h2>Pay ${money(order.amount)} by UPI</h2>
+      <h2>Pay ${money(order.amount)} directly to the shop</h2><p>Use the shop’s UPI QR or open your UPI app. Once the shop verifies the bank credit, the connected printer starts automatically.</p>
       <p>Pay to <strong>${escape(upi.payee)}</strong><br><span class="muted">${escape(upi.upi_id)}</span></p>
       <div class="upi-qr-wrap"><img class="payment-qr" src="${upi.image}" alt="UPI payment QR"></div>
       <div class="upi-links-row">
@@ -329,7 +329,7 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
             <span class="queue-pos-num">#${order.queue_position || 1}</span>
             <div>
               <strong>Current Queue Position</strong>
-              <p class="muted small">Estimated wait time: ~${(order.queue_position || 1) * 2} minutes</p>
+              <p class="muted small">Printing starts automatically when a compatible connected printer is ready.</p>
             </div>
           </div>
         </div>

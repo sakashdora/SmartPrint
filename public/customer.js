@@ -29,11 +29,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
       <div class="landing-portal-actions">
         <a class="primary wide" href="#register">Register Your Shop →</a>
-        <a class="secondary wide" href="#login">Shop & Admin Sign In</a>
+        <a class="secondary wide" href="#login">Shop owner sign in</a>
       </div>
 
       <div class="welcome-footer">
-        <span>Already placed an order?</span>
+        <a href="#admin-login">Administrator sign in</a><span>Already placed an order?</span>
         <a href="#track">Track order progress ${icon('arrow')}</a>
       </div>
     </main>`);
@@ -76,10 +76,13 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         <div class="option-line paper-size"><span>Paper size</span><span>A4 <small>210 × 297 mm</small></span></div>
         <details id="image-tools"><summary>${icon('sliders')} Image adjustments</summary><p class="muted">For images only. Update the preview to see your changes.</p><div class="fields"><label class="field">Crop edges (%)<input name="crop" type="number" min="0" max="20" value="0"></label><label class="field">Rotate<select name="rotate"><option value="0">No rotation</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label></div><label class="check"><input type="checkbox" name="smartCrop"><span>Smart crop <small>Remove blank borders</small></span></label><label class="check"><input type="checkbox" name="enhance"><span>Enhance <small>Improve contrast & sharpness</small></span></label></details>
         <button class="secondary wide" id="prepare">${icon('refresh')} Update print preview</button><p id="prepare-status" class="muted prepare-status" aria-live="polite">Choose a file to begin.</p>
-      </form><section class="checkout-bar" aria-label="Order total"><p id="summary-text">Select a file to see the price</p><div class="checkout-total"><span>Total</span><strong id="total" aria-live="polite">—</strong></div><small>${money(shop.bw)} B&W / ${money(shop.color)} colour per side</small><div class="checkout-actions"><label class="field">Pay with<select id="method"><option value="cash">Cash at the shop</option><option value="upi" ${shop.upi_id ? '' : 'disabled'}>UPI${shop.upi_id ? '' : ' · unavailable'}</option></select></label><button id="place" class="primary wide" disabled>Place order ${icon('arrow')}</button></div><p class="checkout-note">UPI or cash at the shop</p></section><p class="inline-error" id="print-error" role="alert"></p></aside>
+      </form><section class="checkout-bar" aria-label="Order total"><p id="summary-text">Select a file to see the price</p><div class="checkout-total"><span>Total</span><strong id="total" aria-live="polite">—</strong></div><small>${money(shop.bw)} B&W / ${money(shop.color)} colour per side</small><div class="checkout-actions"><label class="field">Pay with<select id="method"><option value="cash">Cash at the shop</option><option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · shop verifies${shop.upi_id ? '' : ' · unavailable'}</option></select></label><button id="place" class="primary wide" disabled>Place order ${icon('arrow')}</button></div><p class="checkout-note" id="payment-help"></p></section><p class="inline-error" id="print-error" role="alert"></p></aside>
     </div><p class="privacy-line">${icon('lock')}<span>Your live file is deleted after the shop confirms printing. Unprinted files expire after 24 hours.</span></p>
   </main>`);
   const form = document.querySelector('#print-form'), area = document.querySelector('#preview-area'), place = document.querySelector('#place'), status = document.querySelector('#prepare-status');
+  const method = document.querySelector('#method');
+  function paymentHelp() { document.querySelector('#payment-help').textContent = method.value === 'upi' ? 'Direct UPI needs the shop to verify the bank credit before printing.' : 'Pay at the counter. Printing starts after cash is collected.'; }
+  method.onchange = paymentHelp; paymentHelp();
   function readOptions() { const data = new FormData(form); return { color: data.get('color'), duplex: data.get('duplex') === 'true', copies: Number(data.get('copies')), layout: data.get('layout'), range: data.get('range'), crop: Number(data.get('crop')), rotate: Number(data.get('rotate')), enhance: data.has('enhance'), smartCrop: data.has('smartCrop') }; }
   function setStep(step) { document.querySelectorAll('.simple-steps li').forEach((li, index) => { li.classList.toggle('complete', index < step); if (index === step) li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current'); }); }
   function invalidate() { revision++; quote = null; place.disabled = true; document.querySelector('#total').textContent = '—'; document.querySelector('#summary-text').textContent = 'Update the preview to get your price'; document.querySelector('#preview-status').textContent = 'Update needed'; document.querySelector('#preview-status').className = 'badge pending'; status.textContent = 'Settings changed. Select “Update print preview”.'; setStep(files.length ? 1 : 0); }

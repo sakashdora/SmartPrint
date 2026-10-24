@@ -12,13 +12,12 @@ function actions(order, money) {
     if (order.method === 'upi') items.push(button('upi-confirm', 'Verify UPI', true));
   }
   if (order.status === 'queued') {
-    items.push(button('start', 'Start print', true));
+    items.push('<span class="muted">Waiting for automatic printer</span>', button('start', 'Print manually'));
     if (!order.priority) items.push(button('priority', '⚡ Rush Job', false, 'rush-btn'));
   }
   if (['printing', 'awaiting_confirmation', 'needs_review'].includes(order.status)) {
     items.push(button('complete', 'Confirm output', true));
     if (order.status === 'printing' && !order.automatic) items.push(button('document', 'Download for print'));
-    if (['needs_review', 'failed'].includes(order.status)) items.push(button('retry', '🔄 Retry Print', false));
     items.push(button('resolve-failed', 'Print failed / stopped'));
   }
   if (order.status === 'failed') {
@@ -43,7 +42,7 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, fi
     ['Printers online', `${online.length} of ${activeDevices.length}`, activeDevices.length ? (online.length ? 'Connected to your shop' : 'Launch connector on shop PC') : 'Connect your first printer'],
   ];
   return `${head(view === 'owner' ? 'Your shop, at a glance.' : 'Print queue & orders')}
-    ${store.status !== 'active' ? `<div class="attention-banner banner-pending">${icon('alert')}<div><strong>Awaiting Admin Approval:</strong> Your shop registration is under review by a Platform Administrator. You can configure prices and pair printers now; customers will be able to place orders once approved.</div></div>` : ''}
+    ${store.status !== 'active' ? `<div class="attention-banner banner-pending">${icon('alert')}<div><strong>${store.status === 'suspended' ? 'Shop suspended:</strong> Contact the platform administrator to restore access.' : 'Awaiting approval:</strong> Your shop registration is under review.'} You can configure prices and pair printers now; customers will be able to place orders once approved.</div></div>` : ''}
     <div class="metrics metrics-three">${metrics.map(([label, value, note]) => `<div class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></div>`).join('')}</div>
     <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-heading"><div><h2>${view === 'owner' ? 'Live print queue' : 'Orders & Queue Management'}</h2><p class="muted">${orders.length === 200 ? 'Latest 200 orders' : `${orders.length} ${orders.length === 1 ? 'order' : 'orders'}`} · Updates in real time</p></div>${view === 'owner' ? '<a href="#queue">View full queue →</a>' : ''}</div>
     ${tabs([['all', 'All', orders.length], ['ready', 'Ready', orders.filter(o => o.status === 'queued').length], ['printing', 'Printing', printingCount], ['attention', 'Needs attention', orders.filter(attention).length], ['completed', 'Completed', orders.filter(o => o.status === 'completed').length]], filter, 'data-queue-filter')}

@@ -207,8 +207,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   app.post('/api/owner/orders/:id/retry', owner, async (req, res) => {
     const shop = await ownerShop(req);
     await db.transaction(async tx => {
-      const [order] = await tx.query("SELECT id, options FROM orders WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','failed','awaiting_confirmation','printing')", [req.params.id, shop.id]);
-      if (!order) throw fail(400, 'Order cannot be retried in current status.');
+      const [order] = await tx.query("UPDATE orders SET status='queued' WHERE id=$1 AND shop_id=$2 AND status='failed' AND payment='paid' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$3) RETURNING id, options", [req.params.id, shop.id, now()]);
+      if (!order) throw fail(409, 'Confirm the previous print is stopped before retrying a paid order with an unexpired file.');
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       const opts = JSON.parse(order.options);
       opts.priority = 5;
