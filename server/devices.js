@@ -39,42 +39,81 @@ export async function queuePreparation(req, db, shop) {
   return { pending: true, id, token: secret };
 }
 
-export async function scanWindowsPrinters() {
-  try {
-    const script = `Get-CimInstance Win32_Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Default, Network | ConvertTo-Json -Compress`;
-    const { stdout } = await runExec('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 8000 });
-    if (!stdout || !stdout.trim()) return [];
-    const parsed = JSON.parse(stdout);
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    return list.filter(p => p && p.Name && !/OneNote|Fax|XPS/i.test(p.Name)).map(p => {
+export const shopScannedPrinters = new Map();
+
+export function formatPrinterList(rawList) {
+  return rawList
+    .filter(p => p && p.Name && !/OneNote|Fax|Microsoft XPS/i.test(p.Name))
+    .map(p => {
       const port = String(p.PortName || '').trim();
-      let connectionType = 'Local';
+      const driver = String(p.DriverName || '').trim();
+      const name = String(p.Name || '').trim();
+
       let isWifi = false;
       let isWired = false;
-      if (/^USB/i.test(port) || /^DOT4/i.test(port) || /^LPT/i.test(port)) {
-        connectionType = 'Wired USB';
-        isWired = true;
-      } else if (/^WSD/i.test(port) || /^TCP/i.test(port) || /^IP_/i.test(port) || /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(port) || p.Network) {
+      let connectionType = 'Local Spooler';
+
+      // Check for WiFi / Wireless Network indicators
+      if (
+        /^WSD/i.test(port) ||
+        /^TCP/i.test(port) ||
+        /^IP_/i.test(port) ||
+        /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) ||
+        /ipp|wifi|wireless|network/i.test(driver) ||
+        /wifi|wireless|network/i.test(name) ||
+        Boolean(p.Network) ||
+        p.Type === 1
+      ) {
         connectionType = 'WiFi / Wireless Network';
         isWifi = true;
-      } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(p.Name)) {
+      } else if (
+        /^USB/i.test(port) ||
+        /^DOT4/i.test(port) ||
+        /^LPT/i.test(port) ||
+        /^COM/i.test(port) ||
+        /usb/i.test(driver) ||
+        /usb/i.test(name)
+      ) {
+        connectionType = 'Wired USB Cable';
+        isWired = true;
+      } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
         connectionType = 'Virtual / PDF';
       }
-      const isColor = !/mono|black/i.test(p.DriverName || p.Name);
-      const isDuplex = /DCP-|MFC-|LaserJet|Duplex/i.test(p.DriverName || p.Name);
+
+      const isColor = !/mono|black/i.test(driver || name);
+      const isDuplex = /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name);
+
       return {
-        name: p.Name,
+        name,
         portName: port,
-        driverName: p.DriverName || '',
+        driverName: driver,
         connectionType,
         isWifi,
         isWired,
-        isDefault: Boolean(p.Default),
-        status: p.PrinterStatus === 3 ? 'Ready' : 'Normal',
+        isDefault: Boolean(p.Default || p.IsDefault),
+        status: (p.PrinterStatus === 0 || p.PrinterStatus === 3 || p.PrinterStatus === 'Normal' || !p.PrinterStatus) ? 'Ready' : 'Normal',
         color: isColor,
         duplex: isDuplex
       };
     });
+}
+
+export async function scanWindowsPrinters() {
+  if (process.platform !== 'win32') return [];
+  try {
+    const script = `
+      $defaultPrinter = try { ((Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows' -ErrorAction SilentlyContinue).Device -split ',')[0] } catch { '' }
+      try {
+        Get-Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Type, @{Name='IsDefault'; Expression={$_.Name -eq $defaultPrinter}} | ConvertTo-Json -Compress
+      } catch {
+        Get-CimInstance Win32_Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Default, Network | ConvertTo-Json -Compress
+      }
+    `;
+    const { stdout } = await runExec('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 12000 });
+    if (!stdout || !stdout.trim()) return [];
+    const parsed = JSON.parse(stdout);
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    return formatPrinterList(list);
   } catch (err) {
     return [];
   }
@@ -86,8 +125,19 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   const owner = requireRole('owner');
 
   app.get('/api/owner/printers/scan', owner, async (req, res) => {
-    const list = await scanWindowsPrinters();
-    res.json(list);
+    const shop = await ownerShop(req);
+    let localList = [];
+    if (process.platform === 'win32') {
+      localList = await scanWindowsPrinters();
+    }
+    const connectorList = shopScannedPrinters.get(shop.id) || [];
+    const merged = new Map();
+    for (const p of [...localList, ...connectorList]) {
+      if (p && p.name && !merged.has(p.name)) {
+        merged.set(p.name, p);
+      }
+    }
+    res.json(Array.from(merged.values()));
   });
 
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
@@ -230,6 +280,13 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     await db.query('UPDATE devices SET heartbeat=$1 WHERE id=$2', [now(), device.id]); next();
   });
   app.post('/api/device/heartbeat', async (req, res) => { const [worker] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); if (!worker || Date.now() - Date.parse(worker.last_success) > 60000) await maintenance(); res.json({ ok: true }); });
+  app.post('/api/device/printers/scanned', async (req, res) => {
+    const list = Array.isArray(req.body.printers) ? req.body.printers : [];
+    if (list.length) {
+      shopScannedPrinters.set(req.device.shop_id, list);
+    }
+    res.json({ ok: true, count: list.length });
+  });
   app.post('/api/device/preparations/claim', async (req, res) => {
     const result = await db.transaction(async tx => {
       let [prep] = await tx.query("SELECT * FROM preparations WHERE shop_id=$1 AND device_id=$2 AND state='processing' AND expires>$3 ORDER BY created LIMIT 1", [req.device.shop_id, req.device.id, now()]);

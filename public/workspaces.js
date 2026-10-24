@@ -13,9 +13,6 @@ export async function printersPage({ api, workspace, escape, notify }) {
   const activeCount = devices.filter(d => d.active).length;
   const onlineCount = devices.filter(d => d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 90000).length;
 
-  const origin = window.location.origin;
-  const psCmd = `powershell -ExecutionPolicy Bypass -Command "iwr '${origin}/connector-setup.ps1' -UseBasicParsing | iex"`;
-
   workspace(`<div class="workhead">
     <div>
       <h1>Connect your printer</h1>
@@ -70,29 +67,15 @@ export async function printersPage({ api, workspace, escape, notify }) {
           `}
         </div>
       </div>`;
-    }).join('')}</div>` : '<div class="notice-inline">Scanning for local and network printers... If none show, make sure your printer is powered on and connected to this PC or WiFi network.</div>'}
-  </section>
-
-  <section class="panel quick-connect-hero">
-    <div class="hero-header">
-      <div class="hero-badge">RECOMMENDED · FASTEST SETUP</div>
-      <h2>One-Click Windows Printer Connector</h2>
-      <p class="muted">Runs automatically on your shop PC. Detects your printers, downloads portable SumatraPDF silently, and starts printing customer orders in seconds.</p>
-    </div>
-    <div class="connect-options-grid">
-      <div class="connect-card">
-        <strong>Option A: Run PowerShell Command</strong>
-        <p class="muted">Open PowerShell on your shop PC and paste this 1-line command:</p>
-        <div class="code-copy-box">
-          <code>${escape(psCmd)}</code>
-          <button class="secondary small copy-btn" data-copy="${escape(psCmd)}">Copy</button>
+    }).join('')}</div>` : `
+      <div class="notice-inline empty-scanned-notice">
+        <div>
+          <strong>No printers detected yet.</strong>
+          <p class="muted small" style="margin: 4px 0 10px 0;">Ensure your USB cable is plugged in or your WiFi printer is powered on and connected to the network, then click below to scan.</p>
         </div>
+        <button class="primary small" id="scan-empty-retry"><span class="icon-spin">🔄</span> Scan Printers Now</button>
       </div>
-      <div class="connect-card">
-        <strong>Option B: Run connector/connect.bat</strong>
-        <p class="muted">Double-click <code>connector\\connect.bat</code> in this project folder on your shop computer.</p>
-      </div>
-    </div>
+    `}
   </section>
 
   <section class="panel">
@@ -165,17 +148,21 @@ export async function printersPage({ api, workspace, escape, notify }) {
     }
   });
 
-  document.querySelector('#rescan-printers')?.addEventListener('click', async () => {
-    notify('Scanning local and WiFi printers...');
-    await printersPage({ api, workspace, escape, notify });
-  });
+  const triggerRescan = async (btn) => {
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="icon-spin">⏳</span> Scanning...';
+    }
+    notify('Scanning local USB and WiFi network printers...');
+    try {
+      await printersPage({ api, workspace, escape, notify });
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
 
-  document.querySelectorAll('.copy-btn').forEach(btn => btn.onclick = () => {
-    navigator.clipboard.writeText(btn.dataset.copy).then(() => {
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = 'Copy', 2000);
-    });
-  });
+  document.querySelector('#rescan-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
+  document.querySelector('#scan-empty-retry')?.addEventListener('click', e => triggerRescan(e.currentTarget));
 
   document.querySelector('#device-form').onsubmit = async event => {
     event.preventDefault();

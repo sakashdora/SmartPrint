@@ -32,13 +32,10 @@ if (!secret) {
 // Auto-detect printer if not specified
 if (!printer) {
   try {
-    const { stdout } = await run('powershell', ['-NoProfile', '-Command', '(Get-CimInstance Win32_Printer | Where-Object Default).Name']);
-    printer = stdout.trim();
-  } catch {}
-}
-if (!printer) {
-  try {
-    const { stdout } = await run('powershell', ['-NoProfile', '-Command', '(Get-Printer | Select-Object -First 1).Name']);
+    const { stdout } = await run('powershell', ['-NoProfile', '-Command', `
+      $def = try { ((Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows' -ErrorAction SilentlyContinue).Device -split ',')[0] } catch { '' }
+      if ($def) { $def } else { (Get-Printer | Select-Object -First 1).Name }
+    `]);
     printer = stdout.trim();
   } catch {}
 }
@@ -55,7 +52,7 @@ if (!sumatra || !existsSync(sumatra)) {
 
 let connectionType = 'Wired / Local';
 try {
-  const { stdout } = await run('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Printer | Where-Object Name -eq '${printer.replace(/'/g, "''")}').PortName`]);
+  const { stdout } = await run('powershell', ['-NoProfile', '-Command', `(Get-Printer -Name '${printer.replace(/'/g, "''")}' -ErrorAction SilentlyContinue).PortName`]);
   const printerPort = stdout.trim();
   if (/^WSD|^TCP|^IP_/i.test(printerPort) || /\d+\.\d+\.\d+\.\d+/.test(printerPort)) {
     connectionType = `📶 WiFi / Wireless Network (Port: ${printerPort})`;
@@ -65,6 +62,56 @@ try {
     connectionType = `Port: ${printerPort}`;
   }
 } catch {}
+
+async function scanAndReportLocalPrinters() {
+  if (process.platform !== 'win32') return;
+  try {
+    const script = `
+      $defaultPrinter = try { ((Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows' -ErrorAction SilentlyContinue).Device -split ',')[0] } catch { '' }
+      try {
+        Get-Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Type, @{Name='IsDefault'; Expression={$_.Name -eq $defaultPrinter}} | ConvertTo-Json -Compress
+      } catch {
+        Get-CimInstance Win32_Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Default, Network | ConvertTo-Json -Compress
+      }
+    `;
+    const { stdout } = await run('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 10000 });
+    if (!stdout || !stdout.trim()) return;
+    const raw = JSON.parse(stdout);
+    const list = Array.isArray(raw) ? raw : [raw];
+    const printers = list
+      .filter(p => p && p.Name && !/OneNote|Fax|Microsoft XPS/i.test(p.Name))
+      .map(p => {
+        const port = String(p.PortName || '').trim();
+        const driver = String(p.DriverName || '').trim();
+        const name = String(p.Name || '').trim();
+        let isWifi = false, isWired = false, connectionType = 'Local Spooler';
+        if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /ipp|wifi|wireless|network/i.test(driver) || /wifi|wireless|network/i.test(name) || Boolean(p.Network) || p.Type === 1) {
+          connectionType = 'WiFi / Wireless Network';
+          isWifi = true;
+        } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(driver) || /usb/i.test(name)) {
+          connectionType = 'Wired USB Cable';
+          isWired = true;
+        } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
+          connectionType = 'Virtual / PDF';
+        }
+        return {
+          name,
+          portName: port,
+          driverName: driver,
+          connectionType,
+          isWifi,
+          isWired,
+          isDefault: Boolean(p.Default || p.IsDefault),
+          status: 'Ready',
+          color: !/mono|black/i.test(driver || name),
+          duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name)
+        };
+      });
+    if (printers.length) {
+      await request('/api/device/printers/scanned', { method: 'POST', body: { printers } }).catch(() => {});
+    }
+  } catch {}
+}
 
 console.log('============================================================');
 console.log('       SmartPrint Windows Shop Connector · v2.0            ');
@@ -186,6 +233,10 @@ process.on('SIGTERM', () => { running = false; console.log('\nStopping connector
 
 const heartbeat = setInterval(() => request('/api/device/heartbeat', { method: 'POST' }).catch(() => {}), 30000);
 heartbeat.unref();
+
+await scanAndReportLocalPrinters();
+const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
+printerScanner.unref();
 
 while (running) {
   try {

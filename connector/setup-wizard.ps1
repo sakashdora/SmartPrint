@@ -38,15 +38,25 @@ Write-Host "✓ Server URL: $Url" -ForegroundColor Green
 
 # 2. Enumerate Printers
 Write-Host "`nScanning installed Windows printers (WiFi & Wired)..." -ForegroundColor Yellow
-$printerObjects = @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -notmatch 'Fax|OneNote|Microsoft XPS' })
+$printerObjects = try {
+    @(Get-Printer | Where-Object { $_.Name -notmatch 'Fax|OneNote|Microsoft XPS' })
+} catch {
+    @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -notmatch 'Fax|OneNote|Microsoft XPS' })
+}
 if ($printerObjects.Count -eq 0) {
-    $printerObjects = @(Get-CimInstance Win32_Printer)
+    $printerObjects = try { @(Get-Printer) } catch { @(Get-CimInstance Win32_Printer) }
 }
 
 $installedPrinters = @($printerObjects | Select-Object -ExpandProperty Name)
 
 if (-not $Printer) {
-    $defaultObj = $printerObjects | Where-Object { $_.Default -eq $true } | Select-Object -First 1
+    $defaultObj = try {
+        $regDef = ((Get-ItemProperty 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows' -ErrorAction SilentlyContinue).Device -split ',')[0]
+        $printerObjects | Where-Object { $_.Name -eq $regDef } | Select-Object -First 1
+    } catch { $null }
+    if (-not $defaultObj) {
+        $defaultObj = $printerObjects | Where-Object { $_.Default -eq $true } | Select-Object -First 1
+    }
     if ($savedSettings.Printer -and ($installedPrinters -contains $savedSettings.Printer)) {
         $defaultPrinter = $savedSettings.Printer
     } elseif ($defaultObj) {
