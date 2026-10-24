@@ -189,11 +189,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json({ ok: true, count: list.length });
   });
 
-  app.get('/api/local/printers', async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  app.get('/api/local/printers', owner, async (req, res) => {
     let printers = [];
     if (process.platform === 'win32') {
       try { printers = await scanWindowsPrinters(); } catch {}
@@ -456,10 +452,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (event === 'submitted' && order.lease_state !== 'claimed') throw fail(409, 'Job was already submitted. Do not reprint.');
     if (event === 'awaiting_confirmation' && order.lease_state !== 'submitted') throw fail(409, 'Job has not been submitted.');
     await db.transaction(async tx => {
-      const current = await tx.query("UPDATE orders SET status=$1 WHERE id=$2 AND status='printing' AND payment='paid' RETURNING id", [event === 'failed' ? 'needs_review' : event === 'submitted' ? 'printing' : event, order.id]);
+      const targetStatus = event === 'failed' ? 'needs_review' : event === 'submitted' ? 'printing' : event;
+      const current = await tx.query("UPDATE orders SET status=$1 WHERE id=$2 AND status='printing' AND payment='paid' RETURNING id", [targetStatus, order.id]);
       if (!current.length) throw fail(409, 'This print has already been resolved.');
       const changed = await tx.query('UPDATE print_leases SET state=$1,expires=$2 WHERE order_id=$3 AND state=$4 RETURNING order_id', [event, new Date(Date.now() + 600000).toISOString(), order.id, order.lease_state]);
       if (!changed.length) throw fail(409, 'Print state changed. Do not resubmit.');
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, event, now()]);
       await audit(tx, req.device.id, `device.${event}`, order.id);
     }); res.json({ ok: true });
   });
@@ -467,9 +465,10 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (req.body.confirmed !== true) throw fail(400, 'Check the physical output and stop any remaining Windows print queue job first.');
     const shop = await ownerShop(req);
     await db.transaction(async tx => {
-      const changed = await tx.query("UPDATE orders SET status='failed' WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','awaiting_confirmation','printing') RETURNING id", [req.params.id, shop.id]);
+      const changed = await tx.query("UPDATE orders SET status='failed' WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','awaiting_confirmation','printing') RETURNING id, status", [req.params.id, shop.id]);
       if (!changed.length) throw fail(409, 'This order does not need print review.');
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [req.params.id]);
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), req.params.id, changed[0].status, 'failed', req.user.id, 'print.stopped_by_owner', 'manual_stop', now()]);
       await audit(tx, req.user.id, 'print.stopped_by_owner', req.params.id);
     }); res.json({ ok: true });
   });
@@ -478,7 +477,10 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     await db.transaction(async tx => {
       const [order] = await tx.query("UPDATE orders SET status='cancelled',deleted_at=$1 WHERE id=$2 AND shop_id=$3 AND status IN ('awaiting_payment','queued','failed','expired','payment_review') RETURNING *", [now(), req.params.id, shop.id]);
       if (!order) throw fail(409, 'This order cannot be cancelled while a print may be running.');
-      await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]); await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]); await audit(tx, req.user.id, 'order.cancelled', order.id);
+      await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
+      await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
+      await audit(tx, req.user.id, 'order.cancelled', order.id);
     }); res.json({ ok: true });
   });
 }

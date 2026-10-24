@@ -8,10 +8,12 @@ import { price, validateOptions } from './print-options.js';
 import { configuration } from './config.js';
 import { authRoutes } from './auth.js';
 import { limitRate } from './security.js';
-import { processDocument } from './process-client.js';
+import { processDocument, localProcess, supportsLocalPreparation } from './process-client.js';
 import { deviceRoutes, sweepLeases, queuePreparation } from './devices.js';
 import { paymentRoutes } from './payments.js';
 import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
+import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
+import { transitionOrder } from './state-machine.js';
 
 const now = () => new Date().toISOString();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -43,8 +45,8 @@ export async function createApp({ database, seed = true } = {}) {
       const [user] = await db.query('SELECT u.id,u.email,u.role,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
       if (user) { req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(process.env.ENFORCE_MFA === 'true' && !user.mfa) }; }
     }
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook') await limitRate(db, 'mutations', req.ip, 120);
-    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 30, 900);
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
     if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', req.ip, 40, 900);
     next();
   });
@@ -64,9 +66,11 @@ export async function createApp({ database, seed = true } = {}) {
     };
   };
   const collect = async (tx, order, reference) => {
-    const changed = await tx.query("UPDATE orders SET payment='paid', status=CASE WHEN status='awaiting_payment' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) THEN 'queued' ELSE 'payment_review' END WHERE id=$1 AND payment='pending' RETURNING id", [order.id, now()]);
+    const changed = await tx.query("UPDATE orders SET payment='paid', status=CASE WHEN status='awaiting_payment' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) THEN 'queued' ELSE 'payment_review' END WHERE id=$1 AND payment='pending' RETURNING id, status", [order.id, now()]);
     if (!changed.length) return;
+    const targetStatus = changed[0].status;
     await tx.query('INSERT INTO transactions (id,order_id,shop_id,amount,method,reference,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), order.id, order.shop_id, order.amount, order.method, reference, now()]);
+    await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, 'system', 'payment.collected', reference, now()]);
   };
   app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
@@ -149,7 +153,11 @@ export async function createApp({ database, seed = true } = {}) {
   app.post('/api/quotes', async (req, res) => {
     const [shop] = await db.query("SELECT * FROM shops WHERE slug=$1 AND status='active'", [req.body.slug]);
     if (!shop) throw fail(404, 'This shop is not accepting orders.');
-    if (config.production || process.env.CONNECTOR_PROCESSING === 'true') {
+    let files;
+    try { files = await resolveUploads(req.body.files, shop.id, db, key); }
+    catch (error) { throw fail(400, error.message); }
+    const local = supportsLocalPreparation(files) && (process.env.CONNECTOR_PROCESSING !== 'true' || req.body.preferServer === true);
+    if (!local && (config.production || process.env.CONNECTOR_PROCESSING === 'true')) {
       const [onlineDevice] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2', [shop.id, new Date(Date.now() - 90000).toISOString()]);
       if (onlineDevice) return res.status(202).json(await queuePreparation(req, db, shop));
     }
@@ -157,8 +165,7 @@ export async function createApp({ database, seed = true } = {}) {
     let options, prepared;
     try {
       options = validateOptions(req.body.options);
-      const files = await resolveUploads(req.body.files, shop.id, db, key);
-      prepared = await processDocument(files, options);
+      prepared = await (local ? localProcess(files, options) : processDocument(files, options));
     } catch (error) {
       throw fail(400, `Unable to prepare file: ${error.message}`);
     } finally {
@@ -173,6 +180,24 @@ export async function createApp({ database, seed = true } = {}) {
     });
     res.status(201).json(quote);
   });
+  app.post('/api/quotes/:id/reprice', async (req, res) => {
+    const result = await db.transaction(async tx => {
+      const [previous] = await tx.query('SELECT * FROM quotes WHERE id=$1 AND token=$2 AND used=0 AND expires>$3', [req.params.id, digest(bearer(req)), now()]);
+      if (!previous) throw fail(409, 'Quote expired or already ordered. Prepare a new quote.');
+      const [shop] = await tx.query("SELECT * FROM shops WHERE id=$1 AND status='active'", [previous.shop_id]);
+      const [document] = await tx.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [previous.document_id, now()]);
+      if (!shop || !document) throw fail(409, 'Shop or print file is unavailable.');
+      let options;
+      try { options = validateOptions({ ...JSON.parse(previous.options), copies: req.body.copies, duplex: req.body.duplex }); }
+      catch (error) { throw fail(400, error.message); }
+      const changed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [previous.id]);
+      if (!changed.length) throw fail(409, 'Quote already ordered or updated.');
+      const quote = { id: randomUUID(), token: token(), ...price(previous.pages, options, shop), pages: previous.pages, options, expires: new Date(Date.now() + 15 * 60000).toISOString() };
+      await tx.query('INSERT INTO quotes (id,shop_id,document_id,token,options,pages,sides,sheets,amount,version,expires) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [quote.id, shop.id, previous.document_id, digest(quote.token), JSON.stringify(options), quote.pages, quote.sides, quote.sheets, quote.amount, shop.version, quote.expires]);
+      return quote;
+    });
+    res.status(201).json(result);
+  });
   app.get('/api/quotes/:id/preview', async (req, res) => {
     const [quote] = await db.query('SELECT * FROM quotes WHERE id=$1 AND token=$2 AND expires>$3 AND used=0', [req.params.id, digest(bearer(req)), now()]);
     if (!quote) throw fail(404, 'Preview expired. Prepare it again.');
@@ -182,9 +207,14 @@ export async function createApp({ database, seed = true } = {}) {
   app.post('/api/orders', async (req, res) => {
     if (!['cash', 'upi', 'online'].includes(req.body.method)) throw fail(400, 'Choose UPI or cash payment.');
     if (req.body.method === 'online' && !config.payments) throw fail(503, 'Online payments are not configured. Please pay at the counter.');
+    const idempKey = req.headers['idempotency-key'];
+    if (idempKey) {
+      const cached = await getIdempotentResult(db, idempKey, bearer(req) || req.ip, 'order.create');
+      if (cached) return res.status(cached.status).json(cached.body);
+    }
     const receipt = token(), id = randomUUID();
     const fileName = String(req.body.fileName || 'document.pdf').slice(0, 150);
-    await db.transaction(async tx => {
+    const result = await db.transaction(async tx => {
       const [quote] = await tx.query('SELECT q.* FROM quotes q JOIN shops s ON s.id=q.shop_id JOIN documents d ON d.id=q.document_id WHERE q.id=$1 AND q.token=$2 AND q.expires>$3 AND q.used=0 AND s.status=\'active\' AND d.expires>$3', [req.body.quoteId, digest(bearer(req)), now()]);
       if (!quote) throw fail(409, 'Quote expired or already used. Prepare a new preview.');
       const claimed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [quote.id]);
@@ -193,13 +223,18 @@ export async function createApp({ database, seed = true } = {}) {
       opts.file_name = fileName;
       opts.priority = 0;
       await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), JSON.stringify(opts), quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, 'created', 'awaiting_payment', 'customer', 'order.created', req.body.method, now()]);
       if (req.body.method === 'upi') {
         const [payee] = await tx.query('SELECT * FROM shop_payments WHERE shop_id=$1', [quote.shop_id]);
         if (!payee) throw fail(409, 'This shop has not set up UPI. Choose cash.');
         await tx.query('INSERT INTO upi_receipts (order_id,upi_id,payee) VALUES ($1,$2,$3)', [id, payee.upi_id, payee.payee]);
       }
+      return { id, token: receipt };
     });
-    res.status(201).json({ id, token: receipt });
+    if (idempKey) {
+      await saveIdempotentResult(db, idempKey, bearer(req) || req.ip, 'order.create', result.id, 201, result);
+    }
+    res.status(201).json(result);
   });
   app.get('/api/orders/:id', async (req, res) => {
     const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND token=$2', [req.params.id, digest(bearer(req))]);
@@ -260,25 +295,50 @@ export async function createApp({ database, seed = true } = {}) {
     res.json({ collected: Number(collections.amount), refunded: Number(refunds.amount), net: Number(collections.amount) - Number(refunds.amount), transactions: Number(collections.count), ...Object.fromEntries(Object.entries(orders).map(([k,v]) => [k, Number(v)])) });
   });
   app.post('/api/owner/orders/:id/cash', async (req, res) => {
+    const idempKey = req.headers['idempotency-key'];
+    if (idempKey) {
+      const cached = await getIdempotentResult(db, idempKey, req.user.id, 'order.cash');
+      if (cached) return res.status(cached.status).json(cached.body);
+    }
     const order = await ownerOrder(req);
-    if (order.method !== 'cash' || order.status !== 'awaiting_payment') throw fail(409, 'This order is not awaiting cash payment.');
+    if (order.method !== 'cash' || order.status !== 'awaiting_payment') {
+      if (idempKey && order.payment === 'paid') return res.json({ ok: true });
+      throw fail(409, 'This order is not awaiting cash payment.');
+    }
     await db.transaction(async tx => {
       const [doc] = await tx.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
       if (!doc) throw fail(409, 'The file has expired. Do not collect payment. Ask for a new upload.');
-      await collect(tx, order, 'counter'); await audit(tx, req.user.id, 'cash.collected', order.id);
-    }); res.json({ ok: true });
+      await collect(tx, order, 'counter');
+      await audit(tx, req.user.id, 'cash.collected', order.id);
+    });
+    const result = { ok: true };
+    if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.cash', order.id, 200, result);
+    res.json(result);
   });
   app.post('/api/owner/orders/:id/start', async (req, res) => {
+    const idempKey = req.headers['idempotency-key'];
+    if (idempKey) {
+      const cached = await getIdempotentResult(db, idempKey, req.user.id, 'order.start');
+      if (cached) return res.status(cached.status).json(cached.body);
+    }
     const order = await ownerOrder(req);
     const changed = await db.query("UPDATE orders SET status='printing' WHERE id=$1 AND payment='paid' AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
-    if (!changed.length) throw fail(409, 'Only a paid queued order with an available file can start.');
-    await audit(db, req.user.id, 'print.started', order.id); res.json({ ok: true });
+    if (!changed.length) {
+      if (idempKey && order.status === 'printing') return res.json({ ok: true });
+      throw fail(409, 'Only a paid queued order with an available file can start.');
+    }
+    await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'manual', now()]);
+    await audit(db, req.user.id, 'print.started', order.id);
+    const result = { ok: true };
+    if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.start', order.id, 200, result);
+    res.json(result);
   });
   app.get('/api/owner/orders/:id/document', async (req, res) => {
     const order = await ownerOrder(req);
     if (order.payment !== 'paid' || !['printing', 'queued'].includes(order.status)) throw fail(409, 'Start a paid order before opening its print file.');
     if (order.status === 'queued') {
       await db.query("UPDATE orders SET status='printing' WHERE id=$1", [order.id]);
+      await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'download', now()]);
     }
     if ((await db.query('SELECT order_id FROM print_leases WHERE order_id=$1', [order.id])).length) throw fail(409, 'The connector is handling this print. Check its physical output before taking further action.');
     const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
@@ -286,15 +346,27 @@ export async function createApp({ database, seed = true } = {}) {
     sendPdf(req, res, decrypt(doc, key));
   });
   app.post('/api/owner/orders/:id/complete', async (req, res) => {
+    const idempKey = req.headers['idempotency-key'];
+    if (idempKey) {
+      const cached = await getIdempotentResult(db, idempKey, req.user.id, 'order.complete');
+      if (cached) return res.status(cached.status).json(cached.body);
+    }
     const order = await ownerOrder(req);
     if (req.body.confirmed !== true) throw fail(400, 'Confirm that the physical print is successful.');
     await db.transaction(async tx => {
       const changed = await tx.query("UPDATE orders SET status='completed',deleted_at=$1 WHERE id=$2 AND status IN ('printing','awaiting_confirmation','needs_review') AND payment='paid' RETURNING id", [now(), order.id]);
-      if (!changed.length) throw fail(409, 'Only a printing order can be completed.');
+      if (!changed.length) {
+        if (idempKey && order.status === 'completed') return;
+        throw fail(409, 'Only a printing order can be completed.');
+      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'completed', req.user.id, 'print.confirmed.file_deleted', 'physical_output_verified', now()]);
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       await audit(tx, req.user.id, 'print.confirmed.file_deleted', order.id);
-    }); res.json({ ok: true });
+    });
+    const result = { ok: true };
+    if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.complete', order.id, 200, result);
+    res.json(result);
   });
   app.put('/api/owner/prices', async (req, res) => {
     const shop = await ownerShop(req), { bw, color } = req.body;

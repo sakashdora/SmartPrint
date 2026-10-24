@@ -31,4 +31,8 @@ CREATE INDEX IF NOT EXISTS devices_shop ON devices(shop_id,active,heartbeat);
 CREATE INDEX IF NOT EXISTS leases_device ON print_leases(device_id,state);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_shop_per_owner ON shops(owner_id);
 CREATE UNIQUE INDEX IF NOT EXISTS unique_upi_collection ON transactions(shop_id,reference) WHERE method='upi';
+CREATE TABLE IF NOT EXISTS idempotency_keys (key TEXT PRIMARY KEY, actor TEXT NOT NULL, operation TEXT NOT NULL, resource_id TEXT, response_status INTEGER NOT NULL, response_body TEXT NOT NULL, expires TEXT NOT NULL, created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idempotency_expires ON idempotency_keys(expires);
+CREATE TABLE IF NOT EXISTS order_history (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE, from_status TEXT NOT NULL, to_status TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT, created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS order_history_order ON order_history(order_id, created);
 `;

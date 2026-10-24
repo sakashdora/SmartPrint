@@ -17,7 +17,10 @@ async function grayscalePdf(bytes) {
       if (viewport.width * viewport.height > 20_000_000 || viewport.width <= 0 || viewport.height <= 0) throw new Error('Page dimensions are too large.');
       const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
       await source.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-      const jpg = await sharp(canvas.toBuffer('image/png')).greyscale().jpeg({ quality: 92 }).toBuffer();
+      const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+      const jpg = await sharp(Buffer.from(pixels.data.buffer, pixels.data.byteOffset, pixels.data.byteLength), {
+        raw: { width: canvas.width, height: canvas.height, channels: 4 }
+      }).greyscale().jpeg({ quality: 92 }).toBuffer();
       const image = await output.embedJpg(jpg), page = output.addPage([viewport.width / 2, viewport.height / 2]);
       page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
       canvas.width = 1; canvas.height = 1; source.cleanup();
@@ -31,12 +34,14 @@ export async function prepare(files, options) {
   if (options.layout === 'card' ? files.length !== 2 : files.length !== 1) throw new Error('Card pair needs two images; other layouts need one file.');
   const source = await PDFDocument.create();
   let totalBytes = 0;
+  let hasPdfInput = false;
   for (const file of files) {
     if (typeof file.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) throw new Error('Invalid upload encoding.');
     const bytes = Buffer.from(file.data, 'base64'); totalBytes += bytes.length;
     if (totalBytes > 20 * 1024 * 1024) throw new Error('Upload up to 20 MiB in total.');
     const isPdf = bytes.subarray(0, 5).toString() === '%PDF-';
     if (isPdf) {
+      hasPdfInput = true;
       if (options.layout === 'card') throw new Error('Use two JPG or PNG images for a card pair.');
       if (options.crop || options.enhance || options.smartCrop || options.rotate) throw new Error('Crop, rotate and enhancement are available for images. Reset these options for a PDF.');
       const pdf = await PDFDocument.load(bytes);
@@ -73,5 +78,6 @@ export async function prepare(files, options) {
     }
   }
   const outputBytes = await output.save();
-  return { bytes: options.color === 'bw' ? await grayscalePdf(outputBytes) : outputBytes, pages: selection.length, outputPages: output.getPageCount() };
+  const needsPdfGrayscale = options.color === 'bw' && hasPdfInput;
+  return { bytes: needsPdfGrayscale ? await grayscalePdf(outputBytes) : outputBytes, pages: selection.length, outputPages: output.getPageCount() };
 }

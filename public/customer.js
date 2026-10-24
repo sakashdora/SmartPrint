@@ -61,7 +61,9 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
   let files = [], quote = null, isCalculating = false, isOrdering = false;
-  let revision = 0, calculateTimer, preview, pendingPreparation;
+  let revision = 0, calculateTimer, preview, pendingPreparation, sourceRevision = 0;
+  let localPreviews = [];
+  let preparedQuote;
   const uploadsByFile = new WeakMap();
 
   function formatBytes(bytes) {
@@ -123,6 +125,13 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
               </label>
             </div>
           </div>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="row"><h2>Document preview</h2><button type="button" class="secondary" id="show-preview" disabled>View print layout</button></div>
+          <p class="muted" id="preview-help">PDFs and photos preview directly from your device while the upload runs.</p>
+          <div id="source-preview"></div>
+          <div id="document-preview"></div>
         </section>
 
         <!-- 2. Print Settings Form -->
@@ -194,11 +203,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <span>A4 standard <small>(210 × 297 mm)</small></span>
           </div>
         </form>
-        <section class="panel preview-panel">
-          <div class="row"><h2>Print preview</h2><button type="button" class="secondary" id="show-preview" disabled>View preview</button></div>
-          <p class="muted" id="preview-help">Choose a document to preview the prepared pages before ordering.</p>
-          <div id="document-preview"></div>
-        </section>
+
       </div>
 
       <!-- 3. Checkout & Summary Sidebar -->
@@ -270,6 +275,30 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   const orderStatusText = document.querySelector('#order-status-text');
   const previewButton = document.querySelector('#show-preview');
   const retryButton = document.querySelector('#retry-quote');
+  async function previewSources(selected) {
+    const generation = ++sourceRevision;
+    localPreviews.forEach(view => view.destroy());
+    localPreviews = [];
+    const container = document.querySelector('#source-preview');
+    container.replaceChildren();
+    const supported = selected.every(file => /\.(pdf|png|jpe?g)$/i.test(file.name));
+    document.querySelector('#preview-help').textContent = supported
+      ? 'Original document preview. Upload continues in the background. Use “View print layout” to check page selection and layout when ready.'
+      : 'Office documents need conversion. A print layout preview will be available when conversion finishes. For a faster preview, choose a PDF.';
+    if (!supported) return;
+    await Promise.all(selected.map(async file => {
+      const panel = document.createElement('div');
+      container.append(panel);
+      try {
+        const type = /\.pdf$/i.test(file.name) ? 'application/pdf' : /\.png$/i.test(file.name) ? 'image/png' : 'image/jpeg';
+        const view = await showDocument(panel, file.slice(0, file.size, type), { title: file.name });
+        if (generation !== sourceRevision || !container.isConnected) view.destroy();
+        else localPreviews.push(view);
+      } catch {
+        if (generation === sourceRevision) panel.textContent = 'Local preview unavailable. You can still upload and check the prepared print layout.';
+      }
+    }));
+  }
   retryButton.onclick = () => recalculateQuote();
   previewButton.onclick = async () => {
     const current = quote, generation = revision;
@@ -283,6 +312,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       preview?.destroy();
       preview = await showDocument(document.querySelector('#document-preview'), blob);
       if (generation !== revision) { preview?.destroy(); return; }
+      document.querySelector('#source-preview').hidden = true;
       help.textContent = 'These are the prepared pages for your selected print options.';
     } catch (error) { if (generation === revision) help.textContent = error.message; }
     finally { if (generation === revision) previewButton.disabled = !quote; }
@@ -294,7 +324,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     quote = null;
     placeBtn.disabled = previewButton.disabled = true;
     preview?.destroy();
-    document.querySelector('#preview-help').textContent = 'Preparing preview for your current options…';
+    document.querySelector('#source-preview').hidden = false;
+    if (localPreviews.length) document.querySelector('#preview-help').textContent = 'Original document preview. Print options are updating in the background.';
     orderStatusText.textContent = 'Updating options…';
     clearTimeout(calculateTimer);
     calculateTimer = setTimeout(recalculateQuote, 350);
@@ -344,12 +375,19 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     const cached = uploadsByFile.get(file);
     if (cached && cached.expires > Date.now()) return cached.value;
     const info = await api('/api/uploads', { method: 'POST', body: { slug, name: file.name, size: file.size } });
-    for (let start = 0, part = 0; start < file.size; start += info.chunkSize, part++) {
-      const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer());
-      let binary = '';
-      for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: btoa(binary) } });
-    }
+    let nextPart = 0;
+    const parts = Math.ceil(file.size / info.chunkSize);
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(3, parts) }, async () => {
+      while (nextPart < parts) {
+        const part = nextPart++, start = part * info.chunkSize;
+        const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: btoa(binary) } });
+      }
+    }));
+    const failed = workers.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
     const value = { uploadId: info.id, token: info.token };
     uploadsByFile.set(file, { value, expires: Date.now() + 25 * 60000 });
     return value;
@@ -376,11 +414,20 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       for (const file of selectedFiles) {
         uploads.push(await upload(file));
       }
+      if (generation !== revision || !form.isConnected) return;
       orderStatusText.textContent = 'Preparing print file…';
       const requestKey = JSON.stringify({ uploads, settings });
-      let result = pendingPreparation?.key === requestKey ? pendingPreparation.result : await api('/api/quotes', { method: 'POST', body: { slug, files: uploads, options: settings } });
+      const artworkKey = JSON.stringify({ uploads, settings: { ...settings, copies: 1, duplex: false } });
+      const reusable = preparedQuote?.key === artworkKey && Date.parse(preparedQuote.result.expires) > Date.now();
+      let result;
+      if (reusable) {
+        try { result = await api(`/api/quotes/${preparedQuote.result.id}/reprice`, { method: 'POST', token: preparedQuote.result.token, body: { copies: settings.copies, duplex: settings.duplex } }); }
+        catch (error) { if (error.status !== 409) throw error; preparedQuote = null; }
+      }
+      result ??= pendingPreparation?.key === requestKey ? pendingPreparation.result : await api('/api/quotes', { method: 'POST', body: { slug, files: uploads, options: settings, preferServer: true } });
       if (result.pending) pendingPreparation = { key: requestKey, result };
       result = await waitForQuote(result, api);
+      preparedQuote = { key: artworkKey, result };
       pendingPreparation = null;
       if (generation !== revision || !form.isConnected) return;
       quote = result;
@@ -395,7 +442,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       document.querySelector('#step-3').setAttribute('aria-current', 'step');
       placeBtn.disabled = false;
       previewButton.disabled = false;
-      document.querySelector('#preview-help').textContent = 'Preview your prepared pages, then place your order.';
+      if (!localPreviews.length) document.querySelector('#preview-help').textContent = 'Your order is ready. Viewing the print layout is optional.';
       placeBtn.innerHTML = `${icon('printer')} Place Print Order · ${money(result.amount)} →`;
     } catch (err) {
       if (generation !== revision || !form.isConnected) return;
@@ -448,6 +495,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     }
 
     scheduleQuote();
+    void previewSources(files);
   };
 
   if (dropPanel) {

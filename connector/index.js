@@ -279,37 +279,42 @@ await scanAndReportLocalPrinters();
 const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
 printerScanner.unref();
 
+// Conversion can take minutes. Keep it out of the paid-print dispatch loop.
+async function preparationLoop() {
+  while (running && processorSecret) {
+    try {
+      const preparation = await request('/api/device/preparations/claim', { method: 'POST' });
+      if (preparation) {
+        try { await prepareJob(preparation); }
+        catch {
+          await request(`/api/device/preparations/${preparation.id}/fail`, {
+            method: 'POST', body: { error: 'The shop computer could not convert this file. Please export it as PDF and retry.' }
+          }).catch(() => {});
+        }
+        continue;
+      }
+    } catch {}
+    if (running) await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+}
+const preparing = preparationLoop();
+let claimRetryDelay = 1000;
 while (running) {
   try {
-    await request('/api/device/heartbeat', { method: 'POST' });
-
-    // Claim preparations if processor secret is available
-    if (processorSecret) {
-      try {
-        const preparation = await request('/api/device/preparations/claim', { method: 'POST' });
-        if (preparation) {
-          try {
-            await prepareJob(preparation);
-          } catch (pErr) {
-            await request(`/api/device/preparations/${preparation.id}/fail`, {
-              method: 'POST',
-              body: { error: 'The shop computer could not convert this file. Please export it as PDF and retry.' }
-            }).catch(() => {});
-          }
-        }
-      } catch {}
-    }
-
     // Claim print jobs
     const print = await request('/api/device/claim', { method: 'POST' });
+    claimRetryDelay = 1000;
     if (print) {
       await printJob(print);
+      continue;
     }
   } catch (err) {
-    // Network retry backoff
+    // Exponential retry backoff on network failure
+    claimRetryDelay = Math.min(10000, claimRetryDelay * 1.5);
   }
 
-  if (running) await new Promise(resolve => setTimeout(resolve, 3000));
+  if (running) await new Promise(resolve => setTimeout(resolve, claimRetryDelay));
 }
 
+await preparing;
 clearInterval(heartbeat);
