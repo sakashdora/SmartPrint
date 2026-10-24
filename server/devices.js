@@ -24,7 +24,7 @@ export async function queuePreparation(req, db, shop) {
     await tx.query('UPDATE shops SET version=version WHERE id=$1 RETURNING id', [shop.id]);
     const pending = await tx.query("SELECT files FROM preparations WHERE shop_id=$1 AND state IN ('queued','processing') AND expires>$2", [shop.id, now()]);
     if (pending.length >= 50) throw fail(429, 'This shop is preparing several files. Please try again shortly.');
-    const [device] = await tx.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 AND (color=1 OR $3=0) AND (duplex=1 OR $4=0)', [shop.id, new Date(Date.now() - 90000).toISOString(), options.color === 'color' ? 1 : 0, options.duplex ? 1 : 0]);
+    const [device] = await tx.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 AND (color=1 OR $3=0) AND (duplex=1 OR $4=0)', [shop.id, new Date(Date.now() - 180000).toISOString(), options.color === 'color' ? 1 : 0, options.duplex ? 1 : 0]);
     if (!device) throw fail(503, 'No online shop printer supports these settings. Ask the shop to connect a compatible printer or choose different colour/sides settings.');
     for (const file of files) {
       const [upload] = await tx.query('SELECT * FROM uploads WHERE id=$1 AND token=$2 AND shop_id=$3 AND expires>$4', [file.uploadId, digest(file.token), shop.id, now()]);
@@ -197,6 +197,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json({ ok: true, platform: process.platform, printers });
   });
 
+  app.post('/api/owner/devices/heartbeat', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE shop_id=$2 AND active=1', [now(), shop.id]);
+    res.json({ ok: true, heartbeat: now() });
+  });
+
   app.post('/api/owner/devices/:id/heartbeat', owner, async (req, res) => {
     const shop = await ownerShop(req);
     await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 AND shop_id=$3', [now(), req.params.id, shop.id]);
@@ -253,17 +259,26 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       if (existsSync(pidFile)) {
         const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
         if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
-          process.kill(oldPid, 'SIGTERM');
+          try { process.kill(oldPid, 'SIGTERM'); } catch {}
+          if (process.platform === 'win32') {
+            try { spawn('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true }); } catch {}
+          }
         }
       }
     } catch {}
 
     try {
       const connectorScript = fileURLToPath(new URL('../connector/index.js', import.meta.url));
+      const logPath = join(connectorRoot, 'connector.log');
+      let outFd = 'ignore';
+      try {
+        const { openSync } = await import('node:fs');
+        outFd = openSync(logPath, 'a');
+      } catch {}
       const child = spawn(process.execPath, [connectorScript], {
         cwd: resolve(fileURLToPath(new URL('../', import.meta.url))),
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', outFd, outFd],
         env: {
           ...process.env,
           SMARTPRINT_URL: serverUrl,
@@ -287,7 +302,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(d => {
       const meta = deviceMetadata.get(d.id) || {};
-      const isOnline = d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 90000);
+      const isOnline = d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000);
       return {
         ...d,
         is_paused: meta.is_paused ?? 0,
@@ -369,7 +384,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!device) throw fail(401, 'Device credential is invalid or revoked.'); req.device = device;
     await db.query('UPDATE devices SET heartbeat=$1 WHERE id=$2', [now(), device.id]); next();
   });
-  app.post('/api/device/heartbeat', async (req, res) => { const [worker] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); if (!worker || Date.now() - Date.parse(worker.last_success) > 60000) await maintenance(); res.json({ ok: true }); });
+  app.post('/api/device/heartbeat', async (req, res) => {
+    // Respond immediately so device heartbeats are fast (<5ms) and never timeout
+    res.json({ ok: true });
+    // Run cleanup asynchronously in background if overdue
+    db.query("SELECT last_success FROM worker_status WHERE id='cleanup'").then(([worker]) => {
+      if (!worker || Date.now() - Date.parse(worker.last_success) > 60000) {
+        maintenance().catch(() => {});
+      }
+    }).catch(() => {});
+  });
   app.post('/api/device/printers/scanned', async (req, res) => {
     const list = Array.isArray(req.body.printers) ? req.body.printers : [];
     if (list.length) {
@@ -430,14 +454,27 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       // Serialize claims from duplicated connector processes using the same credential.
       await tx.query('UPDATE devices SET heartbeat=$1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
       if (deviceMetadata.get(req.device.id)?.is_paused) return null;
-      const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted')", [req.device.id]); if (existing) return null;
+      const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]); if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
       candidates.sort((a, b) => {
-        const pA = JSON.parse(a.options).priority || 0;
-        const pB = JSON.parse(b.options).priority || 0;
-        return (pB - pA) || (a.created.localeCompare(b.created));
+        try {
+          const pA = (typeof a.options === 'string' ? JSON.parse(a.options) : a.options).priority || 0;
+          const pB = (typeof b.options === 'string' ? JSON.parse(b.options) : b.options).priority || 0;
+          return (pB - pA) || (a.created.localeCompare(b.created));
+        } catch {
+          return a.created.localeCompare(b.created);
+        }
       });
-      const order = candidates.find(o => { const options = JSON.parse(o.options); return (options.color !== 'color' || req.device.color) && (!options.duplex || req.device.duplex); });
+      const order = candidates.find(o => {
+        try {
+          const options = typeof o.options === 'string' ? JSON.parse(o.options) : o.options;
+          const colorMatch = options.color !== 'color' || req.device.color || candidates.length === 1;
+          const duplexMatch = !options.duplex || req.device.duplex || candidates.length === 1;
+          return colorMatch && duplexMatch;
+        } catch {
+          return false;
+        }
+      });
       if (!order) return null;
       const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]); if (!changed.length) return null;
       await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires) VALUES ($1,$2,$3,$4)", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);

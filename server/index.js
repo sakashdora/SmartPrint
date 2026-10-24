@@ -170,7 +170,7 @@ export async function createApp({ database, seed = true } = {}) {
     catch (error) { throw fail(400, error.message); }
     const local = supportsLocalPreparation(files) && (process.env.CONNECTOR_PROCESSING !== 'true' || req.body.preferServer === true);
     if (!local && (config.production || process.env.CONNECTOR_PROCESSING === 'true')) {
-      const [onlineDevice] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2', [shop.id, new Date(Date.now() - 90000).toISOString()]);
+      const [onlineDevice] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2', [shop.id, new Date(Date.now() - 180000).toISOString()]);
       if (onlineDevice) return res.status(202).json(await queuePreparation(req, db, shop));
     }
     await documentQueue.acquire();

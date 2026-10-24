@@ -87,23 +87,54 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
       'collate'
     ].join(',');
 
-    await run(sumatraPath, [
-      '-print-to', printerName,
-      '-print-settings', settings,
-      '-silent',
-      pdfPath
-    ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
-    return { method: 'sumatrapdf' };
+    try {
+      await run(sumatraPath, [
+        '-print-to', printerName,
+        '-print-settings', settings,
+        '-silent',
+        pdfPath
+      ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
+      return { method: 'sumatrapdf' };
+    } catch (sumatraErr) {
+      console.warn(`[Print Helper] SumatraPDF advanced settings print failed (${sumatraErr.message}). Retrying with simple print...`);
+      try {
+        await run(sumatraPath, [
+          '-print-to', printerName,
+          '-silent',
+          pdfPath
+        ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
+        return { method: 'sumatrapdf-simple' };
+      } catch (retryErr) {
+        console.warn(`[Print Helper] SumatraPDF simple print also failed (${retryErr.message}).`);
+      }
+    }
   }
 
   const helper = await ensureSumatraPDF();
   if (helper && existsSync(helper)) {
-    await run(helper, [
-      '-print-to', printerName,
-      '-silent',
-      pdfPath
-    ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
-    return { method: 'sumatrapdf' };
+    try {
+      await run(helper, [
+        '-print-to', printerName,
+        '-silent',
+        pdfPath
+      ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
+      return { method: 'sumatrapdf' };
+    } catch (helperErr) {
+      console.warn(`[Print Helper] Portable SumatraPDF failed: ${helperErr.message}`);
+    }
   }
+
+  // Windows Spooler Native Fallback via PowerShell
+  if (process.platform === 'win32') {
+    try {
+      console.log(`[Print Helper] Falling back to Windows native spooler for "${printerName}"...`);
+      const psCommand = `Start-Process -FilePath "${pdfPath.replace(/"/g, '`"')}" -Verb PrintTo -ArgumentList "${printerName.replace(/"/g, '`"')}" -Wait -PassThru -WindowStyle Hidden`;
+      await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCommand], { timeout: 60000, windowsHide: true });
+      return { method: 'powershell-spooler' };
+    } catch (psErr) {
+      console.error(`[Print Helper] Windows spooler fallback failed: ${psErr.message}`);
+    }
+  }
+
   return { method: 'direct-spooler' };
 }

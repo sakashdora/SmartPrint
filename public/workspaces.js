@@ -20,13 +20,11 @@ export async function printersPage({ api, workspace, escape, notify }) {
     api('/api/owner/printers/scan').catch(() => [])
   ]);
   const activeCount = devices.filter(d => d.active).length;
-  const onlineCount = devices.filter(d => d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 90000).length;
+  const onlineCount = devices.filter(d => d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000).length;
 
   // Browser client heartbeat for active printers to keep them online in real-time
   if (devices.length > 0) {
-    devices.filter(d => d.active).forEach(d => {
-      api(`/api/owner/devices/${d.id}/heartbeat`, { method: 'POST' }).catch(() => {});
-    });
+    api('/api/owner/devices/heartbeat', { method: 'POST' }).catch(() => {});
   }
 
   workspace(`<div class="workhead">
@@ -63,7 +61,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
         const pn = String(p.name || '').toLowerCase().trim();
         return dn === pn || dn.includes(pn) || pn.includes(dn);
       });
-      const isOnline = connectedDevice && connectedDevice.active && connectedDevice.heartbeat && (Date.now() - Date.parse(connectedDevice.heartbeat) < 90000);
+      const isOnline = connectedDevice && connectedDevice.active && connectedDevice.heartbeat && (Date.now() - Date.parse(connectedDevice.heartbeat) < 180000);
       return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}">
         <div class="scanned-card-header">
           <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">
@@ -210,7 +208,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
       </div>
     </div>
     ${devices.length ? `<div class="printer-cards-grid">${devices.map(d => {
-      const isOnline = d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 90000;
+      const isOnline = d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000;
       const secondsAgo = d.heartbeat ? Math.round((Date.now() - Date.parse(d.heartbeat)) / 1000) : null;
       return `<div class="printer-card ${isOnline ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
         <div class="printer-card-top">

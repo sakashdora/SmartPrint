@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, writeFile, unlink, readFile, readdir, stat } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ensureSumatraPDF, printPdfToWindowsPrinter } from './sumatra-helper.js';
@@ -9,6 +9,20 @@ import { ensureSumatraPDF, printPdfToWindowsPrinter } from './sumatra-helper.js'
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
 await mkdir(root, { recursive: true });
+
+const logFile = join(root, 'connector.log');
+export function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  try { appendFileSync(logFile, line + '\n', 'utf8'); } catch {}
+}
+
+process.on('uncaughtException', err => {
+  log(`[UncaughtException] ${err.stack || err.message}`);
+});
+process.on('unhandledRejection', reason => {
+  log(`[UnhandledRejection] ${reason?.stack || reason?.message || reason}`);
+});
 
 // Load persisted settings with BOM stripping
 const settingsPath = join(root, 'settings.json');
@@ -140,15 +154,15 @@ async function scanAndReportLocalPrinters() {
   } catch {}
 }
 
-console.log('============================================================');
-console.log('       SmartPrint Windows Shop Connector · v2.0            ');
-console.log('============================================================');
-console.log(`  Server URL  : ${base}`);
-console.log(`  Printer     : ${printer}`);
-console.log(`  Connection  : ${connectionType}`);
-console.log(`  Print Engine: ${sumatra ? 'SumatraPDF Portable (' + sumatra + ')' : 'Native Windows Print Spooler'}`);
-console.log(`  Status      : ONLINE · Listening for shop print jobs...`);
-console.log('============================================================\n');
+log('============================================================');
+log('       SmartPrint Windows Shop Connector · v2.0            ');
+log('============================================================');
+log(`  Server URL  : ${base}`);
+log(`  Printer     : ${printer}`);
+log(`  Connection  : ${connectionType}`);
+log(`  Print Engine: ${sumatra ? 'SumatraPDF Portable (' + sumatra + ')' : 'Native Windows Print Spooler'}`);
+log(`  Status      : ONLINE · Listening for shop print jobs...`);
+log('============================================================');
 
 // Clean up stale files older than 10 minutes
 for (const name of await readdir(root)) {
@@ -175,12 +189,12 @@ async function request(path, { method = 'GET', body, lease, binary, range } = {}
   });
   if (!response.ok) {
     if (response.status === 401) {
-      // Re-read settings.json in case shop regenerated token or autoconnect updated it
+      log(`[Auth] 401 Unauthorized for ${path}. Reloading settings.json...`);
       const refreshed = loadConfig();
       if (refreshed.Token && refreshed.Token !== secret) {
         secret = refreshed.Token;
         if (refreshed.Printer) printer = refreshed.Printer;
-        console.log('[Connector] Detected new token in settings.json. Reconnecting...');
+        log('[Connector] Detected new token in settings.json. Reconnected.');
       }
     }
     const err = new Error(`SmartPrint request failed (${response.status} on ${path}).`);
@@ -272,12 +286,18 @@ process.on('SIGINT', () => { running = false; cleanupPid(); console.log('\nStopp
 process.on('SIGTERM', () => { running = false; cleanupPid(); console.log('\nStopping connector...'); });
 process.on('exit', cleanupPid);
 
-const heartbeat = setInterval(() => request('/api/device/heartbeat', { method: 'POST' }).catch(() => {}), 30000);
-heartbeat.unref();
+// Send device heartbeat every 10 seconds to ensure the printer never drops offline
+const heartbeat = setInterval(() => {
+  request('/api/device/heartbeat', { method: 'POST' })
+    .catch(err => {
+      if (err.status !== 401) {
+        log(`[Heartbeat] Warning: Device heartbeat failed: ${err.message}`);
+      }
+    });
+}, 10000);
 
 await scanAndReportLocalPrinters();
 const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
-printerScanner.unref();
 
 // Conversion can take minutes. Keep it out of the paid-print dispatch loop.
 async function preparationLoop() {
@@ -293,12 +313,15 @@ async function preparationLoop() {
         }
         continue;
       }
-    } catch {}
+    } catch (prepErr) {
+      log(`[Preview] Preparation loop notice: ${prepErr.message}`);
+    }
     if (running) await new Promise(resolve => setTimeout(resolve, 1500));
   }
 }
 const preparing = preparationLoop();
 let claimRetryDelay = 1000;
+let lastClaimErrorLog = 0;
 while (running) {
   try {
     // Claim print jobs
@@ -309,7 +332,11 @@ while (running) {
       continue;
     }
   } catch (err) {
-    // Exponential retry backoff on network failure
+    // Exponential retry backoff on network failure with periodic log
+    if (Date.now() - lastClaimErrorLog > 30000) {
+      log(`[Queue] Claim check notice (${err.status || err.message}). Will retry...`);
+      lastClaimErrorLog = Date.now();
+    }
     claimRetryDelay = Math.min(10000, claimRetryDelay * 1.5);
   }
 
@@ -318,3 +345,4 @@ while (running) {
 
 await preparing;
 clearInterval(heartbeat);
+clearInterval(printerScanner);

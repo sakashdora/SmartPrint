@@ -30,7 +30,7 @@ function actions(order, money) {
 
 export function ownerDashboard({ view, head, store, orders, summary, devices, filter, escape, money, time, badge, empty }) {
   const activeDevices = devices.filter(device => device.active);
-  const online = activeDevices.filter(device => device.heartbeat && Date.now() - Date.parse(device.heartbeat) < 90000);
+  const online = activeDevices.filter(device => device.heartbeat && Date.now() - Date.parse(device.heartbeat) < 180000);
   const filtered = orders.filter(order => filter === 'ready' ? order.status === 'queued' : filter === 'printing' ? order.status === 'printing' : filter === 'attention' ? attention(order) : filter === 'completed' ? order.status === 'completed' : true);
   const visible = view === 'owner' ? filtered.slice(0, 10) : filtered;
   const waitingUpi = orders.filter(order => order.status === 'awaiting_payment' && order.method === 'upi');
@@ -41,10 +41,11 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, fi
     ['Active Queue', `${summary.active} in progress`, `${printingCount} currently printing · ${summary.awaiting_payment} awaiting payment`],
     ['Printers online', `${online.length} of ${activeDevices.length}`, activeDevices.length ? (online.length ? 'Connected to your shop' : 'Launch connector on shop PC') : 'Connect your first printer'],
   ];
+  const autoPrintActive = typeof localStorage !== 'undefined' && localStorage.getItem('smartprint_autoprint') !== 'false';
   return `${head(view === 'owner' ? 'Your shop, at a glance.' : 'Print queue & orders')}
     ${store.status !== 'active' ? `<div class="attention-banner banner-pending">${icon('alert')}<div><strong>${store.status === 'suspended' ? 'Shop suspended:</strong> Contact the platform administrator to restore access.' : 'Awaiting approval:</strong> Your shop registration is under review.'} You can configure prices and pair printers now; customers will be able to place orders once approved.</div></div>` : ''}
     <div class="metrics metrics-three">${metrics.map(([label, value, note]) => `<div class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></div>`).join('')}</div>
-    <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-heading"><div><h2>${view === 'owner' ? 'Live print queue' : 'Orders & Queue Management'}</h2><p class="muted">${orders.length === 200 ? 'Latest 200 orders' : `${orders.length} ${orders.length === 1 ? 'order' : 'orders'}`} · Updates in real time</p></div>${view === 'owner' ? '<a href="#queue">View full queue →</a>' : ''}</div>
+    <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-heading"><div><h2>${view === 'owner' ? 'Live print queue' : 'Orders & Queue Management'}</h2><p class="muted">${orders.length === 200 ? 'Latest 200 orders' : `${orders.length} ${orders.length === 1 ? 'order' : 'orders'}`} · Updates in real time</p></div><div class="queue-heading-actions"><label class="autoprint-switch-badge ${autoPrintActive ? 'is-active' : ''}" title="Automatically dispatch and print queued jobs"><input type="checkbox" id="autoprint-mode" ${autoPrintActive ? 'checked' : ''}><span class="autoprint-dot"></span><span>🖨️ Auto-Print: <strong>${autoPrintActive ? 'ON' : 'OFF'}</strong></span></label>${view === 'owner' ? '<a href="#queue">View full queue →</a>' : ''}</div></div>
     ${tabs([['all', 'All', orders.length], ['ready', 'Ready', orders.filter(o => o.status === 'queued').length], ['printing', 'Printing', printingCount], ['attention', 'Needs attention', orders.filter(attention).length], ['completed', 'Completed', orders.filter(o => o.status === 'completed').length]], filter, 'data-queue-filter')}
     ${visible.length ? `<div class="table-wrap"><table class="responsive-table order-table"><thead><tr><th>Order & File</th><th>Print options</th><th>Amount</th><th>Status</th><th>Next step</th></tr></thead><tbody>${visible.map((order, idx) => `<tr>
       <td data-label="Order & File">

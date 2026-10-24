@@ -50,8 +50,53 @@ function workspace(content, active, admin = false) {
   toggle.onclick = () => { const open = toggle.getAttribute('aria-expanded') !== 'true'; toggle.setAttribute('aria-expanded', String(open)); document.querySelector('.sidebar').classList.toggle('is-open', open); };
   document.querySelector('.sidebar').onkeydown = event => { if (event.key === 'Escape') { toggle.setAttribute('aria-expanded', 'false'); document.querySelector('.sidebar').classList.remove('is-open'); toggle.focus(); } };
 }
+
+let deviceHeartbeatTimer = null;
+function ensureOwnerDeviceHeartbeat() {
+  if (deviceHeartbeatTimer) return;
+  deviceHeartbeatTimer = setInterval(() => {
+    if (me && me.role === 'owner') {
+      api('/api/owner/devices/heartbeat', { method: 'POST' }).catch(() => {});
+    }
+  }, 20000);
+}
+
+const directPrintedOrders = new Set();
+async function triggerDirectPrint(id) {
+  if (directPrintedOrders.has(id)) return;
+  directPrintedOrders.add(id);
+  try {
+    await api(`/api/owner/orders/${id}/start`, { method: 'POST' }).catch(() => {});
+    const blob = await downloadPdf(`/api/owner/orders/${id}/document`);
+    const url = URL.createObjectURL(blob);
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+      } catch {
+        window.open(url, '_blank');
+      }
+      setTimeout(() => { iframe.remove(); URL.revokeObjectURL(url); }, 60000);
+    };
+    notify('🖨️ Opening print dialog... Please confirm output.');
+  } catch (err) {
+    directPrintedOrders.delete(id);
+    notify(err.message);
+  }
+}
+
 async function owner(view) {
   if (!me) { location.hash = 'login'; return; } if (me.role === 'admin') { location.hash = 'admin'; return; }
+  ensureOwnerDeviceHeartbeat();
   if (view === 'payments') return paymentsPage({ api, workspace, escape, notify });
   if (view === 'printers') return printersPage({ api, workspace, escape, notify });
   const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices')]);
@@ -70,6 +115,15 @@ async function owner(view) {
   document.querySelector('#reload').onclick = () => route();
   document.querySelectorAll('[data-queue-filter]').forEach(button => button.onclick = async () => { queueFilter = button.dataset.queueFilter; try { await owner(view); document.querySelector(`[data-queue-filter="${queueFilter}"]`)?.focus({ preventScroll: true }); } catch (error) { notify(error.message); } });
   document.querySelector('#review-payments')?.addEventListener('click', () => { queueFilter = 'attention'; if (view === 'queue') owner(view).catch(error => notify(error.message)); });
+  const autoPrintInput = document.querySelector('#autoprint-mode');
+  if (autoPrintInput) {
+    autoPrintInput.onchange = (e) => {
+      const enabled = e.target.checked;
+      localStorage.setItem('smartprint_autoprint', enabled ? 'true' : 'false');
+      notify(enabled ? '🖨️ Auto-Print activated: queued jobs print automatically.' : '⏸️ Auto-Print paused.');
+      owner(view);
+    };
+  }
   document.querySelector('#prices')?.addEventListener('submit', event => { event.preventDefault(); busy(event.submitter, async () => { const form = new FormData(event.target); await api('/api/owner/prices', { method: 'PUT', body: { bw: Math.round(Number(form.get('bw')) * 100), color: Math.round(Number(form.get('color')) * 100) } }); notify('Prices updated for new quotes.'); await owner(view); }); });
   document.querySelector('#print-standee')?.addEventListener('click', () => { window.print(); });
   document.querySelector('#download-qr-poster')?.addEventListener('click', event => busy(event.currentTarget, async () => {
@@ -108,6 +162,17 @@ async function owner(view) {
             osc.stop(ctx.currentTime + 0.4);
           } catch {}
           notify('🔔 New print order received in queue!');
+
+          const autoPrint = typeof localStorage !== 'undefined' && localStorage.getItem('smartprint_autoprint') !== 'false';
+          if (autoPrint) {
+            const newlyQueued = nextOrders.filter(o => o.status === 'queued' && !directPrintedOrders.has(o.id));
+            const onlineDevs = (nextSnapshot[4] || []).filter(d => d.active && d.heartbeat && (Date.now() - Date.parse(d.heartbeat) < 180000));
+            if (onlineDevs.length === 0 && newlyQueued.length > 0) {
+              for (const o of newlyQueued) {
+                triggerDirectPrint(o.id);
+              }
+            }
+          }
         }
       }
       owner(view);
@@ -118,35 +183,9 @@ async function owner(view) {
   document.querySelectorAll('[data-action]').forEach(button => button.onclick = () => busy(button, async () => {
     const { action, id } = button.dataset;
     if (action === 'print-direct') {
-      try {
-        await api(`/api/owner/orders/${id}/start`, { method: 'POST' }).catch(() => {});
-        const blob = await downloadPdf(`/api/owner/orders/${id}/document`);
-        const url = URL.createObjectURL(blob);
-        const iframe = document.createElement('iframe');
-        iframe.style.position = 'fixed';
-        iframe.style.right = '0';
-        iframe.style.bottom = '0';
-        iframe.style.width = '0';
-        iframe.style.height = '0';
-        iframe.style.border = '0';
-        iframe.src = url;
-        document.body.appendChild(iframe);
-        iframe.onload = () => {
-          try {
-            iframe.contentWindow.focus();
-            iframe.contentWindow.print();
-          } catch {
-            window.open(url, '_blank');
-          }
-          setTimeout(() => { iframe.remove(); URL.revokeObjectURL(url); }, 60000);
-        };
-        notify('🖨️ Opening print dialog... Please confirm output.');
-        await owner(view);
-        return;
-      } catch (err) {
-        notify(err.message);
-        return;
-      }
+      await triggerDirectPrint(id);
+      await owner(view);
+      return;
     }
     if (action === 'document') { const blob = await downloadPdf(`/api/owner/orders/${id}/document`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `smartprint-${id.slice(0,8)}.pdf`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 300000); return; }
     if (action === 'complete' && !confirm('Have you checked that all pages printed successfully? This permanently deletes the live file.')) return;
