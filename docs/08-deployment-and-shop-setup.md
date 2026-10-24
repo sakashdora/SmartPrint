@@ -55,22 +55,19 @@ docker compose --env-file .env.processor -f compose.processor.yml ps
 
 Allow ClamAV to download signatures on first start. It has an update network; the processor has only its isolated processing network and a localhost binding. Never expose port 4000 or the ClamAV service publicly. Test conversion/scanning before opening intake.
 
-Then pair and start the connector:
+Then connect printers directly from the browser or run the lightweight Node connector:
 
-```powershell
-powershell -NoProfile -File .\connector\setup.ps1
-powershell -NoProfile -File .\connector\start.ps1
+```bash
+# 1-Click Browser Direct Printing (Recommended):
+# Open the Shop Owner Dashboard -> Printers tab -> Multi-Source Scanner Studio.
+# Scan via WebUSB, local network IP, or select 1-click presets (Brother, HP, Canon, Epson).
+# Prints execute directly inside Chrome/Edge with automatic queue listener and audio alerts.
+
+# Optional Background Node Connector (Headless Windows / Linux):
+node connector/index.js
 ```
 
-Setup asks for your HTTPS app URL, exact Windows printer name, full path to SumatraPDF.exe, one-time device token and matching processor secret. Secrets are stored using Windows user-bound DPAPI encryption. Run the connector as the same Windows user. Do not pass tokens on the command line.
-
-For startup after that user signs in:
-
-```powershell
-powershell -NoProfile -File .\connector\install-startup.ps1
-```
-
-The scheduled task does not bypass Windows sign-in or start Docker. Enable Docker's normal startup setting and keep the PC awake. A mutex prevents duplicate connectors for the same Windows user. If Windows script policy blocks the signed/local script, have the PC operator approve it through the organization's normal policy; do not weaken machine security globally.
+No PowerShell or batch files are required. Printers are auto-discovered through pure native Windows Registry queries and browser WebUSB/Network APIs without any popup windows.
 
 ## 5. Test the complete path
 

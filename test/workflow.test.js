@@ -74,10 +74,10 @@ test('complete end-to-end workflow: multi-user simultaneous orders, printer conn
   assert.equal(testPrintRes.status, 200);
   assert.ok(testPrintRes.body.orderId);
 
-  // 5. Setup Script Generation
-  const setupScript = await request(`/api/owner/devices/${deviceId}/setup-script`, { cookie: ownerCookie });
-  assert.equal(setupScript.status, 200);
-  assert.ok(setupScript.body.includes('SmartPrint Printer Connector Auto-Setup'));
+  // 5. Native Printer Hardware Scan (No PowerShell / No .BAT)
+  const scanPrintersRes = await request('/api/owner/printers/scan', { cookie: ownerCookie });
+  assert.equal(scanPrintersRes.status, 200);
+  assert.ok(Array.isArray(scanPrintersRes.body));
 
   // 6. Multi-User Simultaneous File Uploads and Quotes
   const samplePdf = await PDFDocument.create();

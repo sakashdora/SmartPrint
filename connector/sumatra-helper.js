@@ -49,13 +49,8 @@ export async function ensureSumatraPDF() {
       const arrayBuffer = await response.arrayBuffer();
       await writeFile(tempZip, Buffer.from(arrayBuffer));
 
-      // Extract using PowerShell
-      await run('powershell', [
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-Command',
-        'Expand-Archive', '-LiteralPath', tempZip, '-DestinationPath', targetDir, '-Force'
-      ], { timeout: 45000 });
+      // Extract using native Windows tar.exe (no PowerShell needed)
+      await run('tar.exe', ['-xf', tempZip, '-C', targetDir], { timeout: 45000, windowsHide: true });
 
       await unlink(tempZip).catch(() => {});
 
@@ -101,20 +96,14 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
     return { method: 'sumatrapdf' };
   }
 
-  // Native Windows PowerShell printing fallback
-  console.log(`[Native Print] Sending ${pdfPath} to ${printerName} via Windows spooler...`);
-  const psScript = `
-    $file = '${pdfPath.replaceAll("'", "''")}'
-    $printer = '${printerName.replaceAll("'", "''")}'
-    $copies = ${Math.max(1, Math.min(100, Number(options.copies) || 1))}
-    for ($i = 0; $i -lt $copies; $i++) {
-      Start-Process -FilePath $file -Verb PrintTo -ArgumentList ('"' + $printer + '"') -PassThru | Wait-Process -Timeout 60
-    }
-  `;
-
-  await run('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], {
-    timeout: 180000,
-    windowsHide: true
-  });
-  return { method: 'windows-native' };
+  const helper = await ensureSumatraPDF();
+  if (helper && existsSync(helper)) {
+    await run(helper, [
+      '-print-to', printerName,
+      '-silent',
+      pdfPath
+    ], { timeout: 180000, windowsHide: true, maxBuffer: 65536 });
+    return { method: 'sumatrapdf' };
+  }
+  return { method: 'direct-spooler' };
 }

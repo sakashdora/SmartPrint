@@ -56,11 +56,68 @@ async function owner(view) {
   document.querySelector('#prices')?.addEventListener('submit', event => { event.preventDefault(); busy(event.submitter, async () => { const form = new FormData(event.target); await api('/api/owner/prices', { method: 'PUT', body: { bw: Math.round(Number(form.get('bw')) * 100), color: Math.round(Number(form.get('color')) * 100) } }); notify('Prices updated for new quotes.'); await owner(view); }); });
   document.querySelector('#previous-transactions')?.addEventListener('click', () => { transactionOffset = Math.max(0, transactionOffset - 100); owner(view); });
   document.querySelector('#next-transactions')?.addEventListener('click', () => { transactionOffset += 100; owner(view); });
-  if (['owner','queue','transactions'].includes(view)) watchUpdates(load, snapshot, () => owner(view));
+  if (['owner','queue','transactions'].includes(view)) {
+    watchUpdates(load, snapshot, (nextSnapshot) => {
+      if (nextSnapshot && Array.isArray(nextSnapshot[1])) {
+        const nextOrders = nextSnapshot[1];
+        const prevQueued = orders.filter(o => o.status === 'queued').length;
+        const nextQueued = nextOrders.filter(o => o.status === 'queued').length;
+        if (nextQueued > prevQueued) {
+          try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+            gain.gain.setValueAtTime(0.18, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+            osc.start(ctx.currentTime);
+            osc.stop(ctx.currentTime + 0.4);
+          } catch {}
+          notify('🔔 New print order received in queue!');
+        }
+      }
+      owner(view);
+    });
+  }
   document.querySelector('#export')?.addEventListener('click', event => busy(event.currentTarget, async () => {
     const all = []; let until; for (let offset = 0; ; offset += 200) { const page = await api(`/api/owner/transactions?limit=200&offset=${offset}${until ? '&until=' + encodeURIComponent(until) : ''}`, { snapshot: true }); until = page.until; all.push(...page.rows); if (page.rows.length < 200) break; } const rows = [['Transaction', 'Order', 'Method', 'Amount INR', 'Refund INR', 'Created'], ...all.map(t => [t.id, t.order_id, t.method, (t.amount / 100).toFixed(2), ((t.refund_amount || 0) / 100).toFixed(2), t.created])]; const url = URL.createObjectURL(new Blob([rows.map(row => row.map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')).join('\r\n')], { type: 'text/csv' })); const a = document.createElement('a'); a.href = url; a.download = 'smartprint-transactions.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }));
   document.querySelectorAll('[data-action]').forEach(button => button.onclick = () => busy(button, async () => {
     const { action, id } = button.dataset;
+    if (action === 'print-direct') {
+      try {
+        await api(`/api/owner/orders/${id}/start`, { method: 'POST' }).catch(() => {});
+        const blob = await downloadPdf(`/api/owner/orders/${id}/document`);
+        const url = URL.createObjectURL(blob);
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        iframe.src = url;
+        document.body.appendChild(iframe);
+        iframe.onload = () => {
+          try {
+            iframe.contentWindow.focus();
+            iframe.contentWindow.print();
+          } catch {
+            window.open(url, '_blank');
+          }
+          setTimeout(() => { iframe.remove(); URL.revokeObjectURL(url); }, 60000);
+        };
+        notify('🖨️ Opening print dialog... Please confirm output.');
+        await owner(view);
+        return;
+      } catch (err) {
+        notify(err.message);
+        return;
+      }
+    }
     if (action === 'document') { const blob = await downloadPdf(`/api/owner/orders/${id}/document`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `smartprint-${id.slice(0,8)}.pdf`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 300000); return; }
     if (action === 'complete' && !confirm('Have you checked that all pages printed successfully? This permanently deletes the live file.')) return;
     if (action === 'cash' && !confirm('Confirm you have received the exact cash amount shown for this order.')) return;

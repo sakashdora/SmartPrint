@@ -12,7 +12,7 @@ function actions(order, money) {
     if (order.method === 'upi') items.push(button('upi-confirm', 'Verify UPI', true));
   }
   if (order.status === 'queued') {
-    items.push('<span class="muted">Waiting for automatic printer</span>', button('start', 'Print manually'));
+    items.push(button('print-direct', '🖨️ Print Now', true), button('start', 'Print manually'));
     if (!order.priority) items.push(button('priority', '⚡ Rush Job', false, 'rush-btn'));
   }
   if (['printing', 'awaiting_confirmation', 'needs_review'].includes(order.status)) {

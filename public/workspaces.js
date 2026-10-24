@@ -102,15 +102,15 @@ export async function printersPage({ api, workspace, escape, notify }) {
         <div class="cloud-detect-body">
           <div class="cloud-detect-title">
             <strong>Direct Hardware Scanner Active</strong>
-            <span class="chip chip-gold">Zero .BAT · Zero PowerShell Window</span>
+            <span class="chip chip-gold">Zero-Install · Pure Web &amp; Hardware</span>
           </div>
           <p class="muted small" style="margin: 6px 0 14px 0;">
-            Use the 1-click printer presets below to connect your printer instantly, scan USB cable ports directly, or run the silent background link.
+            Use the 1-click printer presets below to connect your printer instantly, scan USB cable ports directly, or scan your local PC spooler.
           </p>
           <div class="cloud-detect-actions">
             <button class="primary small" id="scan-trigger-usb">🔌 Scan USB Ports (WebUSB)</button>
             <button class="secondary small" id="scan-trigger-wifi">📶 Connect WiFi Printer (IP)</button>
-            <button class="secondary small" id="copy-cloud-cmd">📋 Copy Silent Link (Win + R)</button>
+            <button class="secondary small" id="scan-trigger-pc"><span class="icon-spin">🔄</span> Scan Local PC Spooler</button>
           </div>
         </div>
       </div>
@@ -231,8 +231,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
         ${d.active ? `<div class="printer-actions">
           <button class="secondary small" data-test-print="${d.id}" title="Send diagnostic test sheet to verify physical printing">${icon('printer')} Test Print</button>
           <button class="secondary small" data-pause="${d.id}" title="Pause or resume print queue">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
-          <button class="secondary small" data-copy-silent="${d.id}" title="Copy silent background command for Windows">📋 Silent Link (Win+R)</button>
-          <button class="danger small" data-revoke="${d.id}">Revoke</button>
+          <button class="danger small" data-revoke="${d.id}">Disconnect</button>
         </div>` : ''}
       </div>`;
     }).join('')}</div>` : '<p class="muted">No printers connected yet. Discovered printers above can be connected in 1 click.</p>'}
@@ -331,25 +330,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   document.querySelector('#scan-wifi-direct')?.addEventListener('click', scanWifi);
   document.querySelector('#scan-trigger-wifi')?.addEventListener('click', scanWifi);
-
-  const copySilentCmd = async (btn) => {
-    btn.disabled = true;
-    try {
-      const info = await api('/api/owner/connector/info');
-      const cmd = info.winR || info.command;
-      await navigator.clipboard.writeText(cmd);
-      notify('Silent link copied! Press Win + R on your keyboard, paste, and press Enter. Runs 100% silently with zero window.');
-      btn.textContent = 'Copied to Clipboard!';
-      setTimeout(() => btn.textContent = '📋 Copy Silent Link (Win + R)', 3000);
-    } catch (err) {
-      notify(err.message);
-    } finally {
-      btn.disabled = false;
-    }
-  };
-
-  document.querySelector('#copy-cloud-cmd')?.addEventListener('click', e => copySilentCmd(e.currentTarget));
-  document.querySelectorAll('[data-copy-silent]').forEach(btn => btn.onclick = e => copySilentCmd(e.currentTarget));
+  document.querySelector('#scan-trigger-pc')?.addEventListener('click', e => triggerRescan(e.currentTarget));
 
   document.querySelector('#device-form').onsubmit = async event => {
     event.preventDefault();
@@ -362,19 +343,9 @@ export async function printersPage({ api, workspace, escape, notify }) {
       });
       document.querySelector('#device-secret').innerHTML = `
         <div class="notice-inline">
-          <strong>Device created!</strong> Press <strong>Win + R</strong> and paste this silent command to connect:
-          <pre class="device-token">${escape(device.token)}</pre>
-          <div class="actions">
-            <button class="secondary small copy-token-btn" data-token="${escape(device.token)}">Copy Token</button>
-            <button class="primary small" id="copy-silent-from-form">📋 Copy Silent Link (Win + R)</button>
-          </div>
+          <strong>✓ ${escape(data.get('name'))} paired successfully!</strong> Ready to receive print jobs and test prints.
         </div>`;
-      document.querySelector('.copy-token-btn').onclick = e => {
-        navigator.clipboard.writeText(e.target.dataset.token);
-        e.target.textContent = 'Copied!';
-      };
-      document.querySelector('#copy-silent-from-form')?.addEventListener('click', e => copySilentCmd(e.currentTarget));
-      notify('Device created successfully.');
+      notify('Device paired successfully.');
       await printersPage({ api, workspace, escape, notify });
     } catch (error) {
       notify(error.message);

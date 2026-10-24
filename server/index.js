@@ -276,7 +276,10 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.get('/api/owner/orders/:id/document', async (req, res) => {
     const order = await ownerOrder(req);
-    if (order.payment !== 'paid' || order.status !== 'printing') throw fail(409, 'Start a paid order before opening its print file.');
+    if (order.payment !== 'paid' || !['printing', 'queued'].includes(order.status)) throw fail(409, 'Start a paid order before opening its print file.');
+    if (order.status === 'queued') {
+      await db.query("UPDATE orders SET status='printing' WHERE id=$1", [order.id]);
+    }
     if ((await db.query('SELECT order_id FROM print_leases WHERE order_id=$1', [order.id])).length) throw fail(409, 'The connector is handling this print. Check its physical output before taking further action.');
     const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
     if (!doc) throw fail(404, 'File no longer available.');
@@ -312,15 +315,6 @@ export async function createApp({ database, seed = true } = {}) {
   app.post('/api/admin/shops/:id/status', async (req, res) => {
     if (!['active', 'suspended'].includes(req.body.status)) throw fail(400, 'Choose active or suspended.');
     await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
-  });
-  app.get('/connector-setup.ps1', (req, res) => {
-    res.type('text/plain').sendFile(fileURLToPath(new URL('../connector/setup-wizard.ps1', import.meta.url)));
-  });
-  app.get('/connector-files/:file', (req, res) => {
-    const allowed = ['index.js', 'sumatra-helper.js', 'setup-wizard.ps1'];
-    if (!allowed.includes(req.params.file)) return res.sendStatus(404);
-    const contentType = req.params.file.endsWith('.ps1') ? 'text/plain' : 'application/javascript';
-    res.type(contentType).sendFile(fileURLToPath(new URL(`../connector/${req.params.file}`, import.meta.url)));
   });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));

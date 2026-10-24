@@ -102,19 +102,53 @@ export function formatPrinterList(rawList) {
 export async function scanWindowsPrinters() {
   if (process.platform !== 'win32') return [];
   try {
-    const script = `
-      $defaultPrinter = try { ((Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows' -ErrorAction SilentlyContinue).Device -split ',')[0] } catch { '' }
-      try {
-        Get-Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Type, @{Name='IsDefault'; Expression={$_.Name -eq $defaultPrinter}} | ConvertTo-Json -Compress
-      } catch {
-        Get-CimInstance Win32_Printer | Select-Object Name, PortName, DriverName, PrinterStatus, Default, Network | ConvertTo-Json -Compress
-      }
-    `;
-    const { stdout } = await runExec('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 12000 });
+    let defPrinter = '';
+    try {
+      const { stdout: defOut } = await runExec('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
+      const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
+      if (defMatch) defPrinter = defMatch[1].trim();
+    } catch {}
+
+    const { stdout } = await runExec('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
     if (!stdout || !stdout.trim()) return [];
-    const parsed = JSON.parse(stdout);
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    return formatPrinterList(list);
+
+    const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('HKEY_'));
+    const rawList = [];
+
+    for (const line of lines) {
+      const parts = line.split(/\s{2,}REG_SZ\s{2,}/);
+      if (!parts || !parts[0]) continue;
+      const name = parts[0].trim();
+      if (!name || /OneNote|Fax|Microsoft XPS/i.test(name)) continue;
+
+      let port = '';
+      try {
+        const { stdout: portOut } = await runExec('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Port'], { timeout: 1500, windowsHide: true });
+        const portMatch = portOut.match(/Port\s+REG_SZ\s+(.*)/i);
+        if (portMatch) port = portMatch[1].trim();
+      } catch {}
+
+      if (!port && parts[1]) {
+        port = (parts[1].split(',')[1] || '').trim();
+      }
+
+      let driver = '';
+      try {
+        const { stdout: drvOut } = await runExec('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Printer Driver'], { timeout: 1500, windowsHide: true });
+        const drvMatch = drvOut.match(/Printer Driver\s+REG_SZ\s+(.*)/i);
+        if (drvMatch) driver = drvMatch[1].trim();
+      } catch {}
+
+      rawList.push({
+        Name: name,
+        PortName: port,
+        DriverName: driver || name,
+        PrinterStatus: 'Ready',
+        IsDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase()))
+      });
+    }
+
+    return formatPrinterList(rawList);
   } catch (err) {
     return [];
   }
@@ -298,83 +332,6 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       await audit(tx, req.user.id, 'device.test_printed', device.id);
     });
     res.json({ ok: true, orderId, message: 'Test page queued for printer!' });
-  });
-  app.get('/api/owner/devices/:id/setup-script', owner, async (req, res) => {
-    const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
-    if (!device) throw fail(404, 'Device not found.');
-    const baseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
-    const safePrinter = device.name.replace(/'/g, "''");
-    const safeUrl = baseUrl.replace(/'/g, "''");
-    const safeEchoShop = shop.name.replace(/[&|<>^%]/g, '');
-    const safeEchoDevice = device.name.replace(/[&|<>^%]/g, '');
-    res.setHeader('Content-Disposition', `attachment; filename="smartprint-setup-${device.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.bat"`);
-    res.type('text/plain').send(`@echo off\r\nchcp 65001 >nul\r\necho ====================================================\r\necho   SmartPrint Printer Connector Auto-Setup\r\necho   Shop: ${safeEchoShop}\r\necho   Device: ${safeEchoDevice}\r\necho ====================================================\r\necho.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${safeUrl}'; $env:SMARTPRINT_PRINTER='${safePrinter}'; iex (iwr '${safeUrl}/connector-setup.ps1' -UseBasicParsing)"\r\npause\r\n`);
-  });
-  app.get('/api/owner/connector-setup.bat', owner, async (req, res) => {
-    const shop = await ownerShop(req);
-    let [device] = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1 ORDER BY heartbeat DESC LIMIT 1', [shop.id]);
-    let secret = token();
-    if (!device) {
-      const id = randomUUID();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,1,1,1,$5)', [
-        id, shop.id, 'Shop Windows PC', digest(secret), now()
-      ]);
-      device = { id, name: 'Shop Windows PC' };
-    } else {
-      await db.query('UPDATE devices SET token=$1 WHERE id=$2', [digest(secret), device.id]);
-    }
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    const baseUrl = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'https://smartprint-ieks.onrender.com';
-    const safeUrl = baseUrl.replace(/'/g, "''");
-    const safeSecret = secret.replace(/'/g, "''");
-    const safeEchoShop = shop.name.replace(/[&|<>^%]/g, '');
-
-    res.setHeader('Content-Disposition', `attachment; filename="smartprint-connector-${shop.slug || 'shop'}.bat"`);
-    res.type('text/plain').send(`@echo off
-title SmartPrint Windows Shop Connector
-chcp 65001 >nul
-echo ========================================================
-echo   SmartPrint Windows Shop Connector (Auto-Link)
-echo   Shop: ${safeEchoShop}
-echo   Server: ${safeUrl}
-echo ========================================================
-echo.
-echo Connecting your Windows USB and WiFi printers to your cloud dashboard...
-echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${safeUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${safeSecret}'; iex (iwr '${safeUrl}/connector-setup.ps1' -UseBasicParsing)"
-pause
-`);
-  });
-
-  app.get('/api/owner/connector/info', owner, async (req, res) => {
-    const shop = await ownerShop(req);
-    let [device] = await db.query('SELECT * FROM devices WHERE shop_id=$1 AND active=1 ORDER BY heartbeat DESC LIMIT 1', [shop.id]);
-    let secret;
-    if (!device) {
-      const id = randomUUID();
-      secret = token();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,1,1,1,$5)', [
-        id, shop.id, 'Shop Windows PC', digest(secret), now()
-      ]);
-      device = { id, name: 'Shop Windows PC' };
-    } else {
-      secret = token();
-      await db.query('UPDATE devices SET token=$1 WHERE id=$2', [digest(secret), device.id]);
-    }
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    const baseUrl = (host ? `${proto}://${host}` : null) || process.env.PUBLIC_BASE_URL || 'https://smartprint-ieks.onrender.com';
-    const psCommand = `powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
-    const winRCommand = `powershell -WindowStyle Hidden -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_DEVICE_TOKEN='${secret}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"`;
-    res.json({
-      url: baseUrl,
-      token: secret,
-      deviceId: device.id,
-      command: psCommand,
-      winR: winRCommand
-    });
   });
 
   app.post('/api/owner/orders/:id/priority', owner, async (req, res) => {
