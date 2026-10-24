@@ -1,6 +1,6 @@
 import express from 'express';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { openDatabase } from './db.js';
 import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt } from './security.js';
@@ -314,8 +314,7 @@ export async function createApp({ database, seed = true } = {}) {
     await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
   });
   app.get('/connector-setup.ps1', (req, res) => {
-    const { resolve } = import.meta.resolve ? { resolve: p => new URL(p, import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1') } : { resolve: p => p };
-    res.type('text/plain').sendFile(new URL('../connector/setup-wizard.ps1', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+    res.type('text/plain').sendFile(fileURLToPath(new URL('../connector/setup-wizard.ps1', import.meta.url)));
   });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));

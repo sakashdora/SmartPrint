@@ -69,8 +69,9 @@ small { font-size: 12px; }
 .brand { display: inline-flex; align-items: center; gap: 12px; color: #101b2c; font-size: 25px; font-weight: 750; letter-spacing: -.9px; white-space: nowrap; text-decoration: none; }
 .brand:hover { text-decoration: none; }
 .brand .icon { width: 32px; height: 32px; stroke-width: 1.7; }
-.brand-img { height: 36px; width: auto; max-width: 170px; object-fit: contain; display: block; }
-.sidebar-brand .brand-img { height: 32px; }
+.brand-img { height: 44px; width: auto; max-width: 220px; object-fit: contain; display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.06)); transition: transform 0.15s ease; }
+.brand:hover .brand-img { transform: scale(1.02); }
+.sidebar-brand .brand-img { height: 40px; max-width: 200px; }
 .topbar { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px max(4vw, 24px); background: white; border-bottom: 1px solid var(--line); }
 .toplinks { display: flex; align-items: center; gap: 28px; }
 .toplinks a { display: inline-flex; align-items: center; gap: 10px; color: #243146; min-height: 44px; }

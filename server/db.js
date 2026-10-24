@@ -20,6 +20,17 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
     };
     // Only acquisition retries. Once SQL starts, never replay an ambiguous write.
     const query = async (sql, params = []) => { const client = await connect(); try { return (await client.query(qualify(sql), params)).rows; } finally { client.release(); } };
+    // In development or preview, probe connection. If remote DB is unreachable, cleanly fall back to SQLite
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        const client = await connect();
+        client.release();
+      } catch (err) {
+        console.warn(`[SmartPrint DB] Remote database unavailable (${err.code || err.message}). Falling back to local SQLite (.data/smartprint.sqlite) for local preview.`);
+        await pool.end().catch(() => {});
+        return openDatabase({ url: null, path });
+      }
+    }
     return { kind: 'Neon/PostgreSQL', query,
       migrate: async () => {
         const client = await connect();

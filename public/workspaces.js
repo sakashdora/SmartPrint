@@ -33,7 +33,12 @@ export async function printersPage({ api, workspace, escape, notify }) {
       </div>
     </div>
     ${scanned.length ? `<div class="scanned-printers-grid">${scanned.map(p => {
-      const connectedDevice = devices.find(d => d.name === p.name);
+      const connectedDevice = devices.find(d => {
+        if (!d) return false;
+        const dn = String(d.name || '').toLowerCase().trim();
+        const pn = String(p.name || '').toLowerCase().trim();
+        return dn === pn || dn.includes(pn) || pn.includes(dn);
+      });
       const isOnline = connectedDevice && connectedDevice.active && connectedDevice.heartbeat && (Date.now() - Date.parse(connectedDevice.heartbeat) < 90000);
       return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}">
         <div class="scanned-card-header">
@@ -229,6 +234,13 @@ export async function printersPage({ api, workspace, escape, notify }) {
       notify(error.message);
     }
   });
+
+  watchUpdates(
+    () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => [])]),
+    [devices, scanned],
+    () => printersPage({ api, workspace, escape, notify }),
+    5000
+  );
 }
 
 export async function securityPage({ api, mount, escape, notify, onVerified }) {

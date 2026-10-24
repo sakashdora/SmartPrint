@@ -10,22 +10,36 @@ const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
 await mkdir(root, { recursive: true });
 
-// Load persisted settings if environment variables are not set
+// Load persisted settings with BOM stripping
 const settingsPath = join(root, 'settings.json');
-let savedConfig = {};
-if (existsSync(settingsPath)) {
-  try {
-    savedConfig = JSON.parse(readFileSync(settingsPath, 'utf8'));
-  } catch {}
+export function loadConfig() {
+  if (existsSync(settingsPath)) {
+    try {
+      const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
+      if (raw) return JSON.parse(raw);
+    } catch (err) {
+      console.warn('[Warning] Could not parse settings.json:', err.message);
+    }
+  }
+  return {};
 }
 
+let savedConfig = loadConfig();
 const base = (process.env.SMARTPRINT_URL || savedConfig.Url || 'http://localhost:3000').replace(/\/+$/, '');
-const secret = process.env.SMARTPRINT_DEVICE_TOKEN || savedConfig.Token;
+let secret = process.env.SMARTPRINT_DEVICE_TOKEN || savedConfig.Token;
 let printer = process.env.SMARTPRINT_PRINTER || savedConfig.Printer;
 const processorSecret = process.env.PROCESSOR_SECRET || savedConfig.ProcessorSecret;
 
+// Record process PID for single-instance connector management
+const pidPath = join(root, 'connector.pid');
+try {
+  await writeFile(pidPath, String(process.pid), 'utf8');
+} catch {}
+const cleanupPid = () => { try { unlink(pidPath).catch(() => {}); } catch {} };
+
 if (!secret) {
   console.error('\n[Error] Missing device token. Run connector\\connect.bat or provide SMARTPRINT_DEVICE_TOKEN.\n');
+  cleanupPid();
   process.exit(1);
 }
 
@@ -146,7 +160,20 @@ async function request(path, { method = 'GET', body, lease, binary, range } = {}
     ...(body ? { body: JSON.stringify(body) } : {}),
     signal: AbortSignal.timeout(30000)
   });
-  if (!response.ok) throw new Error(`SmartPrint request failed (${response.status} on ${path}).`);
+  if (!response.ok) {
+    if (response.status === 401) {
+      // Re-read settings.json in case shop regenerated token or autoconnect updated it
+      const refreshed = loadConfig();
+      if (refreshed.Token && refreshed.Token !== secret) {
+        secret = refreshed.Token;
+        if (refreshed.Printer) printer = refreshed.Printer;
+        console.log('[Connector] Detected new token in settings.json. Reconnecting...');
+      }
+    }
+    const err = new Error(`SmartPrint request failed (${response.status} on ${path}).`);
+    err.status = response.status;
+    throw err;
+  }
   return binary ? { bytes: Buffer.from(await response.arrayBuffer()), range: response.headers.get('Content-Range') } : response.json();
 }
 
@@ -228,8 +255,9 @@ async function printJob(job) {
 }
 
 let running = true;
-process.on('SIGINT', () => { running = false; console.log('\nStopping connector...'); });
-process.on('SIGTERM', () => { running = false; console.log('\nStopping connector...'); });
+process.on('SIGINT', () => { running = false; cleanupPid(); console.log('\nStopping connector...'); });
+process.on('SIGTERM', () => { running = false; cleanupPid(); console.log('\nStopping connector...'); });
+process.on('exit', cleanupPid);
 
 const heartbeat = setInterval(() => request('/api/device/heartbeat', { method: 'POST' }).catch(() => {}), 30000);
 heartbeat.unref();

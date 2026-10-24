@@ -155,7 +155,7 @@ $configObj = @{
     Sumatra = if (Test-Path $sumatraExe) { $sumatraExe } else { '' }
     LastUpdated = (Get-Date).ToString("o")
 }
-$configObj | ConvertTo-Json | Set-Content -Path $settingsFile -Encoding utf8
+[System.IO.File]::WriteAllText($settingsFile, ($configObj | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
 Write-Host "`n✓ Configuration saved to $settingsFile" -ForegroundColor Cyan
 
 # 6. Test Server Connection

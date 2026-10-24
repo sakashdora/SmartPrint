@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { token, digest, decrypt, encrypt } from './security.js';
 import { sendPdf } from './uploads.js';
 import { price, validateOptions } from './print-options.js';
@@ -145,18 +146,21 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const printerName = String(req.body.name || '').trim();
     if (!printerName) throw fail(400, 'Choose a printer.');
 
-    let [device] = await db.query('SELECT id, name, active FROM devices WHERE shop_id=$1 AND name=$2', [shop.id, printerName]);
-    let secret;
+    let [device] = await db.query(
+      'SELECT id, name, active FROM devices WHERE shop_id=$1 AND (LOWER(name) = LOWER($2) OR LOWER(name) LIKE LOWER($3) OR LOWER($2) LIKE LOWER(name)) ORDER BY active DESC LIMIT 1',
+      [shop.id, printerName, `%${printerName}%`]
+    );
+    let secret = token();
     if (!device) {
       const id = randomUUID();
-      secret = token();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex) VALUES ($1,$2,$3,$4,$5,$6)', [
-        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
+        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now()
       ]);
       device = { id, name: printerName, active: 1 };
     } else {
-      secret = token();
-      await db.query('UPDATE devices SET active=1, token=$1 WHERE id=$2', [digest(secret), device.id]);
+      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
+      device.name = printerName;
+      device.active = 1;
     }
 
     deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
@@ -164,28 +168,55 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
     mkdirSync(connectorRoot, { recursive: true });
     const settingsPath = join(connectorRoot, 'settings.json');
+    let existingSumatra = '';
+    try {
+      if (existsSync(settingsPath)) {
+        const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
+        if (raw) existingSumatra = JSON.parse(raw).Sumatra || '';
+      }
+    } catch {}
+
+    const serverUrl = process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
     writeFileSync(settingsPath, JSON.stringify({
-      Url: process.env.PUBLIC_BASE_URL || 'http://localhost:3000',
+      Url: serverUrl,
       Token: secret,
-      Printer: printerName
-    }, null, 2));
+      Printer: printerName,
+      Sumatra: existingSumatra,
+      LastUpdated: new Date().toISOString()
+    }, null, 2), 'utf8');
+
+    // Terminate any previous connector process to prevent token or device conflict
+    const pidFile = join(connectorRoot, 'connector.pid');
+    try {
+      if (existsSync(pidFile)) {
+        const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+        if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
+          process.kill(oldPid, 'SIGTERM');
+        }
+      }
+    } catch {}
 
     try {
-      const child = spawn(process.execPath, ['connector/index.js'], {
-        cwd: process.cwd(),
+      const connectorScript = fileURLToPath(new URL('../connector/index.js', import.meta.url));
+      const child = spawn(process.execPath, [connectorScript], {
+        cwd: resolve(fileURLToPath(new URL('../', import.meta.url))),
         detached: true,
         stdio: 'ignore',
         env: {
           ...process.env,
-          SMARTPRINT_URL: 'http://localhost:3000',
+          SMARTPRINT_URL: serverUrl,
           SMARTPRINT_DEVICE_TOKEN: secret,
           SMARTPRINT_PRINTER: printerName
         }
       });
+      if (child.pid) {
+        writeFileSync(pidFile, String(child.pid), 'utf8');
+      }
       child.unref();
-    } catch {}
+    } catch (err) {
+      console.error('[Autoconnect] Could not spawn connector process:', err.message);
+    }
 
-    await db.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2', [now(), device.id]);
     await audit(db, req.user.id, 'device.autoconnected', device.id);
     res.json({ ok: true, id: device.id, name: device.name, token: secret, message: `${printerName} connected successfully!` });
   });
@@ -241,8 +272,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Device not found.');
     const baseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:3000';
+    const safePrinter = device.name.replace(/'/g, "''");
+    const safeUrl = baseUrl.replace(/'/g, "''");
+    const safeEchoShop = shop.name.replace(/[&|<>^%]/g, '');
+    const safeEchoDevice = device.name.replace(/[&|<>^%]/g, '');
     res.setHeader('Content-Disposition', `attachment; filename="smartprint-setup-${device.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.bat"`);
-    res.type('text/plain').send(`@echo off\r\nchcp 65001 >nul\r\necho ====================================================\r\necho   SmartPrint Printer Connector Auto-Setup\r\necho   Shop: ${shop.name}\r\necho   Device: ${device.name}\r\necho ====================================================\r\necho.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${baseUrl}'; $env:SMARTPRINT_PRINTER='${device.name}'; iex (iwr '${baseUrl}/connector-setup.ps1' -UseBasicParsing)"\r\npause\r\n`);
+    res.type('text/plain').send(`@echo off\r\nchcp 65001 >nul\r\necho ====================================================\r\necho   SmartPrint Printer Connector Auto-Setup\r\necho   Shop: ${safeEchoShop}\r\necho   Device: ${safeEchoDevice}\r\necho ====================================================\r\necho.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$env:SMARTPRINT_URL='${safeUrl}'; $env:SMARTPRINT_PRINTER='${safePrinter}'; iex (iwr '${safeUrl}/connector-setup.ps1' -UseBasicParsing)"\r\npause\r\n`);
   });
   app.post('/api/owner/orders/:id/priority', owner, async (req, res) => {
     const shop = await ownerShop(req);
