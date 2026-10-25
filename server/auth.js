@@ -45,7 +45,8 @@ export function authRoutes(app, db, key, config) {
     res.cookie('sp_session', secret, cookieOptions);
     const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
     const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
-    return { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(enforceMfa && !mfa) };
+    const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
+    return { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfaRequired: Boolean(enforceMfa && !mfa) };
   }
   const requireSession = (req, res, next) => req.user ? next() : next(fail(401, 'Please sign in.'));
 
@@ -56,6 +57,7 @@ export function authRoutes(app, db, key, config) {
     const dummy = '$argon2id$v=19$m=65536,t=3,p=4$0000000000000000000000$0000000000000000000000000000000000000000000';
     const valid = typeof password === 'string' && password.length <= 128 && await checkPassword(password, user?.password ?? dummy);
     if (!user || !valid || (req.body.role && req.body.role !== user.role)) throw fail(401, 'Email, password or verification code is incorrect.');
+    if (user.status === 'suspended' || user.status === 'disabled') throw fail(403, 'This account has been suspended or disabled. Please contact support.');
     if (!user.password.startsWith('$argon2')) await db.query('UPDATE users SET password=$1 WHERE id=$2', [await hashPassword(password), user.id]);
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [user.id]);
     let mfaSatisfied = false;

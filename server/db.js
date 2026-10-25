@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = '.data/smartprint.sqlite' } = {}) {
@@ -60,6 +60,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
             ['orders', 'file_name', "TEXT DEFAULT 'document.pdf'"],
             ['orders', 'priority', 'INTEGER DEFAULT 0'],
             ['mfa', 'recovery_codes', "TEXT DEFAULT '[]'"],
+            ['users', 'status', "TEXT NOT NULL DEFAULT 'active'"],
+            ['shop_payments', 'qr_image', 'TEXT'],
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -99,6 +101,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN file_name TEXT DEFAULT 'document.pdf';"); } catch {}
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN priority INTEGER DEFAULT 0;"); } catch {}
       try { sqlite.exec("ALTER TABLE mfa ADD COLUMN recovery_codes TEXT DEFAULT '[]';"); } catch {}
+      try { sqlite.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"); } catch {}
+      try { sqlite.exec("ALTER TABLE shop_payments ADD COLUMN qr_image TEXT;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

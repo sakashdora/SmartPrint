@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import QRCode from 'qrcode';
 import { openDatabase } from './db.js';
 import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt } from './security.js';
@@ -11,6 +12,7 @@ import { limitRate } from './security.js';
 import { processDocument, localProcess, supportsLocalPreparation } from './process-client.js';
 import { deviceRoutes, sweepLeases, queuePreparation } from './devices.js';
 import { paymentRoutes } from './payments.js';
+import { notificationRoutes, createNotification } from './notifications.js';
 import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
 import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
 import { transitionOrder } from './state-machine.js';
@@ -54,11 +56,16 @@ export async function createApp({ database, seed = true } = {}) {
     const sessionId = req.headers.cookie?.split('; ').find(v => v.startsWith('sp_session='))?.slice(11);
     if (sessionId) {
       req.sessionId = digest(sessionId);
-      const [user] = await db.query('SELECT u.id,u.email,u.role,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
+      const [user] = await db.query('SELECT u.id,u.email,u.role,u.status,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
       if (user) {
-        const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
-        const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
-        req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(enforceMfa && !user.mfa) };
+        if (user.status === 'suspended' || user.status === 'disabled') {
+          req.user = null;
+        } else {
+          const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
+          const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+          const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
+          req.user = { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfaRequired: Boolean(enforceMfa && !user.mfa) };
+        }
       }
     }
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
@@ -121,6 +128,7 @@ export async function createApp({ database, seed = true } = {}) {
   app.get('/api/health', (req, res) => res.json({
     mode: config.production ? 'production' : 'development',
     payments: config.payments,
+    paymentMode: config.paymentMode || (config.payments ? 'test' : 'disabled'),
     automaticPrinting: true,
     office: config.production || process.env.CONNECTOR_PROCESSING === 'true' || Boolean(process.env.PROCESSOR_URL),
     demo: !process.env.DATABASE_URL && !config.production,
@@ -132,6 +140,7 @@ export async function createApp({ database, seed = true } = {}) {
   uploadRoutes(app, db, key);
   deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance: () => maintain() });
   paymentRoutes(app, { db, ownerOrder, requireRole, collect, audit });
+  notificationRoutes(app, { db, ownerShop, requireRole });
   app.post('/api/auth/register', async (req, res) => {
     const email = String(req.body.email ?? '').trim().toLowerCase(), password = String(req.body.password ?? ''), name = String(req.body.name ?? '').trim(), location = String(req.body.location ?? '').trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || password.length < 12 || password.length > 128 || name.length < 2 || name.length > 100 || !location || location.length > 200) throw fail(400, 'Use a valid email, 12–128 character password, shop name and location.');
@@ -284,6 +293,14 @@ export async function createApp({ database, seed = true } = {}) {
       if (idempKey) {
         await saveIdempotentResult(tx, idempKey, bearer(req) || req.ip, 'order.create', id, 201, orderPayload);
       }
+      createNotification(db, {
+        shopId: quote.shop_id,
+        orderId: id,
+        eventType: 'order.created',
+        title: 'New Print Order Placed',
+        body: `Order #${id.slice(0, 8).toUpperCase()}: ${quote.pages} pages (${req.body.method.toUpperCase()} - ₹${(quote.amount / 100).toFixed(2)})`,
+        data: { orderId: id, pages: quote.pages, amount: quote.amount, method: req.body.method, fileName }
+      }).catch(() => {});
       return orderPayload;
     });
     res.status(201).json(result);
@@ -421,6 +438,14 @@ export async function createApp({ database, seed = true } = {}) {
       await collect(tx, order, 'counter');
       await audit(tx, req.user.id, 'cash.collected', order.id);
     });
+    createNotification(db, {
+      shopId: order.shop_id,
+      orderId: order.id,
+      eventType: 'payment.confirmed',
+      title: 'Cash Payment Confirmed',
+      body: `Order #${order.id.slice(0, 8).toUpperCase()} (₹${(order.amount / 100).toFixed(2)}) cash payment received. Moved to print queue.`,
+      data: { orderId: order.id, method: 'cash' }
+    }).catch(() => {});
     const result = { ok: true };
     if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.cash', order.id, 200, result);
     res.json(result);
@@ -443,6 +468,14 @@ export async function createApp({ database, seed = true } = {}) {
       console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
     }
     await audit(db, req.user.id, 'print.started', order.id);
+    createNotification(db, {
+      shopId: order.shop_id,
+      orderId: order.id,
+      eventType: 'print.started',
+      title: 'Print Started',
+      body: `Order #${order.id.slice(0, 8).toUpperCase()} print started.`,
+      data: { orderId: order.id }
+    }).catch(() => {});
     const result = { ok: true };
     if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.start', order.id, 200, result);
     res.json(result);
@@ -489,6 +522,14 @@ export async function createApp({ database, seed = true } = {}) {
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       await audit(tx, req.user.id, 'print.confirmed.file_deleted', order.id);
     });
+    createNotification(db, {
+      shopId: order.shop_id,
+      orderId: order.id,
+      eventType: 'print.completed',
+      title: 'Print Confirmed & Completed',
+      body: `Order #${order.id.slice(0, 8).toUpperCase()} physical output verified. Live file securely deleted.`,
+      data: { orderId: order.id }
+    }).catch(() => {});
     const result = { ok: true };
     if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.complete', order.id, 200, result);
     res.json(result);
@@ -511,6 +552,32 @@ export async function createApp({ database, seed = true } = {}) {
     if (!['active', 'suspended'].includes(req.body.status)) throw fail(400, 'Choose active or suspended.');
     await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
   });
+  app.get('/api/admin/orders', async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const rows = await db.query('SELECT o.*, s.name as shop_name, s.slug as shop_slug FROM orders o JOIN shops s ON s.id=o.shop_id ORDER BY o.created DESC LIMIT $1', [limit]);
+    res.json(rows.map(publicOrder));
+  });
+  app.get('/api/admin/devices', async (req, res) => {
+    const rows = await db.query('SELECT d.id, d.shop_id, d.name, d.active, d.heartbeat, d.color, d.duplex, s.name as shop_name FROM devices d JOIN shops s ON s.id=d.shop_id ORDER BY d.active DESC, d.heartbeat DESC');
+    res.json(rows);
+  });
+  app.get('/api/admin/payments', async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const rows = await db.query('SELECT t.*, s.name as shop_name, r.amount as refund_amount FROM transactions t JOIN shops s ON s.id=t.shop_id LEFT JOIN refunds r ON r.order_id=t.order_id ORDER BY t.created DESC LIMIT $1', [limit]);
+    res.json(rows);
+  });
+  app.get('/api/admin/stats', async (req, res) => {
+    const [[shopCounts], [orderCounts], [transCounts]] = await Promise.all([
+      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),0) AS active, COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) AS pending, COALESCE(SUM(CASE WHEN status='suspended' THEN 1 ELSE 0 END),0) AS suspended FROM shops"),
+      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed, COALESCE(SUM(CASE WHEN status IN ('queued','printing') THEN 1 ELSE 0 END),0) AS active_jobs FROM orders"),
+      db.query("SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_collected FROM transactions")
+    ]);
+    res.json({
+      shops: { total: Number(shopCounts.total), active: Number(shopCounts.active), pending: Number(shopCounts.pending), suspended: Number(shopCounts.suspended) },
+      orders: { total: Number(orderCounts.total), completed: Number(orderCounts.completed), active: Number(orderCounts.active_jobs) },
+      transactions: { count: Number(transCounts.count), volume: Number(transCounts.total_collected) }
+    });
+  });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -522,6 +589,8 @@ export async function createApp({ database, seed = true } = {}) {
       }
     }
   }));
+  const publicIndex = resolve(fileURLToPath(new URL('../public/index.html', import.meta.url)));
+  app.get(/^\/(workspace|login)(\/.*)?$/, (req, res) => res.sendFile(publicIndex));
   const cleanup = async () => db.transaction(async tx => {
     await tx.query('DELETE FROM uploads WHERE expires<=$1', [now()]);
     await tx.query('DELETE FROM preparations WHERE expires<=$1', [now()]);

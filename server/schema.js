@@ -1,5 +1,5 @@
 export const schema = `
-CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('owner','admin')));
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('owner','admin')), status TEXT NOT NULL DEFAULT 'active');
 CREATE TABLE IF NOT EXISTS shops (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, location TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', bw INTEGER NOT NULL DEFAULT 200 CHECK(bw > 0), color INTEGER NOT NULL DEFAULT 1000 CHECK(color > 0), version INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, expires TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS quotes (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), document_id TEXT NOT NULL, token TEXT NOT NULL, options TEXT NOT NULL, pages INTEGER NOT NULL, sides INTEGER NOT NULL, sheets INTEGER NOT NULL, amount INTEGER NOT NULL, version INTEGER NOT NULL, expires TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS print_leases (order_id TEXT PRIMARY KEY REFERENCES or
 CREATE TABLE IF NOT EXISTS refunds (order_id TEXT PRIMARY KEY REFERENCES orders(id), shop_id TEXT NOT NULL REFERENCES shops(id), amount INTEGER NOT NULL, method TEXT NOT NULL, state TEXT NOT NULL, reference TEXT, reason TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS worker_status (id TEXT PRIMARY KEY, last_success TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS session_expiry ON sessions(expires);
-CREATE TABLE IF NOT EXISTS shop_payments (shop_id TEXT PRIMARY KEY REFERENCES shops(id), upi_id TEXT NOT NULL, payee TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS shop_payments (shop_id TEXT PRIMARY KEY REFERENCES shops(id), upi_id TEXT NOT NULL, payee TEXT NOT NULL, qr_image TEXT);
 CREATE TABLE IF NOT EXISTS upi_receipts (order_id TEXT PRIMARY KEY REFERENCES orders(id), upi_id TEXT NOT NULL, payee TEXT NOT NULL, reference TEXT, reported_at TEXT);
 CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), token TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, expires TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS upload_chunks (upload_id TEXT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE, part INTEGER NOT NULL, payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(upload_id,part));
@@ -37,4 +37,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (key TEXT PRIMARY KEY, actor TEXT NO
 CREATE INDEX IF NOT EXISTS idempotency_expires ON idempotency_keys(expires);
 CREATE TABLE IF NOT EXISTS order_history (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE, from_status TEXT NOT NULL, to_status TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS order_history_order ON order_history(order_id, created);
+CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, shop_id TEXT REFERENCES shops(id), user_id TEXT REFERENCES users(id), order_id TEXT REFERENCES orders(id), event_type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, data TEXT DEFAULT '{}', is_read INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS notifications_shop ON notifications(shop_id, created);
+CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, created);
 `;

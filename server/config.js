@@ -50,7 +50,22 @@ export function configuration() {
     if (sslmode !== 'verify-full' && sslmode !== 'require') throw new Error('Production database URL must use sslmode=verify-full or sslmode=require.');
   }
   const settlement = process.env.PAYMENT_SETTLEMENT_MODE || 'single_merchant';
-  const paymentsEnabled = Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET && settlement === 'single_merchant');
-  return { production, origin, payments: paymentsEnabled };
+  const keyId = process.env.RAZORPAY_KEY_ID || '';
+  const isLiveKey = keyId.startsWith('rzp_live');
+  const liveAuthorized = process.env.RAZORPAY_LIVE_ENABLED === 'true';
+
+  if (isLiveKey && !liveAuthorized) {
+    console.warn('[Payments Security] Razorpay live key detected but RAZORPAY_LIVE_ENABLED is not true. Live payments remain disabled.');
+  }
+
+  const paymentsEnabled = Boolean(
+    keyId &&
+    process.env.RAZORPAY_KEY_SECRET &&
+    settlement === 'single_merchant' &&
+    (!isLiveKey || liveAuthorized)
+  );
+
+  const paymentMode = paymentsEnabled ? (isLiveKey && liveAuthorized ? 'live' : 'test') : 'disabled';
+  return { production, origin, payments: paymentsEnabled, paymentMode };
 }
 

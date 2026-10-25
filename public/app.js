@@ -5,6 +5,7 @@ import { downloadQrPoster } from './qr-poster.js';
 import { downloadPdf } from './viewer.js';
 import { icon, brand } from './ui.js';
 import { ownerDashboard, adminDashboard } from './dashboards.js';
+import { playChime, sendRealNotification } from './notifications.js';
 const app = document.querySelector('#app');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const money = n => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n / 100);
@@ -42,29 +43,268 @@ function environmentLabel() {
 }
 
 function header() {
-  return `<header class="topbar">
-    ${brand()}
-    <nav class="toplinks" aria-label="Main navigation">
-      <a href="#track" class="toplink-item">${icon('user')} <span>Track order</span></a>
-      <a href="${me ? (me.role === 'admin' ? '#admin' : '#owner') : '#login'}" class="toplink-item">${icon('wallet')} <span>Workspace</span></a>
-      ${me
-        ? `<button class="link-button toplink-item" id="logout">${icon('logout')} <span>Sign out</span></button>`
-        : `<a href="#login" class="toplink-item">${icon('logout')} <span>Sign in</span></a>`
-      }
-    </nav>
+  const isWorkspace = me ? (me.role === 'admin' ? '#admin' : '#owner') : '#workspace';
+  return `<header class="home-floating-header-wrapper">
+    <div class="home-floating-nav">
+      <div class="nav-brand-slot">${brand()}</div>
+      
+      <nav class="nav-center-links" aria-label="Main navigation">
+        <a href="#track" class="nav-center-link">Track order</a>
+        <a href="#how-it-works" class="nav-center-link">How it works</a>
+        <a href="#for-shop-owners" class="nav-center-link">For shop owners</a>
+        <a href="#support" class="nav-center-link">Support</a>
+      </nav>
+
+      <div class="nav-right-actions">
+        <a href="#track" class="nav-track-link">
+          ${icon('search')}
+          <span>Track order</span>
+        </a>
+        <a href="${isWorkspace}" class="nav-workspace-btn">
+          ${icon('user')}
+          <span>${me ? 'Go to Workspace →' : 'Workspace sign in →'}</span>
+        </a>
+        <button id="home-mobile-toggle" class="home-mobile-menu-btn" aria-label="Toggle navigation">
+          ${icon('menu')}
+        </button>
+      </div>
+    </div>
+    
+    <!-- Mobile dropdown drawer -->
+    <div class="home-mobile-drawer" id="home-mobile-drawer" hidden>
+      <nav class="home-mobile-nav-links">
+        <a href="#track" class="mobile-nav-link">${icon('search')} Track order</a>
+        <a href="#how-it-works" class="mobile-nav-link">${icon('file')} How it works</a>
+        <a href="#for-shop-owners" class="mobile-nav-link">${icon('shop')} For shop owners</a>
+        <a href="#support" class="mobile-nav-link">${icon('support')} Support</a>
+        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? 'Workspace' : 'Workspace sign in'}</a>
+      </nav>
+    </div>
   </header>${environmentLabel()}`;
 }
-function mount(content, { workspacePage = false } = {}) { stopUpdates(); app.innerHTML = (workspacePage ? '' : header()) + content; document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => { await api('/api/auth/logout', { method: 'POST' }); me = null; location.hash = 'print'; await route(); })); }
+function mount(content, { workspacePage = false } = {}) {
+  stopUpdates();
+  app.innerHTML = (workspacePage ? '' : header()) + content;
+  
+  const mobileToggle = document.querySelector('#home-mobile-toggle');
+  const mobileDrawer = document.querySelector('#home-mobile-drawer');
+  if (mobileToggle && mobileDrawer) {
+    mobileToggle.onclick = () => {
+      mobileDrawer.hidden = !mobileDrawer.hidden;
+    };
+  }
+
+  document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => {
+    await api('/api/auth/logout', { method: 'POST' });
+    me = null;
+    location.hash = 'print';
+    await route();
+  }));
+}
 async function busy(button, action) { button.disabled = true; try { await action(); } catch (error) { notify(error.message); } finally { button.disabled = false; } }
 async function customer() { return renderCustomer({ api, mount, money, escape, health, notify, onOrder: result => { receipt = result; sessionStorage.setItem('receipt', JSON.stringify(result)); location.hash = 'track'; } }); }
 async function tracking() { return trackingPage({ api, mount, money, escape, receipt, notify, refresh: route }); }
 function workspace(content, active, admin = false) {
-  const links = admin ? [['admin', 'Overview', 'home'], ['shops', 'Shops', 'shop'], ['audit', 'Audit log', 'clock'], ['account', 'Account', 'user']] : [['owner', 'Overview', 'home'], ['queue', 'Print queue', 'file'], ['transactions', 'Transactions', 'list'], ['payments', 'UPI payments', 'wallet'], ['printers', 'Printers', 'printer'], ['settings', 'Prices & QR', 'tag'], ['account', 'Account', 'user']];
+  const links = admin ? [
+    ['admin', 'Overview', 'home'],
+    ['shops', 'Shops', 'shop'],
+    ['audit', 'Audit log', 'clock'],
+    ['reports', 'Reports', 'chart'],
+    ['settings-admin', 'Settings', 'gear'],
+    ['account', 'Account', 'user']
+  ] : [
+    ['owner', 'Overview', 'home'],
+    ['queue', 'Print queue', 'file'],
+    ['transactions', 'Transactions', 'list'],
+    ['payments', 'UPI payments', 'wallet'],
+    ['printers', 'Printers', 'printer'],
+    ['settings', 'Prices & QR', 'tag'],
+    ['account', 'Account', 'user']
+  ];
   const title = links.find(link => link[0] === active)?.[1] || 'Overview';
-  mount(`<div class="workspace"><aside class="sidebar"><div class="sidebar-brand">${brand()}<button id="nav-toggle" class="icon-button" aria-label="Toggle workspace navigation" aria-controls="workspace-nav" aria-expanded="false">${icon('menu')}</button></div><div class="workspace-nav" id="workspace-nav"><small class="nav-caption">${admin ? 'PLATFORM ADMIN' : 'SHOP WORKSPACE'}</small><nav aria-label="Workspace navigation">${links.map(([route, label, glyph]) => `<a href="#${route}" class="nav-link ${active === route ? 'active' : ''}" ${active === route ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="sidebar-account"><span class="avatar">${admin ? 'AD' : 'SO'}</span><div><strong>${admin ? 'Administrator' : 'Shop owner'}</strong><a href="#account">Account settings</a></div><button class="icon-button" id="logout" aria-label="Sign out">${icon('logout')}</button></div>${environmentLabel()}</div></aside><main class="workmain"><div class="workspace-toolbar"><span>${admin ? 'Platform' : 'Workspace'} <span class="breadcrumb-divider">/</span> <strong>${title}</strong></span><span class="toolbar-date">${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div><div class="workspace-content">${content}</div></main></div>`, { workspacePage: true });
+  const todayStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  mount(`<div class="workspace">
+    <div class="mobile-topbar">
+      <button id="mobile-nav-toggle" class="icon-button mobile-menu-btn" aria-label="Toggle navigation">${icon('menu')}</button>
+      <div class="mobile-brand">${brand()}</div>
+      <button class="icon-button mobile-notif-btn" aria-label="Notifications" title="Notifications">${icon('bell')}</button>
+    </div>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+    <aside class="sidebar"><div class="sidebar-brand">${brand()}<button id="nav-toggle" class="icon-button" aria-label="Toggle workspace navigation" aria-controls="workspace-nav" aria-expanded="false">${icon('menu')}</button></div><div class="workspace-nav" id="workspace-nav"><small class="nav-caption">${admin ? 'PLATFORM ADMIN' : 'SHOP WORKSPACE'}</small><nav aria-label="Workspace navigation">${links.map(([route, label, glyph]) => `<a href="#${route}" class="nav-link ${active === route ? 'active' : ''}" ${active === route ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></a>`).join('')}</nav><div class="sidebar-account"><span class="avatar">${admin ? 'AD' : 'SO'}</span><div><strong>${admin ? 'Administrator' : 'Shop owner'}</strong><small class="muted" style="display:block;font-size:11px;">${admin ? 'Platform Admin' : 'Shop Manager'}</small></div><button class="icon-button" id="logout" aria-label="Sign out" title="Sign out">${icon('logout')}</button></div>${environmentLabel()}</div></aside><main class="workmain">
+      ${admin ? `
+      <div class="admin-topbar-wrapper">
+        <div class="admin-breadcrumbs">Platform <span class="breadcrumb-slash">/</span> <strong>${escape(title)}</strong></div>
+        <div class="admin-topbar-center">
+          <div class="admin-search-box">
+            ${icon('search')}
+            <input type="search" id="global-admin-search" placeholder="Search shops, owners, or orders..." autocomplete="off">
+          </div>
+        </div>
+        <div class="admin-topbar-right">
+          <span class="admin-date-pill">${icon('calendar')} ${todayStr}</span>
+          <button class="admin-icon-btn admin-notif-btn" aria-label="Notifications" title="Notifications">
+            ${icon('bell')}
+            <span class="notif-badge-dot"></span>
+          </button>
+          <div class="admin-user-pill">
+            <span class="admin-avatar-sm">AD</span>
+            <div class="admin-user-info">
+              <strong class="admin-user-name">Administrator</strong>
+              <span class="admin-user-role">Platform Admin</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      ` : `
+      <div class="workspace-toolbar">
+        <span>${admin ? 'Platform' : 'Workspace'} <span class="breadcrumb-divider">/</span> <strong>${title}</strong></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <button class="icon-button owner-notif-btn" id="owner-notif-btn" aria-label="Notifications" title="Notifications" style="position:relative;background:none;border:none;cursor:pointer;display:grid;place-items:center;">
+            ${icon('bell')}
+            <span class="notif-badge-dot" style="display:none;"></span>
+          </button>
+          <span class="toolbar-date">${icon('calendar')} ${todayStr}</span>
+        </div>
+      </div>
+      `}
+      <div class="workspace-content">${content}</div></main>
+    ${!admin ? `
+    <nav class="mobile-bottom-nav" aria-label="Mobile Navigation">
+      <a href="#owner" class="mobile-nav-item ${active === 'owner' ? 'is-active' : ''}">
+        ${icon('home')}
+        <span>Overview</span>
+      </a>
+      <a href="#queue" class="mobile-nav-item ${active === 'queue' ? 'is-active' : ''}">
+        ${icon('file')}
+        <span>Queue</span>
+      </a>
+      <a href="#settings" class="mobile-nav-item mobile-nav-qr-btn ${active === 'settings' ? 'is-active' : ''}" aria-label="Shop QR">
+        <span class="qr-btn-circle">${icon('qr')}</span>
+      </a>
+      <a href="#payments" class="mobile-nav-item ${active === 'payments' ? 'is-active' : ''}">
+        ${icon('wallet')}
+        <span>Payments</span>
+      </a>
+      <button type="button" class="mobile-nav-item mobile-nav-more" id="mobile-more-btn" aria-label="More menu">
+        ${icon('dots')}
+        <span>More</span>
+      </button>
+    </nav>` : ''}
+  </div>`, { workspacePage: true });
   const toggle = document.querySelector('#nav-toggle');
-  toggle.onclick = () => { const open = toggle.getAttribute('aria-expanded') !== 'true'; toggle.setAttribute('aria-expanded', String(open)); document.querySelector('.sidebar').classList.toggle('is-open', open); };
-  document.querySelector('.sidebar').onkeydown = event => { if (event.key === 'Escape') { toggle.setAttribute('aria-expanded', 'false'); document.querySelector('.sidebar').classList.remove('is-open'); toggle.focus(); } };
+  const mobileToggle = document.querySelector('#mobile-nav-toggle');
+  const moreBtn = document.querySelector('#mobile-more-btn');
+  const backdrop = document.querySelector('#sidebar-backdrop');
+  const sidebar = document.querySelector('.sidebar');
+  const setSidebarOpen = (open) => {
+    toggle?.setAttribute('aria-expanded', String(open));
+    sidebar?.classList.toggle('is-open', open);
+    backdrop?.classList.toggle('is-open', open);
+  };
+  if (toggle) toggle.onclick = () => setSidebarOpen(!sidebar.classList.contains('is-open'));
+  if (mobileToggle) mobileToggle.onclick = () => setSidebarOpen(true);
+  if (moreBtn) moreBtn.onclick = () => setSidebarOpen(true);
+  if (backdrop) backdrop.onclick = () => setSidebarOpen(false);
+  if (sidebar) sidebar.onkeydown = event => { if (event.key === 'Escape') { setSidebarOpen(false); toggle?.focus(); } };
+
+  document.querySelectorAll('.admin-notif-btn, .mobile-notif-btn, .owner-notif-btn').forEach(btn => {
+    btn.onclick = () => openNotificationsDialog();
+  });
+}
+
+let notificationSource = null;
+function startNotificationStream() {
+  if (notificationSource || !me) return;
+  try {
+    notificationSource = new EventSource('/api/owner/notifications/stream');
+    notificationSource.onmessage = event => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'connected') return;
+        const chimeType = data.eventType?.includes('payment') ? 'payment' : data.eventType?.includes('error') ? 'error' : 'order';
+        playChime(chimeType);
+        sendRealNotification(data.title || 'SmartPrint Alert', { body: data.body || '', tag: data.id });
+        document.querySelectorAll('.notif-badge-dot').forEach(dot => dot.style.display = 'block');
+        const current = location.hash.slice(1);
+        if (['owner', 'queue', 'transactions'].includes(current)) {
+          route();
+        }
+      } catch {}
+    };
+    notificationSource.onerror = () => {};
+  } catch {}
+}
+
+async function openNotificationsDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'crop-dialog notifications-modal';
+  dialog.setAttribute('aria-labelledby', 'notif-modal-title');
+  dialog.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h2 id="notif-modal-title" style="margin:0;font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px;">
+        ${icon('bell')} Notifications
+      </h2>
+      <button type="button" class="modal-close-btn" style="border:none;background:none;font-size:22px;cursor:pointer;line-height:1;color:#64748b;">&times;</button>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0;">
+      <span style="font-size:12px;color:#64748b;">Live alerts and order updates</span>
+      <button type="button" class="secondary small" id="mark-all-notifs-read" style="font-size:11px;padding:3px 8px;">Mark all read</button>
+    </div>
+    <div id="notif-list" style="max-height:50vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
+      <p style="font-size:13px;color:#64748b;">Loading notifications...</p>
+    </div>
+  `;
+  document.body.append(dialog);
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelector('.modal-close-btn').onclick = close;
+  dialog.oncancel = close;
+
+  async function renderNotifs() {
+    try {
+      const items = await api('/api/owner/notifications');
+      const listEl = dialog.querySelector('#notif-list');
+      if (!items || !items.length) {
+        listEl.innerHTML = `<div style="text-align:center;padding:24px 0;color:#64748b;font-size:13px;">No notifications yet. New orders and print events will appear here.</div>`;
+        return;
+      }
+      listEl.innerHTML = items.map(n => `
+        <div class="notif-item" data-id="${n.id}" style="padding:10px 12px;border-radius:8px;background:${n.is_read ? '#f8fafc' : '#eff6ff'};border:1px solid ${n.is_read ? '#e2e8f0' : '#bfdbfe'};cursor:pointer;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+            <strong style="font-size:13px;color:#1e293b;">${escape(n.title)}</strong>
+            <span style="font-size:11px;color:#64748b;">${time(n.created)}</span>
+          </div>
+          <p style="margin:0;font-size:12px;color:#475569;">${escape(n.body)}</p>
+        </div>
+      `).join('');
+
+      listEl.querySelectorAll('.notif-item').forEach(el => {
+        el.onclick = async () => {
+          const id = el.dataset.id;
+          try {
+            await api('/api/owner/notifications/' + id + '/read', { method: 'POST' });
+            el.style.background = '#f8fafc';
+            el.style.borderColor = '#e2e8f0';
+          } catch {}
+        };
+      });
+    } catch (err) {
+      dialog.querySelector('#notif-list').innerHTML = `<p style="color:#dc2626;font-size:13px;">Failed to load: ${escape(err.message)}</p>`;
+    }
+  }
+
+  dialog.querySelector('#mark-all-notifs-read').onclick = async () => {
+    try {
+      await api('/api/owner/notifications/mark-all-read', { method: 'POST' });
+      document.querySelectorAll('.notif-badge-dot').forEach(dot => dot.style.display = 'none');
+      await renderNotifs();
+      notify('All notifications marked as read.');
+    } catch (err) {
+      notify(err.message);
+    }
+  };
+
+  await renderNotifs();
+  dialog.showModal();
 }
 
 // Device heartbeats are strictly reported by the Windows Print Agent, not the web browser.
@@ -106,17 +346,17 @@ async function owner(view) {
   if (!me) { location.hash = 'login'; return; } if (me.role === 'admin') { location.hash = 'admin'; return; }
   if (view === 'payments') return paymentsPage({ api, workspace, escape, notify });
   if (view === 'printers') return printersPage({ api, workspace, escape, notify });
-  const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices')]);
-  const snapshot = await load(), [store, orders, transactions, summary, devices] = snapshot;
+  const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices'), api('/api/owner/qr').catch(() => null)]);
+  const snapshot = await load(), [store, orders, transactions, summary, devices, qr] = snapshot;
   const head = title => `<div class="workhead"><div><div class="heading-context">${escape(store.name)} ${badge(store.status)}</div><h1>${title}</h1><p class="muted">${view === 'owner' ? 'Keep the queue moving and every payment accounted for.' : view === 'queue' ? 'Review payments, follow progress and confirm printed pages.' : 'Manage your shop with clear, up-to-date records.'}</p></div><div class="actions"><button class="icon-button" id="reload" aria-label="Refresh workspace">${icon('refresh')}</button><button type="button" class="secondary" id="remote-print-btn">📤 Remote Print</button>${view !== 'settings' ? `<a class="primary" href="#settings">${icon('qr')} View shop QR</a>` : ''}</div></div>`;
   let content;
   if (view === 'settings') {
-    const qr = await api('/api/owner/qr');
-    content = `${head('Prices and shop QR')}<div class="grid"><section class="panel"><h2>Your print prices</h2><p class="muted">Per printed side. Two-up reduces sides; duplex reduces paper. Existing orders keep their quoted price.</p><form id="prices"><div class="fields"><label class="field">Black & white (₹)<input name="bw" type="number" min="0.01" max="1000" step="0.01" value="${store.bw / 100}" required></label><label class="field">Full colour (₹)<input name="color" type="number" min="0.01" max="1000" step="0.01" value="${store.color / 100}" required></label></div><button class="primary">Save prices</button><span class="muted"> Version ${store.version}</span></form><h2 class="spaced">Printer connection</h2><div class="notice-inline">Printers are managed from the Printers tab. Browser Direct printing and background spoolers print automatically.</div></section><section class="panel shop-qr-standee-card"><div class="qr-standee-header"><div class="qr-standee-badge">${icon('qr')} OFFICIAL COUNTER QR</div><h2 class="qr-standee-title">${escape(store.name)}</h2><p class="qr-standee-sub">Scan to print documents directly from your phone</p></div><div class="qr-code-frame"><div class="qr-corner top-left"></div><div class="qr-corner top-right"></div><div class="qr-corner bottom-left"></div><div class="qr-corner bottom-right"></div><img class="shop-counter-qr-img" data-url="${escape(qr.url)}" src="${qr.image}" alt="QR code for ${escape(store.name)}"></div><div class="qr-standee-steps"><div class="qr-step"><b>1</b> Scan QR</div><div class="qr-step"><b>2</b> Upload & Options</div><div class="qr-step"><b>3</b> Collect Print</div></div><div class="qr-standee-actions"><button type="button" class="primary" id="print-standee">${icon('printer')} Print Counter Standee</button><button type="button" class="secondary" id="download-qr-poster">${icon('download')} Download QR poster</button><button type="button" class="secondary" id="copy-shop-url">${icon('copy')} Copy Link</button><a class="secondary" href="/?shop=${encodeURIComponent(store.slug)}" target="_blank" rel="noopener">${icon('arrow')} Customer View ↗</a></div></section></div>`;
+    const shopQr = qr || await api('/api/owner/qr');
+    content = `${head('Prices and shop QR')}<div class="grid"><section class="panel"><h2>Your print prices</h2><p class="muted">Per printed side. Two-up reduces sides; duplex reduces paper. Existing orders keep their quoted price.</p><form id="prices"><div class="fields"><label class="field">Black & white (₹)<input name="bw" type="number" min="0.01" max="1000" step="0.01" value="${store.bw / 100}" required></label><label class="field">Full colour (₹)<input name="color" type="number" min="0.01" max="1000" step="0.01" value="${store.color / 100}" required></label></div><button class="primary">Save prices</button><span class="muted"> Version ${store.version}</span></form><h2 class="spaced">Printer connection</h2><div class="notice-inline">Printers are managed from the Printers tab. Browser Direct printing and background spoolers print automatically.</div></section><section class="panel shop-qr-standee-card"><div class="qr-standee-header"><div class="qr-standee-badge">${icon('qr')} OFFICIAL COUNTER QR</div><h2 class="qr-standee-title">${escape(store.name)}</h2><p class="qr-standee-sub">Scan to print documents directly from your phone</p></div><div class="qr-code-frame"><div class="qr-corner top-left"></div><div class="qr-corner top-right"></div><div class="qr-corner bottom-left"></div><div class="qr-corner bottom-right"></div><img class="shop-counter-qr-img" data-url="${escape(shopQr.url)}" src="${shopQr.image}" alt="QR code for ${escape(store.name)}"></div><div class="qr-standee-steps"><div class="qr-step"><b>1</b> Scan QR</div><div class="qr-step"><b>2</b> Upload & Options</div><div class="qr-step"><b>3</b> Collect Print</div></div><div class="qr-standee-actions"><button type="button" class="primary" id="print-standee">${icon('printer')} Print Counter Standee</button><button type="button" class="secondary" id="download-qr-poster">${icon('download')} Download QR poster</button><button type="button" class="secondary" id="copy-shop-url">${icon('copy')} Copy Link</button><a class="secondary" href="/?shop=${encodeURIComponent(store.slug)}" target="_blank" rel="noopener">${icon('arrow')} Customer View ↗</a></div></section></div>`;
   } else if (view === 'transactions') {
     content = `${head('Transactions')}<p class="muted">Collected ${money(summary.collected)} · Refunded ${money(summary.refunded)} · Net ${money(summary.net)}. Updates every 5 seconds.</p><section class="panel"><div class="row"><h2>Collections · ${summary.transactions} total</h2><button id="export" class="secondary">Export CSV ↓</button></div>${transactions.length ? `<div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Order</th><th>Method</th><th>Collected</th><th>Refunded</th><th>Time</th></tr></thead><tbody>${transactions.map(t => `<tr><td>${escape(t.id.slice(0, 8))}</td><td>#${escape(t.order_id.slice(0, 8))}</td><td>${badge(t.method)}</td><td>${money(t.amount)}</td><td>${money(t.refund_amount || 0)}</td><td>${time(t.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No payments yet.', 'Cash and verified UPI payments will appear here.')}</section><div class="row spaced"><button class="secondary" id="previous-transactions" ${transactionOffset === 0 ? 'disabled' : ''}>Previous</button><span>Page ${Math.floor(transactionOffset / 100) + 1}</span><button class="secondary" id="next-transactions" ${transactionOffset + 100 >= summary.transactions ? 'disabled' : ''}>Next</button></div>`;
   } else {
-    content = ownerDashboard({ view, head, store, orders, summary, devices, filter: queueFilter, escape, money, time, badge, empty });
+    content = ownerDashboard({ view, head, store, orders, summary, devices, qr, filter: queueFilter, escape, money, time, badge, empty });
   }
   workspace(content, view);
   document.querySelector('#reload').onclick = () => route();
@@ -308,22 +548,111 @@ async function owner(view) {
     notify(actionMessages[action] || 'Order updated.');
     await owner(view);
   }));
+  document.querySelectorAll('[data-toggle-menu]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const menuId = btn.dataset.toggleMenu;
+      const targetMenu = document.getElementById(`menu-${menuId}`);
+      const isCurrentlyOpen = targetMenu && !targetMenu.hidden;
+      document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
+      if (targetMenu && !isCurrentlyOpen) {
+        targetMenu.hidden = false;
+      }
+    };
+  });
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
+  });
 }
 function empty(title, body) { return `<div class="empty"><strong>${title}</strong><span class="muted">${body}</span></div>`; }
 async function admin(view) {
   if (!me) { location.hash = 'login'; return; }
   if (me.role !== 'admin') { location.hash = 'owner'; return; }
   if (me.mfaRequired) { location.hash = 'security'; return; }
-  const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit')]);
-  const snapshot = await load(), [shops, events] = snapshot;
+  const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
+  const snapshot = await load(), [shops, events, stats] = snapshot;
   let content;
-  if (view === 'audit') content = `<div class="workhead"><div><h1>Audit log</h1><p class="muted">A record of shop access, payments and print fulfilment.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Recent events</h2><span class="muted">Latest 100</span></div>${events.length ? `<div class="table-wrap"><table><thead><tr><th>Action</th><th>Actor</th><th>Target</th><th>Time</th></tr></thead><tbody>${events.map(e => `<tr><td>${escape(e.action)}</td><td>${escape(e.actor.slice(0, 12))}</td><td>${escape(e.target.slice(0, 12))}</td><td>${time(e.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No events yet.', 'Administrative and fulfilment actions appear here.')}</section>`;
-  else content = adminDashboard({ view, shops, events, filter: shopFilter, escape, badge, time, empty });
+  if (view === 'audit') {
+    content = `<div class="workhead"><div><h1>Audit log</h1><p class="muted">A record of shop access, payments and print fulfilment.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Recent events</h2><span class="muted">Latest 100</span></div>${events.length ? `<div class="table-wrap"><table><thead><tr><th>Action</th><th>Actor</th><th>Target</th><th>Time</th></tr></thead><tbody>${events.map(e => `<tr><td>${escape(e.action)}</td><td>${escape(e.actor.slice(0, 12))}</td><td>${escape(e.target.slice(0, 12))}</td><td>${time(e.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No events yet.', 'Administrative and fulfilment actions appear here.')}</section>`;
+  } else if (view === 'reports') {
+    content = `<div class="workhead"><div><h1>Platform reports</h1><p class="muted">Aggregated usage, print volume, and shop performance metrics.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Platform Summary</h2></div><div class="kpi-grid"><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill green">${icon('shop')}</span><span class="admin-kpi-title">Total Shops</span></div><div class="admin-kpi-stat">${shops.length}</div><p class="admin-kpi-sub">Registered across platform</p></div><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill blue">${icon('users')}</span><span class="admin-kpi-title">Active Outlets</span></div><div class="admin-kpi-stat">${shops.filter(s => s.status === 'active').length}</div><p class="admin-kpi-sub">Accepting live prints</p></div><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill amber">${icon('clock')}</span><span class="admin-kpi-title">Recorded Events</span></div><div class="admin-kpi-stat">${events.length}</div><p class="admin-kpi-sub">Audit trail records</p></div></div></section>`;
+  } else if (view === 'settings-admin') {
+    content = `<div class="workhead"><div><h1>Platform settings</h1><p class="muted">Global configuration, security policies, and administrator controls.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><h2>Security & Compliance</h2><p class="muted">MFA enforcement and role-based policies are active.</p><div class="notice-inline">Administrator accounts are protected with mandatory WebAuthn passkey or TOTP MFA. Public registration for administrators is disabled.</div><div style="margin-top: 16px;"><a href="#account" class="primary">Manage Account Security →</a></div></section>`;
+  } else {
+    content = adminDashboard({ view, shops, events, stats, filter: shopFilter, escape, badge, time, empty });
+  }
   workspace(content, view, true);
-  document.querySelector('#admin-refresh').onclick = () => route();
-  document.querySelectorAll('[data-shop-filter]').forEach(button => button.onclick = async () => { shopFilter = button.dataset.shopFilter; try { await admin(view); document.querySelector(`[data-shop-filter="${shopFilter}"]`)?.focus({ preventScroll: true }); } catch (error) { notify(error.message); } });
-  document.querySelector('#review-shops')?.addEventListener('click', () => { shopFilter = 'pending'; });
-  document.querySelectorAll('[data-shop]').forEach(button => button.onclick = () => busy(button, async () => { if (button.dataset.status === 'suspended' && !confirm('Suspend this shop? It will no longer accept new orders.')) return; await api(`/api/admin/shops/${button.dataset.shop}/status`, { method: 'POST', body: { status: button.dataset.status } }); notify('Shop status updated.'); await admin(view); }));
+  
+  const refreshBtn = document.querySelector('#admin-refresh');
+  if (refreshBtn) refreshBtn.onclick = () => route();
+
+  const searchInput = document.querySelector('#shop-search-input');
+  const globalSearch = document.querySelector('#global-admin-search');
+  const statusSelect = document.querySelector('#shop-status-select');
+
+  const applyTableFilter = () => {
+    const q = (searchInput?.value || globalSearch?.value || '').toLowerCase().trim();
+    const st = statusSelect ? statusSelect.value : shopFilter;
+    
+    // Filter table rows
+    document.querySelectorAll('.shop-app-row').forEach(row => {
+      const matchText = row.textContent.toLowerCase();
+      const statusMatch = st === 'all' || row.dataset.status === st;
+      const queryMatch = !q || matchText.includes(q);
+      row.style.display = (statusMatch && queryMatch) ? '' : 'none';
+    });
+
+    // Filter mobile cards
+    document.querySelectorAll('.mobile-app-card').forEach(card => {
+      const matchText = card.textContent.toLowerCase();
+      const statusMatch = st === 'all' || card.dataset.status === st;
+      const queryMatch = !q || matchText.includes(q);
+      card.style.display = (statusMatch && queryMatch) ? '' : 'none';
+    });
+  };
+
+  if (searchInput) searchInput.oninput = applyTableFilter;
+  if (globalSearch) globalSearch.oninput = () => {
+    if (searchInput) searchInput.value = globalSearch.value;
+    applyTableFilter();
+  };
+  if (statusSelect) {
+    statusSelect.onchange = () => {
+      shopFilter = statusSelect.value;
+      applyTableFilter();
+    };
+  }
+
+  document.querySelectorAll('[data-shop-filter]').forEach(button => button.onclick = async () => {
+    shopFilter = button.dataset.shopFilter;
+    if (statusSelect) statusSelect.value = shopFilter;
+    try {
+      await admin(view);
+      document.querySelector(`[data-shop-filter="${shopFilter}"]`)?.focus({ preventScroll: true });
+    } catch (error) { notify(error.message); }
+  });
+
+  document.querySelector('#review-shops')?.addEventListener('click', () => {
+    shopFilter = 'pending';
+    if (statusSelect) statusSelect.value = 'pending';
+    applyTableFilter();
+  });
+
+  document.querySelector('#qa-review-apps')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    shopFilter = 'pending';
+    if (statusSelect) statusSelect.value = 'pending';
+    applyTableFilter();
+    document.querySelector('.admin-applications-section')?.scrollIntoView({ behavior: 'smooth' });
+  });
+
+  document.querySelectorAll('[data-shop]').forEach(button => button.onclick = () => busy(button, async () => {
+    if (button.dataset.status === 'suspended' && !confirm('Suspend this shop? It will no longer accept new orders.')) return;
+    await api(`/api/admin/shops/${button.dataset.shop}/status`, { method: 'POST', body: { status: button.dataset.status } });
+    notify('Shop status updated.');
+    await admin(view);
+  }));
+
   watchUpdates(load, snapshot, () => admin(view));
 }
 
@@ -387,8 +716,9 @@ function auth(register = false) {
 async function route() {
   try {
     const view = location.hash.slice(1) || 'print';
-    if (view === 'login' || view === 'admin-login') {
+    if (view === 'workspace' || view === 'login' || view === 'admin-login') {
       if (me) {
+        startNotificationStream();
         location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
         return;
       }
@@ -425,7 +755,7 @@ async function route() {
     if (view === 'print') await customer();
     else if (view === 'track') await tracking();
     else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view);
-    else if (['admin', 'shops', 'audit'].includes(view)) await admin(view);
+    else if (['admin', 'shops', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);
     else auth(false);
   } catch (error) {
     mount(`<main class="container"><section class="panel"><h1>We couldn’t open this page.</h1><p class="error">${escape(error.message)}</p><a href="#login">Sign in</a> · <a href="#print">Try your shop again</a></section></main>`);

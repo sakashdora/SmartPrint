@@ -1,92 +1,277 @@
 import { icon } from './ui.js';
 import { downloadPdf, showDocument } from './viewer.js';
 import { waitForQuote } from './preparation.js';
+import { cropImage } from './crop.js';
 
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
   if (!slug) {
-    mount(`<main class="home-page-shell">
-      <div class="home-hero-container">
-        <div class="home-hero-grid">
-          <!-- Left Content Column -->
-          <div class="home-hero-content">
-            <div class="home-eyebrow">
+    mount(`<main class="home-master-shell">
+      <!-- HERO SECTION -->
+      <section class="home-hero-section">
+        <div class="home-hero-inner">
+          <!-- Left Column -->
+          <div class="home-hero-left">
+            <div class="home-eyebrow-pill">
               CONTACTLESS &bull; FAST &bull; SECURE &mdash;
             </div>
 
-            <h1 class="home-hero-heading">
-              Scan your shop<br>
-              <span class="qr-word">QR</span> <span class="code-word">code</span> to print
+            <h1 class="home-hero-title">
+              Print your documents<br>
+              <span class="gradient-text-anytime">anytime,</span> <span class="gradient-text-anywhere">anywhere</span>
             </h1>
 
-            <p class="home-hero-desc">
-              Print your documents easily and securely. Scan the official SmartPrint QR code placed at your print shop counter. Each shop has its own unique QR code.
+            <p class="home-hero-sub">
+              Scan the QR code at a SmartPrint shop, upload your document, choose print options, pay and collect. Simple, secure and reliable.
             </p>
 
-            <div class="home-steps-grid">
-              <div class="home-step-card">
-                <div class="home-step-header">
-                  <span class="home-step-badge badge-blue">01</span>
-                  <span class="home-step-icon">${icon('qr')}</span>
+            <!-- 3-Step Process Cards -->
+            <div class="home-three-steps-row">
+              <div class="process-step-card">
+                <div class="step-card-top">
+                  <span class="step-num-badge step-blue">01</span>
+                  <span class="step-icon-corner">${icon('qr')}</span>
                 </div>
-                <strong class="home-step-title">Scan at Counter</strong>
-                <p class="home-step-desc">Scan the shop’s QR code with your phone camera.</p>
+                <strong class="step-title">Scan at Counter</strong>
+                <p class="step-desc">Use your phone to scan your shop's QR code.</p>
               </div>
 
-              <div class="home-step-card">
-                <div class="home-step-header">
-                  <span class="home-step-badge badge-purple">02</span>
-                  <span class="home-step-icon">${icon('file')}</span>
+              <div class="process-step-card">
+                <div class="step-card-top">
+                  <span class="step-num-badge step-purple">02</span>
+                  <span class="step-icon-corner">${icon('file')}</span>
                 </div>
-                <strong class="home-step-title">Upload & Options</strong>
-                <p class="home-step-desc">Upload your PDF or document, pick B&W or Colour and copies.</p>
+                <strong class="step-title">Upload & Options</strong>
+                <p class="step-desc">Upload your file, choose B&W or colour, set pages and copies.</p>
               </div>
 
-              <div class="home-step-card">
-                <div class="home-step-header">
-                  <span class="home-step-badge badge-orange">03</span>
-                  <span class="home-step-icon">${icon('printer')}</span>
+              <div class="process-step-card">
+                <div class="step-card-top">
+                  <span class="step-num-badge step-orange">03</span>
+                  <span class="step-icon-corner">${icon('printer')}</span>
                 </div>
-                <strong class="home-step-title">Pay & Collect</strong>
-                <p class="home-step-desc">Pay by UPI or cash, then collect your printed document.</p>
+                <strong class="step-title">Pay & Collect</strong>
+                <p class="step-desc">Pay by UPI or cash, then collect your printed document.</p>
               </div>
             </div>
 
-            <div class="home-cta-group">
-              <a class="home-primary-btn" href="#register">
-                ${icon('shop')} <span>Register Your Shop &rarr;</span>
-              </a>
-              <a class="home-secondary-btn" href="#login">
-                ${icon('user')} <span>Shop owner sign in</span>
-              </a>
-            </div>
-
-            <div class="home-footer-nav">
-              <a href="#admin-login" class="home-link-admin">Administrator sign in</a>
-              <span class="home-footer-sep">|</span>
-              <span class="home-footer-muted">Already placed an order?</span>
-              <a href="#track" class="home-link-track">Track order progress &rarr;</a>
+            <!-- Hero Action Buttons -->
+            <div class="home-hero-cta-box">
+              <button type="button" class="btn-hero-primary-wide" id="hero-find-shop-btn">
+                ${icon('shop')} <span>Get Started &mdash; Find a Shop &rarr;</span>
+              </button>
+              <div class="hero-shop-owner-sub">
+                <span class="pin-icon">${icon('pin')}</span> Or <a href="#register" class="sub-register-link">register your shop and start accepting print orders</a>
+              </div>
             </div>
           </div>
 
-          <!-- Right Visual Mockup Column -->
-          <div class="home-hero-visual">
-            <div class="home-ambient-glow"></div>
-            <div class="home-mockup-frame">
-              <img class="home-mockup-img" src="/hero-scanner.jpg" alt="SmartPrint Counter QR Scanner" width="1280" height="720">
+          <!-- Right Column / Hero Composition -->
+          <div class="home-hero-right">
+            <div class="hero-image-wrapper">
+              <img class="hero-main-photo" src="/hero-scanner.jpg" alt="SmartPrint Counter QR Scanner Stand and Customer Phone" width="1280" height="720">
             </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Organic Wave Footer Accent -->
-      <div class="home-organic-wave" aria-hidden="true">
-        <svg viewBox="0 0 1440 96" fill="none" preserveAspectRatio="none">
-          <path d="M0,32 C360,85 720,12 1080,55 C1260,78 1380,40 1440,48 L1440,96 L0,96 Z" fill="#e8f3fe" opacity="0.8"></path>
-          <path d="M0,58 C420,18 780,82 1140,38 C1300,18 1390,56 1440,60 L1440,96 L0,96 Z" fill="#f1f7ff"></path>
-        </svg>
-      </div>
+      <!-- AUDIENCE CATEGORY CARDS SECTION -->
+      <section class="home-audience-section">
+        <div class="home-container">
+          <div class="audience-cards-grid">
+            <!-- Card 1: For Customers -->
+            <div class="audience-card blue-theme">
+              <div class="audience-card-top">
+                <div class="audience-icon-circle blue">
+                  ${icon('users')}
+                </div>
+                <div class="audience-content-block">
+                  <h3 class="audience-title">For Customers</h3>
+                  <p class="audience-desc">Quick and easy document printing at your local shop.</p>
+                </div>
+                <span class="audience-arrow">&rarr;</span>
+              </div>
+              <div class="audience-benefits-strip">
+                <span class="benefit-item">${icon('check')} No account needed</span>
+                <span class="benefit-item">${icon('check')} Secure upload</span>
+                <span class="benefit-item">${icon('check')} Pay at shop</span>
+              </div>
+            </div>
+
+            <!-- Card 2: For Shop Owners -->
+            <a href="#register" class="audience-card green-theme">
+              <div class="audience-card-top">
+                <div class="audience-icon-circle green">
+                  ${icon('shop')}
+                </div>
+                <div class="audience-content-block">
+                  <h3 class="audience-title">For Shop Owners</h3>
+                  <p class="audience-desc">Register your shop, get your QR code and start accepting orders.</p>
+                </div>
+                <span class="audience-arrow">&rarr;</span>
+              </div>
+              <div class="audience-benefits-strip">
+                <span class="benefit-item">${icon('check')} Free to register</span>
+                <span class="benefit-item">${icon('check')} Manage print queue</span>
+                <span class="benefit-item">${icon('check')} Track payments</span>
+              </div>
+            </a>
+
+            <!-- Card 3: Enterprise & Security -->
+            <a href="#how-it-works" class="audience-card purple-theme">
+              <div class="audience-card-top">
+                <div class="audience-icon-circle purple">
+                  ${icon('shield')}
+                </div>
+                <div class="audience-content-block">
+                  <h3 class="audience-title">Enterprise Security</h3>
+                  <p class="audience-desc">Bank-grade encryption, private processing, and zero retention guarantee.</p>
+                </div>
+                <span class="audience-arrow">&rarr;</span>
+              </div>
+              <div class="audience-benefits-strip">
+                <span class="benefit-item">${icon('check')} End-to-end TLS</span>
+                <span class="benefit-item">${icon('check')} Auto-purge files</span>
+                <span class="benefit-item">${icon('check')} Zero data leaks</span>
+              </div>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- WHY CHOOSE SMARTPRINT SECTION -->
+      <section class="home-why-section" id="how-it-works">
+        <div class="home-container">
+          <div class="why-choose-card">
+            <div class="why-choose-grid">
+              <!-- Left heading & intro -->
+              <div class="why-left-intro">
+                <h2 class="why-title">Why choose SmartPrint?</h2>
+                <p class="why-subtitle">
+                  A simple, secure and reliable way to print your documents at local shops. Built for students, professionals and businesses.
+                </p>
+              </div>
+
+              <!-- Right 4 benefits items -->
+              <div class="why-four-features-grid">
+                <div class="why-feature-item">
+                  <div class="feature-icon-circle green">
+                    ${icon('lightning')}
+                  </div>
+                  <div class="feature-text-block">
+                    <strong class="feature-name">Fast & Easy</strong>
+                    <p class="feature-detail">Upload and submit in minutes.</p>
+                  </div>
+                </div>
+
+                <div class="why-feature-item">
+                  <div class="feature-icon-circle blue">
+                    ${icon('shield')}
+                  </div>
+                  <div class="feature-text-block">
+                    <strong class="feature-name">Secure & Private</strong>
+                    <p class="feature-detail">Your files are automatically deleted.</p>
+                  </div>
+                </div>
+
+                <div class="why-feature-item">
+                  <div class="feature-icon-circle orange">
+                    ${icon('pin')}
+                  </div>
+                  <div class="feature-text-block">
+                    <strong class="feature-name">Wide Network</strong>
+                    <p class="feature-detail">Print at authorized local shops.</p>
+                  </div>
+                </div>
+
+                <div class="why-feature-item">
+                  <div class="feature-icon-circle purple">
+                    ${icon('creditcard')}
+                  </div>
+                  <div class="feature-text-block">
+                    <strong class="feature-name">Flexible Payment</strong>
+                    <p class="feature-detail">Pay by UPI or cash at the shop.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- FINAL CALL TO ACTION SECTION -->
+      <section class="home-bottom-cta-section" id="for-shop-owners">
+        <div class="home-container">
+          <div class="bottom-cta-inner">
+            <div class="bottom-cta-text">
+              <h2 class="bottom-cta-heading">Get started with SmartPrint today</h2>
+              <p class="bottom-cta-sub">Find a nearby shop, scan the QR code and print your documents in minutes.</p>
+            </div>
+            <div class="bottom-cta-actions">
+              <button type="button" class="btn-bottom-find-shop" id="bottom-find-shop-btn">
+                ${icon('shop')} <span>Find a Shop &rarr;</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Shop Finder Dialog -->
+      <dialog class="crop-dialog shop-finder-dialog" id="shop-finder-modal">
+        <div class="shop-finder-modal-content">
+          <div class="shop-finder-header">
+            <div>
+              <h3>Choose a SmartPrint Partner Shop</h3>
+              <p class="muted">Select an active print shop to open the document upload portal:</p>
+            </div>
+            <button type="button" class="icon-button modal-close-btn" id="close-shop-finder">&times;</button>
+          </div>
+          <div class="shop-finder-list" id="shop-finder-list">
+            <p class="muted">Loading available shops...</p>
+          </div>
+        </div>
+      </dialog>
     </main>`);
+
+    // Wire up Find a Shop buttons to show the real active shops list
+    const openShopModal = async () => {
+      const modal = document.querySelector('#shop-finder-modal');
+      const listContainer = document.querySelector('#shop-finder-list');
+      if (!modal) return;
+      modal.showModal();
+      try {
+        const shops = await api('/api/shops');
+        if (!shops || !shops.length) {
+          listContainer.innerHTML = `<div class="empty"><strong>No active shops available.</strong><span class="muted">Register your shop to begin accepting customer prints.</span><div style="margin-top:12px;"><a href="#register" class="primary">Register Shop →</a></div></div>`;
+          return;
+        }
+        listContainer.innerHTML = shops.map(s => `
+          <a class="shop-finder-item" href="/?shop=${encodeURIComponent(s.slug)}">
+            <div class="shop-finder-item-left">
+              <div class="shop-finder-icon">${icon('shop')}</div>
+              <div>
+                <strong>${escape(s.name)}</strong>
+                <small class="muted" style="display:block;">${escape(s.location)}</small>
+              </div>
+            </div>
+            <div class="shop-finder-rates">
+              <span class="rate-pill">₹${(s.bw / 100).toFixed(2)} B&W</span>
+              <span class="rate-pill color">₹${(s.color / 100).toFixed(2)} Colour</span>
+              <span class="finder-arrow">→</span>
+            </div>
+          </a>
+        `).join('');
+      } catch (err) {
+        listContainer.innerHTML = `<p class="error">Unable to load shops: ${escape(err.message)}</p>`;
+      }
+    };
+
+    document.querySelector('#hero-find-shop-btn')?.addEventListener('click', openShopModal);
+    document.querySelector('#bottom-find-shop-btn')?.addEventListener('click', openShopModal);
+    document.querySelector('#close-shop-finder')?.addEventListener('click', () => {
+      document.querySelector('#shop-finder-modal')?.close();
+    });
+    return;
     return;
   }
 
@@ -122,190 +307,306 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   }
 
   mount(`<main class="customer-shell">
-    <div class="shop-context">
-      ${icon('shop')}
-      <strong>${escape(shop.name)}</strong>
-      <span class="badge active">Open</span>
-      <span class="shop-location">${escape(shop.location)}</span>
-      <span class="shop-rates-badge">${money(shop.bw)} B&W · ${money(shop.color)} Colour / page</span>
-    </div>
-
-    <div class="customer-heading">
-      <div>
-        <h1>Upload document to print</h1>
-        <p class="muted">Select your file, choose print options, and submit your order directly to the shop printer.</p>
+    <!-- Shop Information Card -->
+    <div class="shop-context-card">
+      <div class="shop-context-left">
+        <div class="shop-store-icon">${icon('shop')}</div>
+        <div class="shop-context-info">
+          <div class="shop-name-row">
+            <strong class="shop-name">${escape(shop.name)}</strong>
+            <span class="badge badge-open">Open</span>
+          </div>
+          <div class="shop-location-row">
+            ${icon('pin')} <span>${escape(shop.location || 'Bhubaneswar, Odisha')}</span>
+          </div>
+        </div>
       </div>
-      <ol class="simple-steps" aria-label="Print progress">
-        <li id="step-1" class="complete"><b>1</b> Upload file</li>
-        <li id="step-2"><b>2</b> Print options</li>
-        <li id="step-3"><b>3</b> Pay & Print</li>
-      </ol>
+      <div class="shop-rates-row">
+        <span class="rate-badge rate-bw">${money(shop.bw)} B&W / page</span>
+        <span class="rate-badge rate-color">${money(shop.color)} Colour / page</span>
+      </div>
     </div>
 
-    <div class="customer-direct-layout">
-      <div class="customer-main-col">
-        <!-- 1. Document Upload Area -->
-        <section class="panel direct-upload-card" id="drop-panel">
-          <div class="panel-heading">
-            <h2>1. Select Document</h2>
+    <!-- Hero Header -->
+    <div class="customer-hero-header">
+      <h1 class="customer-hero-title">Upload document to print</h1>
+      <p class="customer-hero-sub">Select your file, choose print options, and submit your order directly to the shop printer.</p>
+      
+      <!-- 3-Step Indicator -->
+      <div class="customer-stepper" aria-label="Order progress">
+        <div class="step-item is-active" id="step-1">
+          <span class="step-circle">1</span>
+          <span class="step-name">Upload file</span>
+        </div>
+        <div class="step-line" id="line-1"></div>
+        <div class="step-item" id="step-2">
+          <span class="step-circle">2</span>
+          <span class="step-name">Print options</span>
+        </div>
+        <div class="step-line" id="line-2"></div>
+        <div class="step-item" id="step-3">
+          <span class="step-circle">3</span>
+          <span class="step-name">Pay & print</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Two-Column Order Layout -->
+    <div class="customer-order-layout">
+      <!-- Left Column: Steps 1 & 2 + Trust Badges -->
+      <div class="customer-steps-column">
+        
+        <!-- Step 1 Card: Select Document -->
+        <section class="panel customer-card select-document-card" id="drop-panel">
+          <div class="customer-card-header">
+            <div class="card-step-title">
+              <span class="step-num-bubble">1</span>
+              <h2>Select Document</h2>
+            </div>
             <span class="badge" id="file-count-badge">No file chosen</span>
           </div>
-          
-          <div class="direct-dropzone" id="direct-dropzone">
-            <div class="dropzone-icon">${icon('upload')}</div>
-            <strong class="dropzone-title">Drag & drop your document here</strong>
-            <p class="muted small">PDF, JPG, PNG${health.office ? ', Word, PowerPoint, Excel' : ''} · Up to 20 MB</p>
-            <label class="primary upload-cta-btn" for="files">
-              ${icon('file')} Browse files
-            </label>
-            <input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple>
-          </div>
 
-          <div class="selected-files-display" id="selected-files-display" hidden>
-            <div class="selected-file-item">
-              <div class="file-icon-wrap">${icon('file')}</div>
-              <div class="file-meta-wrap">
-                <strong id="display-file-name">filename.pdf</strong>
-                <span class="muted small" id="display-file-size">0 KB</span>
+          <div class="document-section-grid">
+            <!-- Left: Upload Dropzone -->
+            <div class="document-upload-pane">
+              <div class="direct-dropzone" id="direct-dropzone">
+                <div class="dropzone-icon-circle">
+                  ${icon('upload')}
+                </div>
+                <strong class="dropzone-main-text">Drag & drop your document here</strong>
+                <p class="dropzone-sub-text">PDF, JPG, PNG${health.office ? ', Word, PowerPoint, Excel' : ''}<br>Up to 20 MB</p>
+                <label class="primary btn-browse-files" for="files">
+                  ${icon('file')} <span>Browse files</span>
+                </label>
+                <input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple>
               </div>
-              <label class="secondary small change-file-btn" for="files">
-                ${icon('refresh')} Change
-              </label>
+
+              <div class="selected-files-display" id="selected-files-display" hidden>
+                <div class="selected-file-item">
+                  <div class="file-icon-wrap">${icon('file')}</div>
+                  <div class="file-meta-wrap">
+                    <strong id="display-file-name">filename.pdf</strong>
+                    <span class="file-size-sub" id="display-file-size">0 KB</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <button type="button" class="secondary small btn-crop-doc" id="btn-crop-doc" style="display:none;" title="Scan & crop image">
+                      ${icon('crop')} Edit / Scan
+                    </button>
+                    <label class="secondary small btn-change-file" for="files">
+                      ${icon('refresh')} Change
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: Document Preview Box -->
+            <div class="document-preview-pane">
+              <div class="preview-box-header">
+                <span>Document preview</span>
+                <span class="preview-pill" id="preview-pill">No file chosen</span>
+              </div>
+              <div class="preview-box-content">
+                <!-- Empty state illustration -->
+                <div class="preview-empty-placeholder" id="preview-empty-state">
+                  <div class="preview-stack-icon">${icon('file')}</div>
+                  <strong>Your document preview will appear here</strong>
+                  <p>PDFs and photos preview directly from your device while the upload runs.</p>
+                </div>
+                <!-- Actual rendered previews -->
+                <div id="source-preview" class="source-preview-container"></div>
+                <div id="document-preview" class="document-preview-container"></div>
+              </div>
+              <div class="preview-box-footer" id="preview-footer" hidden>
+                <span class="preview-help-text" id="preview-help"></span>
+                <button type="button" class="secondary small btn-view-layout" id="show-preview" disabled>View print layout</button>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="panel preview-panel">
-          <div class="row"><h2>Document preview</h2><button type="button" class="secondary" id="show-preview" disabled>View print layout</button></div>
-          <p class="muted" id="preview-help">PDFs and photos preview directly from your device while the upload runs.</p>
-          <div id="source-preview"></div>
-          <div id="document-preview"></div>
-        </section>
-
-        <!-- 2. Print Settings Form -->
-        <form id="print-form" class="panel direct-settings-card">
-          <h2>2. Print Options</h2>
-
-          <fieldset class="option-row">
-            <legend>Colour</legend>
-            <div class="choices">
-              <label class="choice">
-                <input type="radio" name="color" value="bw" checked>
-                <span>Black & White (${money(shop.bw)})</span>
-              </label>
-              <label class="choice">
-                <input type="radio" name="color" value="color">
-                <span>Colour (${money(shop.color)})</span>
-              </label>
-            </div>
-          </fieldset>
-
-          <fieldset class="option-row">
-            <legend>Sides</legend>
-            <div class="choices">
-              <label class="choice">
-                <input type="radio" name="duplex" value="false" checked>
-                <span>One-sided</span>
-              </label>
-              <label class="choice">
-                <input type="radio" name="duplex" value="true">
-                <span>Both sides (Duplex)</span>
-              </label>
-            </div>
-          </fieldset>
-
-          <fieldset class="option-row">
-            <legend>Layout</legend>
-            <div class="choices">
-              <label class="choice">
-                <input type="radio" name="layout" value="single" checked>
-                <span>Standard</span>
-              </label>
-              <label class="choice">
-                <input type="radio" name="layout" value="two">
-                <span>2 pages on 1</span>
-              </label>
-              <label class="choice">
-                <input type="radio" name="layout" value="card">
-                <span>ID Card (Fit)</span>
-              </label>
-            </div>
-          </fieldset>
-
-          <div class="option-line">
-            <label for="copies">Copies</label>
-            <div class="stepper">
-              <button type="button" data-copy="-1" aria-label="Fewer copies">−</button>
-              <input id="copies" name="copies" type="number" min="1" max="100" value="1" required>
-              <button type="button" data-copy="1" aria-label="More copies">+</button>
+        <!-- Step 2 Card: Print Options -->
+        <form id="print-form" class="panel customer-card print-options-card">
+          <div class="customer-card-header">
+            <div class="card-step-title">
+              <span class="step-num-bubble">2</span>
+              <h2>Print Options</h2>
             </div>
           </div>
 
-          <label class="field option-line">
-            Pages to print
-            <input name="range" placeholder="All pages (or e.g. 1-3, 5)">
-          </label>
+          <div class="options-controls-grid">
+            <!-- Colour selection -->
+            <div class="option-group option-color-group">
+              <label class="option-group-label">Colour</label>
+              <div class="option-cards-two">
+                <label class="option-card choice-card-active">
+                  <input type="radio" name="color" value="bw" checked class="visually-hidden">
+                  <div class="option-card-inner">
+                    ${icon('file')}
+                    <span>Black & White (${money(shop.bw)})</span>
+                  </div>
+                </label>
+                <label class="option-card">
+                  <input type="radio" name="color" value="color" class="visually-hidden">
+                  <div class="option-card-inner">
+                    ${icon('palette')}
+                    <span>Colour (${money(shop.color)})</span>
+                  </div>
+                </label>
+              </div>
+            </div>
 
-          <div class="option-line paper-size">
-            <span>Paper format</span>
-            <span>A4 standard <small>(210 × 297 mm)</small></span>
+            <!-- Sides -->
+            <div class="option-group option-sides-group">
+              <label class="option-group-label">Sides</label>
+              <div class="segmented-control">
+                <label class="segment-btn is-active">
+                  <input type="radio" name="duplex" value="false" checked class="visually-hidden">
+                  <span>One-sided</span>
+                </label>
+                <label class="segment-btn">
+                  <input type="radio" name="duplex" value="true" class="visually-hidden">
+                  <span>Both sides (Duplex)</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Layout -->
+            <div class="option-group option-layout-group">
+              <label class="option-group-label">Layout</label>
+              <div class="segmented-control segments-three">
+                <label class="segment-btn is-active">
+                  <input type="radio" name="layout" value="single" checked class="visually-hidden">
+                  <span>Standard</span>
+                </label>
+                <label class="segment-btn">
+                  <input type="radio" name="layout" value="two" class="visually-hidden">
+                  <span>2 pages on 1</span>
+                </label>
+                <label class="segment-btn">
+                  <input type="radio" name="layout" value="card" class="visually-hidden">
+                  <span>ID Card (Fit)</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Copies Stepper -->
+            <div class="option-group option-copies-group">
+              <label class="option-group-label" for="copies">Copies</label>
+              <div class="stepper-box">
+                <button type="button" class="stepper-btn" data-copy="-1" aria-label="Fewer copies">−</button>
+                <input id="copies" name="copies" type="number" min="1" max="100" value="1" required class="stepper-input">
+                <button type="button" class="stepper-btn" data-copy="1" aria-label="More copies">+</button>
+              </div>
+            </div>
+
+            <!-- Pages to print -->
+            <div class="option-group option-range-group">
+              <label class="option-group-label" for="print-range-input">Pages to print</label>
+              <div class="input-with-icon">
+                ${icon('file')}
+                <input id="print-range-input" name="range" placeholder="All pages (e.g. 1-3, 5)">
+              </div>
+            </div>
+
+            <!-- Paper format -->
+            <div class="option-group option-paper-group">
+              <label class="option-group-label">Paper format</label>
+              <div class="paper-format-box">
+                <span class="paper-name">A4 standard</span>
+                <small class="paper-dims">(210 × 297 mm)</small>
+              </div>
+            </div>
           </div>
         </form>
 
+        <!-- Trust Badges Strip -->
+        <div class="customer-trust-strip">
+          <div class="trust-badge-item">
+            <div class="trust-icon-box icon-green">${icon('lock')}</div>
+            <div class="trust-text">
+              <strong>Secure & Private</strong>
+              <p>Your files are encrypted and automatically deleted after printing.</p>
+            </div>
+          </div>
+          <div class="trust-badge-item">
+            <div class="trust-icon-box icon-blue">${icon('lightning')}</div>
+            <div class="trust-text">
+              <strong>Fast & Convenient</strong>
+              <p>Upload, pay and print in minutes at your local shop.</p>
+            </div>
+          </div>
+          <div class="trust-badge-item">
+            <div class="trust-icon-box icon-teal">${icon('shield')}</div>
+            <div class="trust-text">
+              <strong>Trusted by Students & Professionals</strong>
+              <p>High quality prints at affordable prices across partner shops.</p>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <!-- 3. Checkout & Summary Sidebar -->
-      <aside class="customer-sidebar-col">
-        <section class="panel checkout-summary-card">
-          <h2>Order Summary</h2>
-          
-          <div class="summary-specs" id="summary-specs">
-            <div class="spec-row">
+      <!-- Right Column: Order Summary Card -->
+      <aside class="customer-summary-column">
+        <section class="panel customer-card customer-order-summary-card">
+          <div class="summary-card-header">
+            <span class="summary-header-icon">${icon('file')}</span>
+            <h2>Order Summary</h2>
+          </div>
+
+          <div class="summary-specs-list" id="summary-specs">
+            <div class="summary-spec-row">
               <span>Status</span>
-            <strong id="order-status-text" class="badge" aria-live="polite">Awaiting document</strong>
+              <strong id="order-status-text" class="badge badge-awaiting" aria-live="polite">Awaiting Document</strong>
             </div>
-            <div class="spec-row">
+            <div class="summary-spec-row">
               <span>Pages</span>
               <strong id="spec-pages">—</strong>
             </div>
-            <div class="spec-row">
+            <div class="summary-spec-row">
               <span>Paper sheets</span>
               <strong id="spec-sheets">—</strong>
             </div>
-            <div class="spec-row">
+            <div class="summary-spec-row">
               <span>Copies</span>
               <strong id="spec-copies">1</strong>
             </div>
           </div>
 
-          <div class="checkout-total-block">
-            <span>Total Amount</span>
-            <strong id="total-amount" class="total-price-tag">—</strong>
-            <small class="muted" id="price-subnote">Select a document to calculate price</small>
+          <div class="summary-total-section">
+            <span class="total-label-caps">TOTAL AMOUNT</span>
+            <strong id="total-amount" class="total-price-large">—</strong>
+            <small class="total-price-sub" id="price-subnote">Select a document to calculate price</small>
           </div>
 
-          <div class="payment-method-block">
-            <label class="field">
-              Payment Method
-              <select id="method">
-                ${health.payments ? '<option value="online">Online Payment (UPI, Cards, Netbanking)</option>' : ''}
-                <option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · Shop verifies${shop.upi_id ? '' : ' (unavailable)'}</option>
-                <option value="cash" ${!shop.upi_id && !health.payments ? 'selected' : ''}>Cash at counter</option>
-              </select>
+          <div class="summary-payment-section">
+            <label class="field payment-select-field">
+              <span>Payment Method</span>
+              <div class="payment-select-wrap">
+                <span class="payment-select-icon">${icon('wallet')}</span>
+                <select id="method">
+                  ${health.payments ? '<option value="online">Online Payment (UPI, Cards, Netbanking)</option>' : ''}
+                  <option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · Shop verifies${shop.upi_id ? '' : ' (unavailable)'}</option>
+                  <option value="cash" ${!shop.upi_id && !health.payments ? 'selected' : ''}>Cash at counter</option>
+                </select>
+              </div>
             </label>
-            <p class="muted small" id="payment-note">Pay cash to shopkeeper when collecting your printed paper.</p>
+            <div class="payment-instruction-box">
+              ${icon('info')}
+              <span id="payment-note">Pay directly to the shop’s UPI QR on the next screen. The shop verifies and prints immediately.</span>
+            </div>
           </div>
 
-          <button id="place-order-btn" class="primary wide place-order-btn" disabled>
+          <button id="place-order-btn" class="primary wide btn-place-order" disabled>
             ${icon('printer')} Place Print Order →
           </button>
 
           <p class="inline-error" id="order-error" role="alert"></p>
           <button type="button" class="secondary wide" id="retry-quote" hidden>Retry preparation</button>
 
-          <div class="privacy-guarantee">
-            ${icon('lock')}
-            <span>Your files are encrypted. Print files are deleted after printing; temporary uploads expire automatically.</span>
+          <div class="summary-security-footer">
+            <div class="security-lock-icon">${icon('lock')}</div>
+            <p>Your files are encrypted. Print files are deleted after printing; temporary uploads expire automatically.</p>
           </div>
         </section>
       </aside>
@@ -324,12 +625,41 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   const orderStatusText = document.querySelector('#order-status-text');
   const previewButton = document.querySelector('#show-preview');
   const retryButton = document.querySelector('#retry-quote');
+
+  form.querySelectorAll('input[type=radio]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const name = radio.name;
+      form.querySelectorAll(`input[name="${name}"]`).forEach(r => {
+        const cardParent = r.closest('.option-card');
+        const segParent = r.closest('.segment-btn');
+        if (cardParent) cardParent.classList.toggle('choice-card-active', r.checked);
+        if (segParent) segParent.classList.toggle('is-active', r.checked);
+      });
+    });
+  });
+
   async function previewSources(selected) {
     const generation = ++sourceRevision;
     localPreviews.forEach(view => view.destroy());
     localPreviews = [];
     const container = document.querySelector('#source-preview');
     container.replaceChildren();
+    const emptyState = document.querySelector('#preview-empty-state');
+    const previewPill = document.querySelector('#preview-pill');
+    const previewFooter = document.querySelector('#preview-footer');
+
+    if (selected.length) {
+      if (emptyState) emptyState.hidden = true;
+      if (previewPill) previewPill.textContent = selected.map(f => f.name).join(', ');
+      if (previewFooter) previewFooter.hidden = false;
+      document.querySelector('#step-2')?.classList.add('is-active');
+      document.querySelector('#line-1')?.classList.add('is-active');
+    } else {
+      if (emptyState) emptyState.hidden = false;
+      if (previewPill) previewPill.textContent = 'No file chosen';
+      if (previewFooter) previewFooter.hidden = true;
+    }
+
     const supported = selected.every(file => /\.(pdf|png|jpe?g)$/i.test(file.name));
     document.querySelector('#preview-help').textContent = supported
       ? 'Original document preview. Upload continues in the background. Use “View print layout” to check page selection and layout when ready.'
@@ -561,6 +891,33 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     document.querySelector('#display-file-size').textContent = `${formatBytes(totalSize)} · ${files.length === 1 ? '1 file' : '2 files'}`;
     statusBadge.textContent = `${files.length} file ready`;
     statusBadge.className = 'badge active';
+
+    const cropBtn = document.querySelector('#btn-crop-doc');
+    if (cropBtn) {
+      const hasImage = files.some(isImage);
+      cropBtn.hidden = !hasImage;
+      if (cropBtn.style) cropBtn.style.display = hasImage ? 'inline-flex' : 'none';
+      cropBtn.onclick = async () => {
+        const imgIndex = files.findIndex(isImage);
+        if (imgIndex === -1) return;
+        try {
+          const croppedFile = await cropImage(files[imgIndex]);
+          if (croppedFile) {
+            files[imgIndex] = croppedFile;
+            uploadsByFile.delete(files[imgIndex]);
+            const updatedNames = files.map(f => f.name).join(' + ');
+            const updatedTotalSize = files.reduce((sum, f) => sum + f.size, 0);
+            document.querySelector('#display-file-name').textContent = updatedNames;
+            document.querySelector('#display-file-size').textContent = `${formatBytes(updatedTotalSize)} · ${files.length === 1 ? '1 file' : '2 files'}`;
+            notify('Document updated with scanner enhancements.');
+            scheduleQuote();
+            void previewSources(files);
+          }
+        } catch (err) {
+          notify(err.message);
+        }
+      };
+    }
 
     if (files.length === 2) {
       form.elements.layout.value = 'card';
