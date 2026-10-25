@@ -36,8 +36,19 @@ async function api(path, { method = 'GET', body, token, binary, snapshot, header
   }
   return snapshot ? { rows: await response.json(), until: response.headers.get('X-Snapshot-At') } : binary ? response.blob() : response.json();
 }
-function environmentLabel() { return health?.mode === 'production' ? '' : `<div class="demo">${health?.demo ? 'Local demo · Sample accounts and data' : 'Development · Connected database'}</div>`; }
-function header() { return `<header class="topbar">${brand()}<nav class="toplinks" aria-label="Main navigation"><a href="#track">Track order</a><a href="${me ? me.role === 'admin' ? '#admin' : '#owner' : '#login'}">${icon('user')}${me ? 'Workspace' : 'Shop login'}</a>${me ? '<button class="link-button" id="logout">Sign out</button>' : ''}</nav></header>${environmentLabel()}`; }
+function header() {
+  return `<header class="topbar">
+    ${brand()}
+    <nav class="toplinks" aria-label="Main navigation">
+      <a href="#track" class="toplink-item">${icon('user')} <span>Track order</span></a>
+      <a href="${me ? (me.role === 'admin' ? '#admin' : '#owner') : '#login'}" class="toplink-item">${icon('wallet')} <span>Workspace</span></a>
+      ${me
+        ? `<button class="link-button toplink-item" id="logout">${icon('logout')} <span>Sign out</span></button>`
+        : `<a href="#login" class="toplink-item">${icon('logout')} <span>Sign in</span></a>`
+      }
+    </nav>
+  </header>${environmentLabel()}`;
+}
 function mount(content, { workspacePage = false } = {}) { stopUpdates(); app.innerHTML = (workspacePage ? '' : header()) + content; document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => { await api('/api/auth/logout', { method: 'POST' }); me = null; location.hash = 'print'; await route(); })); }
 async function busy(button, action) { button.disabled = true; try { await action(); } catch (error) { notify(error.message); } finally { button.disabled = false; } }
 async function customer() { return renderCustomer({ api, mount, money, escape, health, notify, onOrder: result => { receipt = result; sessionStorage.setItem('receipt', JSON.stringify(result)); location.hash = 'track'; } }); }

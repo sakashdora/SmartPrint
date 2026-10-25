@@ -5,38 +5,86 @@ import { waitForQuote } from './preparation.js';
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
   if (!slug) {
-    mount(`<main class="welcome">
-      <div class="welcome-icon">${icon('qr')}</div>
-      <span class="eyebrow">SMARTPRINT · CONTACTLESS SCAN & PRINT</span>
-      <h1>Scan shop QR code to print</h1>
-      <p class="muted">To print your documents, please scan the official SmartPrint QR code placed at your print shop counter. Each shop has its own unique QR code.</p>
-      
-      <div class="welcome-steps">
-        <div class="welcome-step-card">
-          <span class="step-badge">Step 1</span>
-          <strong>${icon('qr')} Scan at Counter</strong>
-          <p class="muted small">Scan the shop's counter QR code with your phone camera.</p>
-        </div>
-        <div class="welcome-step-card">
-          <span class="step-badge">Step 2</span>
-          <strong>${icon('file')} Upload & Options</strong>
-          <p class="muted small">Upload your PDF or document, pick B&W or Colour and copies.</p>
-        </div>
-        <div class="welcome-step-card">
-          <span class="step-badge">Step 3</span>
-          <strong>${icon('printer')} Pay & Collect</strong>
-          <p class="muted small">Pay by UPI or cash, then collect your printed document.</p>
+    mount(`<main class="home-page-shell">
+      <div class="home-hero-container">
+        <div class="home-hero-grid">
+          <!-- Left Content Column -->
+          <div class="home-hero-content">
+            <div class="home-eyebrow">
+              CONTACTLESS &bull; FAST &bull; SECURE &mdash;
+            </div>
+
+            <h1 class="home-hero-heading">
+              Scan your shop<br>
+              <span class="qr-word">QR</span> <span class="code-word">code</span> to print
+            </h1>
+
+            <p class="home-hero-desc">
+              Print your documents easily and securely. Scan the official SmartPrint QR code placed at your print shop counter. Each shop has its own unique QR code.
+            </p>
+
+            <div class="home-steps-grid">
+              <div class="home-step-card">
+                <div class="home-step-header">
+                  <span class="home-step-badge badge-blue">01</span>
+                  <span class="home-step-icon">${icon('qr')}</span>
+                </div>
+                <strong class="home-step-title">Scan at Counter</strong>
+                <p class="home-step-desc">Scan the shop’s QR code with your phone camera.</p>
+              </div>
+
+              <div class="home-step-card">
+                <div class="home-step-header">
+                  <span class="home-step-badge badge-purple">02</span>
+                  <span class="home-step-icon">${icon('file')}</span>
+                </div>
+                <strong class="home-step-title">Upload & Options</strong>
+                <p class="home-step-desc">Upload your PDF or document, pick B&W or Colour and copies.</p>
+              </div>
+
+              <div class="home-step-card">
+                <div class="home-step-header">
+                  <span class="home-step-badge badge-orange">03</span>
+                  <span class="home-step-icon">${icon('printer')}</span>
+                </div>
+                <strong class="home-step-title">Pay & Collect</strong>
+                <p class="home-step-desc">Pay by UPI or cash, then collect your printed document.</p>
+              </div>
+            </div>
+
+            <div class="home-cta-group">
+              <a class="home-primary-btn" href="#register">
+                ${icon('shop')} <span>Register Your Shop &rarr;</span>
+              </a>
+              <a class="home-secondary-btn" href="#login">
+                ${icon('user')} <span>Shop owner sign in</span>
+              </a>
+            </div>
+
+            <div class="home-footer-nav">
+              <a href="#admin-login" class="home-link-admin">Administrator sign in</a>
+              <span class="home-footer-sep">|</span>
+              <span class="home-footer-muted">Already placed an order?</span>
+              <a href="#track" class="home-link-track">Track order progress &rarr;</a>
+            </div>
+          </div>
+
+          <!-- Right Visual Mockup Column -->
+          <div class="home-hero-visual">
+            <div class="home-ambient-glow"></div>
+            <div class="home-mockup-frame">
+              <img class="home-mockup-img" src="/hero-scanner.jpg" alt="SmartPrint Counter QR Scanner" width="1280" height="720">
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="landing-portal-actions">
-        <a class="primary wide" href="#register">Register Your Shop →</a>
-        <a class="secondary wide" href="#login">Shop owner sign in</a>
-      </div>
-
-      <div class="welcome-footer">
-        <a href="#admin-login">Administrator sign in</a><span>Already placed an order?</span>
-        <a href="#track">Track order progress ${icon('arrow')}</a>
+      <!-- Organic Wave Footer Accent -->
+      <div class="home-organic-wave" aria-hidden="true">
+        <svg viewBox="0 0 1440 96" fill="none" preserveAspectRatio="none">
+          <path d="M0,32 C360,85 720,12 1080,55 C1260,78 1380,40 1440,48 L1440,96 L0,96 Z" fill="#e8f3fe" opacity="0.8"></path>
+          <path d="M0,58 C420,18 780,82 1140,38 C1300,18 1390,56 1440,60 L1440,96 L0,96 Z" fill="#f1f7ff"></path>
+        </svg>
       </div>
     </main>`);
     return;
