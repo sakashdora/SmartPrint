@@ -49,17 +49,12 @@ function header() {
       <div class="nav-brand-slot">${brand()}</div>
       
       <nav class="nav-center-links" aria-label="Main navigation">
-        <a href="#track" class="nav-center-link">Track order</a>
         <a href="#how-it-works" class="nav-center-link">How it works</a>
         <a href="#for-shop-owners" class="nav-center-link">For shop owners</a>
         <a href="#support" class="nav-center-link">Support</a>
       </nav>
 
       <div class="nav-right-actions">
-        <a href="#track" class="nav-track-link">
-          ${icon('search')}
-          <span>Track order</span>
-        </a>
         <a href="${isWorkspace}" class="nav-workspace-btn">
           ${icon('user')}
           <span>${me ? 'Go to Workspace →' : 'Workspace sign in →'}</span>
@@ -73,7 +68,6 @@ function header() {
     <!-- Mobile dropdown drawer -->
     <div class="home-mobile-drawer" id="home-mobile-drawer" hidden>
       <nav class="home-mobile-nav-links">
-        <a href="#track" class="mobile-nav-link">${icon('search')} Track order</a>
         <a href="#how-it-works" class="mobile-nav-link">${icon('file')} How it works</a>
         <a href="#for-shop-owners" class="mobile-nav-link">${icon('shop')} For shop owners</a>
         <a href="#support" class="mobile-nav-link">${icon('support')} Support</a>

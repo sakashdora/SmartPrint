@@ -12,6 +12,9 @@
   --primary-hover: #1d4ed8;
   --primary-subtle: #eff6ff;
   --primary-border: #bfdbfe;
+  --brand-primary: #2563eb;
+  --brand-hover: #1d4ed8;
+  --border: #e2e8f0;
   --green: #16a34a;
   --green-subtle: #f0fdf4;
   --green-border: #bbf7d0;
@@ -1521,7 +1524,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
   align-items: center;
   gap: 8px;
   padding: 9px 18px;
-  background: var(--brand-primary);
+  background: #2563eb;
+  background: var(--brand-primary, #2563eb);
   color: #FFFFFF !important;
   border-radius: 9999px;
   font-size: 13.5px;
@@ -1539,7 +1543,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
 }
 
 .nav-workspace-btn:hover {
-  background: var(--brand-hover);
+  background: #1d4ed8;
+  background: var(--brand-hover, #1d4ed8);
   transform: translateY(-1px);
   box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
   text-decoration: none;
@@ -1762,7 +1767,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
   justify-content: center;
   gap: 10px;
   padding: 15px 24px;
-  background: var(--brand-primary);
+  background: #2563eb;
+  background: var(--brand-primary, #2563eb);
   color: #FFFFFF !important;
   border: none;
   border-radius: 12px;
@@ -1780,7 +1786,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
 }
 
 .btn-hero-primary-wide:hover {
-  background: var(--brand-hover);
+  background: #1d4ed8;
+  background: var(--brand-hover, #1d4ed8);
   transform: translateY(-1px);
   box-shadow: 0 8px 24px rgba(37, 99, 235, 0.45);
   text-decoration: none;
@@ -2104,7 +2111,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
   align-items: center;
   gap: 8px;
   padding: 12px 24px;
-  background: var(--brand-primary);
+  background: #2563eb;
+  background: var(--brand-primary, #2563eb);
   color: #FFFFFF !important;
   border: none;
   border-radius: 10px;
@@ -2117,7 +2125,8 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
 }
 
 .btn-bottom-find-shop:hover {
-  background: var(--brand-hover);
+  background: #1d4ed8;
+  background: var(--brand-hover, #1d4ed8);
   transform: translateY(-1px);
 }
 
