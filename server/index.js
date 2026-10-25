@@ -306,15 +306,22 @@ export async function createApp({ database, seed = true } = {}) {
     const shop = await ownerShop(req);
     const rows = await db.query('SELECT o.*, CASE WHEN EXISTS (SELECT order_id FROM print_leases WHERE order_id=o.id) THEN 1 ELSE 0 END AS automatic, (SELECT name FROM devices d JOIN print_leases pl ON pl.device_id=d.id WHERE pl.order_id=o.id LIMIT 1) AS printer_name FROM orders o WHERE o.shop_id=$1 ORDER BY o.created DESC LIMIT 200', [shop.id]);
     const formatted = rows.map(publicOrder);
-    const activeStatuses = ['awaiting_payment', 'payment_review', 'queued', 'printing', 'awaiting_confirmation', 'needs_review', 'failed'];
+    const statusTier = status => {
+      if (['awaiting_payment', 'payment_review'].includes(status)) return 1;
+      if (status === 'queued') return 2;
+      if (['printing', 'awaiting_confirmation'].includes(status)) return 3;
+      if (['needs_review', 'failed'].includes(status)) return 4;
+      return 5;
+    };
     formatted.sort((a, b) => {
-      const aActive = activeStatuses.includes(a.status) ? 1 : 0;
-      const bActive = activeStatuses.includes(b.status) ? 1 : 0;
-      if (aActive !== bActive) return bActive - aActive;
-      if (aActive) {
+      const tierA = statusTier(a.status);
+      const tierB = statusTier(b.status);
+      if (tierA !== tierB) return tierA - tierB;
+      if (tierA === 2) {
         if ((b.priority || 0) !== (a.priority || 0)) return (b.priority || 0) - (a.priority || 0);
-        return b.created.localeCompare(a.created);
+        return a.created.localeCompare(b.created);
       }
+      if ((b.priority || 0) !== (a.priority || 0)) return (b.priority || 0) - (a.priority || 0);
       return b.created.localeCompare(a.created);
     });
     res.json(formatted);
