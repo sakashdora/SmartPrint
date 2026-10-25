@@ -4,7 +4,7 @@ import { mkdir, writeFile, unlink, readFile, readdir, stat } from 'node:fs/promi
 import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ensureSumatraPDF, printPdfToWindowsPrinter } from './sumatra-helper.js';
+import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, resolveActivePrinter, checkPrinterStatus } from './sumatra-helper.js';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -88,23 +88,38 @@ async function checkPrinterExists(name) {
   return false;
 }
 
-if (!printer || !(await checkPrinterExists(printer))) {
-  try {
-    const { stdout: defOut } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
-    const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
-    if (defMatch && (await checkPrinterExists(defMatch[1].trim()))) {
-      printer = defMatch[1].trim();
+// Verify real-time status and resolve offline printers to active USB/online counterparts
+if (process.platform === 'win32') {
+  const installedPrinters = await getWindowsPrinters();
+  if (printer && installedPrinters.length) {
+    const res = resolveActivePrinter(printer, installedPrinters);
+    if (res.switched) {
+      log(`[Printer] ${res.reason}`);
+      printer = res.name;
+      try {
+        const cfg = loadConfig();
+        cfg.Printer = printer;
+        await writeFile(settingsPath, JSON.stringify(cfg, null, 2), 'utf8');
+      } catch {}
+    } else if (res.status === 'Offline') {
+      log(`[Printer] WARNING: Configured printer "${printer}" is currently OFFLINE in Windows Spooler. Waiting for connection...`);
     }
-  } catch {}
-}
+  }
 
-if (!printer || !(await checkPrinterExists(printer))) {
-  // Find any available printer
-  try {
-    const { stdout: devList } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
-    const candidates = devList.split(/\r?\n/).map(l => l.trim().split(/\s{2,}REG_SZ\s{2,}/)[0]).filter(n => n && !/OneNote|Fax|Microsoft XPS/i.test(n));
-    if (candidates.length) printer = candidates[0];
-  } catch {}
+  if (!printer || !(await checkPrinterExists(printer))) {
+    const def = installedPrinters.find(p => p.Default && !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
+    if (def) {
+      printer = def.Name;
+    } else {
+      const onlinePhys = installedPrinters.find(p => checkPrinterStatus(p.PrinterStatus).status === 'Ready' && !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
+      if (onlinePhys) {
+        printer = onlinePhys.Name;
+      } else {
+        const anyPhys = installedPrinters.find(p => !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
+        if (anyPhys) printer = anyPhys.Name;
+      }
+    }
+  }
 }
 
 if (!printer) {
@@ -136,59 +151,96 @@ try {
 async function scanAndReportLocalPrinters() {
   if (process.platform !== 'win32') return;
   try {
-    let defPrinter = '';
-    try {
-      const { stdout: defOut } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
-      const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
-      if (defMatch) defPrinter = defMatch[1].trim();
-    } catch {}
-
-    const { stdout } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
-    if (!stdout || !stdout.trim()) return;
-
-    const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('HKEY_'));
+    const rawWindows = await getWindowsPrinters();
     const printers = [];
 
-    for (const line of lines) {
-      const parts = line.split(/\s{2,}REG_SZ\s{2,}/);
-      if (!parts || !parts[0]) continue;
-      const name = parts[0].trim();
-      if (!name || /OneNote|Fax|Microsoft XPS/i.test(name)) continue;
+    if (rawWindows.length) {
+      for (const p of rawWindows) {
+        if (!p || !p.Name || /OneNote|Fax|Microsoft XPS/i.test(p.Name)) continue;
+        const port = String(p.PortName || '').trim();
+        const name = String(p.Name || '').trim();
+        const driver = String(p.DriverName || name).trim();
+        const { status } = checkPrinterStatus(p.PrinterStatus);
 
-      let port = '';
+        let isWifi = false, isWired = false, connType = 'Local Spooler';
+        if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /wifi|wireless|network/i.test(name)) {
+          connType = 'WiFi / Wireless Network';
+          isWifi = true;
+        } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(name)) {
+          connType = 'Wired USB Cable';
+          isWired = true;
+        } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
+          connType = 'Virtual / PDF';
+        }
+
+        printers.push({
+          name,
+          portName: port,
+          driverName: driver,
+          connectionType: connType,
+          isWifi,
+          isWired,
+          isDefault: Boolean(p.Default),
+          status,
+          color: !/mono|black/i.test(driver || name),
+          duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name)
+        });
+      }
+    }
+
+    if (!printers.length) {
+      let defPrinter = '';
       try {
-        const { stdout: portOut } = await run('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Port'], { timeout: 1500, windowsHide: true });
-        const portMatch = portOut.match(/Port\s+REG_SZ\s+(.*)/i);
-        if (portMatch) port = portMatch[1].trim();
+        const { stdout: defOut } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
+        const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
+        if (defMatch) defPrinter = defMatch[1].trim();
       } catch {}
 
-      if (!port && parts[1]) {
-        port = (parts[1].split(',')[1] || '').trim();
-      }
+      const { stdout } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
+      if (stdout && stdout.trim()) {
+        const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('HKEY_'));
+        for (const line of lines) {
+          const parts = line.split(/\s{2,}REG_SZ\s{2,}/);
+          if (!parts || !parts[0]) continue;
+          const name = parts[0].trim();
+          if (!name || /OneNote|Fax|Microsoft XPS/i.test(name)) continue;
 
-      let isWifi = false, isWired = false, connType = 'Local Spooler';
-      if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /wifi|wireless|network/i.test(name)) {
-        connType = 'WiFi / Wireless Network';
-        isWifi = true;
-      } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(name)) {
-        connType = 'Wired USB Cable';
-        isWired = true;
-      } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
-        connType = 'Virtual / PDF';
-      }
+          let port = '';
+          try {
+            const { stdout: portOut } = await run('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Port'], { timeout: 1500, windowsHide: true });
+            const portMatch = portOut.match(/Port\s+REG_SZ\s+(.*)/i);
+            if (portMatch) port = portMatch[1].trim();
+          } catch {}
 
-      printers.push({
-        name,
-        portName: port,
-        driverName: name,
-        connectionType: connType,
-        isWifi,
-        isWired,
-        isDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase())),
-        status: 'Ready',
-        color: !/mono|black/i.test(name),
-        duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(name)
-      });
+          if (!port && parts[1]) {
+            port = (parts[1].split(',')[1] || '').trim();
+          }
+
+          let isWifi = false, isWired = false, connType = 'Local Spooler';
+          if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /wifi|wireless|network/i.test(name)) {
+            connType = 'WiFi / Wireless Network';
+            isWifi = true;
+          } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(name)) {
+            connType = 'Wired USB Cable';
+            isWired = true;
+          } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
+            connType = 'Virtual / PDF';
+          }
+
+          printers.push({
+            name,
+            portName: port,
+            driverName: name,
+            connectionType: connType,
+            isWifi,
+            isWired,
+            isDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase())),
+            status: 'Ready',
+            color: !/mono|black/i.test(name),
+            duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(name)
+          });
+        }
+      }
     }
 
     if (printers.length) {

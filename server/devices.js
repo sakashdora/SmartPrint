@@ -84,6 +84,9 @@ export function formatPrinterList(rawList) {
       const isColor = !/mono|black/i.test(driver || name);
       const isDuplex = /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name);
 
+      const isOffline = p.PrinterStatus === 128 || p.PrinterStatus === 'Offline' || p.status === 'Offline';
+      const status = isOffline ? 'Offline' : (p.PrinterStatus === 0 || p.PrinterStatus === 3 || p.PrinterStatus === 'Normal' || p.status === 'Ready' || !p.PrinterStatus) ? 'Ready' : 'Normal';
+
       return {
         name,
         portName: port,
@@ -92,7 +95,7 @@ export function formatPrinterList(rawList) {
         isWifi,
         isWired,
         isDefault: Boolean(p.Default || p.IsDefault),
-        status: (p.PrinterStatus === 0 || p.PrinterStatus === 3 || p.PrinterStatus === 'Normal' || !p.PrinterStatus) ? 'Ready' : 'Normal',
+        status,
         color: isColor,
         duplex: isDuplex
       };
@@ -215,15 +218,21 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       'SELECT id, name, active FROM devices WHERE shop_id=$1 AND (LOWER(name) = LOWER($2) OR LOWER(name) LIKE LOWER($3) OR LOWER($2) LIKE LOWER(name)) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName, `%${printerName}%`]
     );
-    let secret = token();
+    let secret = null;
     if (!device) {
       const id = randomUUID();
+      secret = token();
       await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
         id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now()
       ]);
       device = { id, name: printerName, active: 1 };
     } else {
-      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
+      if (req.body.regenerateToken) {
+        secret = token();
+        await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
+      } else {
+        await db.query('UPDATE devices SET name=$1, active=1, heartbeat=$2 WHERE id=$3', [printerName, now(), device.id]);
+      }
       device.name = printerName;
       device.active = 1;
     }
@@ -237,17 +246,21 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
         mkdirSync(connectorRoot, { recursive: true });
         const settingsPath = join(connectorRoot, 'settings.json');
-        let existingSumatra = '';
+        let existingSumatra = '', existingToken = '';
         try {
           if (existsSync(settingsPath)) {
             const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
-            if (raw) existingSumatra = JSON.parse(raw).Sumatra || '';
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              existingSumatra = parsed.Sumatra || '';
+              existingToken = parsed.Token || '';
+            }
           }
         } catch {}
 
         writeFileSync(settingsPath, JSON.stringify({
           Url: serverUrl,
-          Token: secret,
+          Token: secret || existingToken,
           Printer: printerName,
           Sumatra: existingSumatra,
           LastUpdated: new Date().toISOString()

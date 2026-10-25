@@ -137,8 +137,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
               <span class="chip">Auto-Duplex</span>
             </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
-            <button class="primary small" data-autoconnect="Brother DCP-T820DW Printer" data-wifi="true" data-wired="false">⚡ 1-Click Connect Brother (WiFi / Network)</button>
-            <button class="secondary small" data-autoconnect="Brother DCP-T820DW Printer (Copy 1) USB" data-wifi="false" data-wired="true">🔌 Connect Brother (USB Cable)</button>
+            <button class="primary small" data-autoconnect="Brother DCP-T820DW Printer (Copy 1) USB" data-wifi="false" data-wired="true">🔌 1-Click Connect Brother (USB Cable)</button>
+            <button class="secondary small" data-autoconnect="Brother DCP-T820DW Printer" data-wifi="true" data-wired="false">📶 Connect Brother (WiFi / Network)</button>
           </div>
         </div>
 

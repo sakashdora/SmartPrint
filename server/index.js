@@ -107,7 +107,16 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.use(express.json({ limit: config.production ? '2mb' : '29mb' }));
   app.use((req, res, next) => { req.body ??= {}; next(); });
-  app.get('/api/health', (req, res) => res.json({ mode: config.production ? 'production' : 'development', payments: config.payments, automaticPrinting: true, office: config.production || process.env.CONNECTOR_PROCESSING === 'true' || Boolean(process.env.PROCESSOR_URL), demo: !process.env.DATABASE_URL && !config.production }));
+  app.get('/api/health', (req, res) => res.json({
+    mode: config.production ? 'production' : 'development',
+    payments: config.payments,
+    automaticPrinting: true,
+    office: config.production || process.env.CONNECTOR_PROCESSING === 'true' || Boolean(process.env.PROCESSOR_URL),
+    demo: !process.env.DATABASE_URL && !config.production,
+    commit: process.env.RENDER_GIT_COMMIT || '0bf8e4f',
+    version: '1.0.1',
+    timestamp: new Date().toISOString()
+  }));
   authRoutes(app, db, key, config);
   uploadRoutes(app, db, key);
   deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance: () => maintain() });
@@ -454,7 +463,13 @@ export async function createApp({ database, seed = true } = {}) {
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
   app.use('/vendor/pdfjs-wasm', express.static('node_modules/pdfjs-dist/wasm', { index: false }));
-  app.use(express.static('public'));
+  app.use(express.static('public', {
+    setHeaders: (res, path) => {
+      if (/\.(html|js|css)$/.test(path)) {
+        res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      }
+    }
+  }));
   const cleanup = async () => db.transaction(async tx => {
     await tx.query('DELETE FROM uploads WHERE expires<=$1', [now()]);
     await tx.query('DELETE FROM preparations WHERE expires<=$1', [now()]);
