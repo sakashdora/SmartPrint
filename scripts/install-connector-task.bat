@@ -21,8 +21,8 @@ for /f "tokens=*" %%i in ('where node') do (
 )
 :found_node
 
-echo Registering SmartPrintConnector Scheduled Task for current user...
-schtasks /create /tn "SmartPrintConnector" /tr "\"%NODE_EXE%\" --env-file-if-exists=\"%SCRIPT_DIR%\.env\" \"%SCRIPT_DIR%\connector\index.js\"" /sc onlogon /rl limited /f
+echo Registering SmartPrintConnector Scheduled Task for current user (completely silent background execution)...
+schtasks /create /tn "SmartPrintConnector" /tr "wscript.exe \"%SCRIPT_DIR%\connector\silent-launcher.vbs\"" /sc onlogon /rl limited /f
 
 if %ERRORLEVEL% EQU 0 (
     echo.
