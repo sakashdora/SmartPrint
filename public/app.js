@@ -36,6 +36,11 @@ async function api(path, { method = 'GET', body, token, binary, snapshot, header
   }
   return snapshot ? { rows: await response.json(), until: response.headers.get('X-Snapshot-At') } : binary ? response.blob() : response.json();
 }
+
+function environmentLabel() {
+  return health?.mode === 'production' ? '' : `<div class="demo">${health?.demo ? 'Local demo · Sample accounts and data' : 'Development · Connected database'}</div>`;
+}
+
 function header() {
   return `<header class="topbar">
     ${brand()}
