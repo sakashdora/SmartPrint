@@ -59,6 +59,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
           for (const [table, column, def] of [
             ['orders', 'file_name', "TEXT DEFAULT 'document.pdf'"],
             ['orders', 'priority', 'INTEGER DEFAULT 0'],
+            ['mfa', 'recovery_codes', "TEXT DEFAULT '[]'"],
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -97,6 +98,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       sqlite.exec(schema.replaceAll('BYTEA', 'BLOB'));
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN file_name TEXT DEFAULT 'document.pdf';"); } catch {}
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN priority INTEGER DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE mfa ADD COLUMN recovery_codes TEXT DEFAULT '[]';"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

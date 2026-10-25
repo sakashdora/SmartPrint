@@ -1372,4 +1372,66 @@ td .primary, td .secondary, td .danger { font-size: 12px; padding: 7px 12px; min
   box-shadow: 0 0 6px rgba(27, 183, 94, 0.6);
 }
 
+.upi-app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 16px 0;
+}
+.upi-app-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  cursor: pointer;
+  border: 1.5px solid #dce2e9;
+  background: #ffffff;
+  color: #1e293b;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.upi-app-btn:hover {
+  border-color: #3b82f6;
+  background: #f8fafc;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.upi-app-btn.gpay { border-color: #4285f4; color: #1a73e8; }
+.upi-app-btn.phonepe { border-color: #5f259f; color: #5f259f; }
+.upi-app-btn.paytm { border-color: #00b9f5; color: #002e6e; }
+.upi-app-btn.bhim { border-color: #00875a; color: #00875a; }
+.copy-actions-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.copy-actions-row button {
+  flex: 1;
+}
+.online-pay-card {
+  background: #f8fafc;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 22px;
+  margin-top: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+.online-pay-badge {
+  display: inline-block;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
 

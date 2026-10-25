@@ -92,7 +92,7 @@ async function owner(view) {
   if (view === 'printers') return printersPage({ api, workspace, escape, notify });
   const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices')]);
   const snapshot = await load(), [store, orders, transactions, summary, devices] = snapshot;
-  const head = title => `<div class="workhead"><div><div class="heading-context">${escape(store.name)} ${badge(store.status)}</div><h1>${title}</h1><p class="muted">${view === 'owner' ? 'Keep the queue moving and every payment accounted for.' : view === 'queue' ? 'Review payments, follow progress and confirm printed pages.' : 'Manage your shop with clear, up-to-date records.'}</p></div><div class="actions"><button class="icon-button" id="reload" aria-label="Refresh workspace">${icon('refresh')}</button>${view !== 'settings' ? `<a class="primary" href="#settings">${icon('qr')} View shop QR</a>` : ''}</div></div>`;
+  const head = title => `<div class="workhead"><div><div class="heading-context">${escape(store.name)} ${badge(store.status)}</div><h1>${title}</h1><p class="muted">${view === 'owner' ? 'Keep the queue moving and every payment accounted for.' : view === 'queue' ? 'Review payments, follow progress and confirm printed pages.' : 'Manage your shop with clear, up-to-date records.'}</p></div><div class="actions"><button class="icon-button" id="reload" aria-label="Refresh workspace">${icon('refresh')}</button><button type="button" class="secondary" id="remote-print-btn">📤 Remote Print</button>${view !== 'settings' ? `<a class="primary" href="#settings">${icon('qr')} View shop QR</a>` : ''}</div></div>`;
   let content;
   if (view === 'settings') {
     const qr = await api('/api/owner/qr');
@@ -104,6 +104,98 @@ async function owner(view) {
   }
   workspace(content, view);
   document.querySelector('#reload').onclick = () => route();
+  document.querySelector('#remote-print-btn')?.addEventListener('click', () => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'crop-dialog remote-print-dialog';
+    dialog.innerHTML = `
+      <form id="remote-print-form" method="dialog">
+        <h2>${icon('printer')} Remote Print to Shop</h2>
+        <p class="muted">Submit a document directly from your authenticated device to your active shop printer.</p>
+        <label class="field" style="margin: 14px 0;">
+          Select PDF or Image:
+          <input type="file" id="remote-file" accept=".pdf,.png,.jpg,.jpeg" required>
+        </label>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+          <label class="field">
+            Colour Mode
+            <select name="color">
+              <option value="bw">Black & White</option>
+              <option value="color">Full Colour</option>
+            </select>
+          </label>
+          <label class="field">
+            Sides
+            <select name="duplex">
+              <option value="false">One-sided (Simplex)</option>
+              <option value="true">Both sides (Duplex)</option>
+            </select>
+          </label>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+          <label class="field">
+            Copies
+            <input type="number" name="copies" min="1" max="100" value="1" required>
+          </label>
+          <label class="field">
+            Page Range
+            <input name="range" placeholder="All pages (e.g. 1-3)">
+          </label>
+        </div>
+        <p class="inline-error" id="remote-error" role="alert"></p>
+        <div class="actions" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px;">
+          <button type="button" class="secondary" id="remote-cancel">Cancel</button>
+          <button type="submit" class="primary" id="remote-submit">${icon('printer')} Send to Printer</button>
+        </div>
+      </form>
+    `;
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    dialog.querySelector('#remote-cancel').onclick = () => { dialog.close(); dialog.remove(); };
+    dialog.querySelector('#remote-print-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fileInput = dialog.querySelector('#remote-file');
+      if (!fileInput.files.length) return;
+      const file = fileInput.files[0];
+      const submitBtn = dialog.querySelector('#remote-submit');
+      const errEl = dialog.querySelector('#remote-error');
+      errEl.textContent = '';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Preparing & Sending...';
+      try {
+        const formData = new FormData(e.target);
+        const base64Data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const res = reader.result;
+            resolve(res.slice(res.indexOf(',') + 1));
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const result = await api('/api/owner/print-job', {
+          method: 'POST',
+          body: {
+            file: { data: base64Data, name: file.name },
+            fileName: file.name,
+            options: {
+              color: formData.get('color'),
+              duplex: formData.get('duplex') === 'true',
+              copies: Number(formData.get('copies')) || 1,
+              range: formData.get('range') || ''
+            }
+          }
+        });
+        notify(result.message || 'Remote print job submitted successfully!');
+        dialog.close();
+        dialog.remove();
+        await owner(view);
+      } catch (err) {
+        errEl.textContent = err.message || 'Failed to submit remote print job.';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Send to Printer';
+      }
+    };
+  });
   document.querySelectorAll('[data-queue-filter]').forEach(button => button.onclick = async () => { queueFilter = button.dataset.queueFilter; try { await owner(view); document.querySelector(`[data-queue-filter="${queueFilter}"]`)?.focus({ preventScroll: true }); } catch (error) { notify(error.message); } });
   document.querySelector('#review-payments')?.addEventListener('click', () => { queueFilter = 'attention'; if (view === 'queue') owner(view).catch(error => notify(error.message)); });
   const autoPrintInput = document.querySelector('#autoprint-mode');

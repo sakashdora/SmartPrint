@@ -2,32 +2,6 @@ import { selectedPages } from './print-options.js';
 export { validateOptions, selectedPages, price } from './print-options.js';
 import { PDFDocument } from 'pdf-lib';
 import sharp from 'sharp';
-import { createCanvas } from '@napi-rs/canvas';
-import { fileURLToPath } from 'node:url';
-
-async function grayscalePdf(bytes) {
-  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  const fontPath = fileURLToPath(new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)).replaceAll('\\', '/');
-  const task = getDocument({ data: new Uint8Array(bytes), standardFontDataUrl: fontPath, useSystemFonts: false, isEvalSupported: false, maxImageSize: 20_000_000 });
-  const pdf = await task.promise;
-  const output = await PDFDocument.create();
-  try {
-    for (let n = 1; n <= pdf.numPages; n++) {
-      const source = await pdf.getPage(n), viewport = source.getViewport({ scale: 2 });
-      if (viewport.width * viewport.height > 20_000_000 || viewport.width <= 0 || viewport.height <= 0) throw new Error('Page dimensions are too large.');
-      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-      await source.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-      const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
-      const jpg = await sharp(Buffer.from(pixels.data.buffer, pixels.data.byteOffset, pixels.data.byteLength), {
-        raw: { width: canvas.width, height: canvas.height, channels: 4 }
-      }).greyscale().jpeg({ quality: 92 }).toBuffer();
-      const image = await output.embedJpg(jpg), page = output.addPage([viewport.width / 2, viewport.height / 2]);
-      page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
-      canvas.width = 1; canvas.height = 1; source.cleanup();
-    }
-    return output.save();
-  } finally { await task.destroy(); }
-}
 
 export async function prepare(files, options) {
   if (!Array.isArray(files) || files.length < 1 || files.length > 2) throw new Error('Upload one PDF/image, or two images for a card pair.');
@@ -78,6 +52,5 @@ export async function prepare(files, options) {
     }
   }
   const outputBytes = await output.save();
-  const needsPdfGrayscale = options.color === 'bw' && hasPdfInput;
-  return { bytes: needsPdfGrayscale ? await grayscalePdf(outputBytes) : outputBytes, pages: selection.length, outputPages: output.getPageCount() };
+  return { bytes: outputBytes, pages: selection.length, outputPages: output.getPageCount() };
 }

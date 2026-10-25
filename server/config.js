@@ -49,5 +49,8 @@ export function configuration() {
     const sslmode = new URL(process.env.DATABASE_URL).searchParams.get('sslmode');
     if (sslmode !== 'verify-full' && sslmode !== 'require') throw new Error('Production database URL must use sslmode=verify-full or sslmode=require.');
   }
-  return { production, origin, payments: Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET && process.env.RAZORPAY_WEBHOOK_SECRET && process.env.PAYMENT_SETTLEMENT_MODE === 'single_merchant') };
+  const settlement = process.env.PAYMENT_SETTLEMENT_MODE || 'single_merchant';
+  const paymentsEnabled = Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET && settlement === 'single_merchant');
+  return { production, origin, payments: paymentsEnabled };
 }
+

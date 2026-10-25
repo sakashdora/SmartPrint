@@ -5,9 +5,11 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { token, digest, decrypt, encrypt } from './security.js';
-import { sendPdf } from './uploads.js';
+import { sendPdf, resolveUploads } from './uploads.js';
 import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
+import { localProcess } from './process-client.js';
+import { logEvent } from './logger.js';
 
 const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
@@ -370,6 +372,78 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       await audit(tx, req.user.id, 'device.test_printed', device.id);
     });
     res.json({ ok: true, orderId, message: 'Test page queued for printer!' });
+  });
+
+  app.post('/api/owner/print-job', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [onlineDevice] = await db.query(
+      'SELECT id, name, color, duplex FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 ORDER BY (heartbeat) DESC LIMIT 1',
+      [shop.id, new Date(Date.now() - 180000).toISOString()]
+    );
+    if (!onlineDevice) {
+      throw fail(503, 'No shop printer is currently online. Ensure the print connector is active on your shop computer.');
+    }
+
+    let files;
+    if (req.body.files) {
+      files = await resolveUploads(req.body.files, shop.id, db, key);
+    } else if (req.body.file?.data) {
+      files = [{ data: req.body.file.data, name: req.body.file.name || 'remote_document.pdf' }];
+    } else {
+      throw fail(400, 'Please select or upload a document to print.');
+    }
+
+    let options;
+    const fileName = String(req.body.fileName || files[0].name || 'remote_document.pdf').slice(0, 150);
+    try {
+      options = validateOptions({
+        color: req.body.options?.color || (onlineDevice.color ? 'color' : 'bw'),
+        duplex: Boolean(req.body.options?.duplex),
+        copies: Math.max(1, Math.min(100, Number(req.body.options?.copies) || 1)),
+        layout: req.body.options?.layout || 'single',
+        range: String(req.body.options?.range || '').trim()
+      });
+      options.file_name = fileName;
+      options.priority = 25;
+    } catch (err) {
+      throw fail(400, err.message);
+    }
+
+    let prepared;
+    try {
+      prepared = await localProcess(files, options);
+    } catch (err) {
+      throw fail(400, `Unable to prepare print: ${err.message}`);
+    }
+
+    const orderId = randomUUID(), docId = randomUUID(), receiptToken = token();
+    const sealed = encrypt(prepared.bytes, key);
+    const pricing = price(prepared.pages, options, shop);
+
+    await db.transaction(async tx => {
+      await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [docId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
+      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created,file_name,priority) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'owner_remote','paid','queued',$10,$11,$12)", [orderId, shop.id, docId, digest(receiptToken), JSON.stringify(options), prepared.pages, pricing.sides, pricing.sheets, 0, now(), fileName, 25]);
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), orderId, 'created', 'queued', req.user.id, 'owner.remote_print', `Target: ${onlineDevice.name}`, now()]);
+      await audit(tx, req.user.id, 'owner.remote_print_submitted', orderId);
+    });
+
+    logEvent('owner.remote_print_submitted', {
+      shopId: shop.id,
+      orderId,
+      ownerId: req.user.id,
+      printer: onlineDevice.name,
+      pages: prepared.pages,
+      options
+    });
+
+    res.status(201).json({
+      ok: true,
+      orderId,
+      token: receiptToken,
+      printer: onlineDevice.name,
+      pages: prepared.pages,
+      message: `Print job #${orderId.slice(0, 8).toUpperCase()} (${prepared.pages} pages) sent directly to ${onlineDevice.name}!`
+    });
   });
 
   app.post('/api/owner/orders/:id/priority', owner, async (req, res) => {

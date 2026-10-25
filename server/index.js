@@ -14,6 +14,7 @@ import { paymentRoutes } from './payments.js';
 import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
 import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
 import { transitionOrder } from './state-machine.js';
+import { requestLogger, logEvent } from './logger.js';
 
 const now = () => new Date().toISOString();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -35,11 +36,17 @@ export async function createApp({ database, seed = true } = {}) {
   }
   const app = express();
   app.disable('x-powered-by');
+  app.use(requestLogger);
   if (config.production) app.set('trust proxy', 'loopback, linklocal, uniquelocal');
   app.use(async (req, res, next) => {
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self' https://checkout.razorpay.com; style-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob: https://api.razorpay.com; connect-src 'self' https://api.razorpay.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" });
+    res.set({
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' https://checkout.razorpay.com; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; frame-src 'self' blob: https://api.razorpay.com; connect-src 'self' https://api.razorpay.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    });
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
-    if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000');
+    if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
       const allowed = [config.origin, req.headers.host ? `https://${req.headers.host}` : null].filter(Boolean);
       if ((config.production && !req.headers.origin) || (req.headers.origin && !allowed.includes(req.headers.origin))) return next(fail(403, 'Request origin is not allowed.'));
@@ -48,7 +55,11 @@ export async function createApp({ database, seed = true } = {}) {
     if (sessionId) {
       req.sessionId = digest(sessionId);
       const [user] = await db.query('SELECT u.id,u.email,u.role,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
-      if (user) { req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(process.env.ENFORCE_MFA === 'true' && !user.mfa) }; }
+      if (user) {
+        const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
+        const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+        req.user = { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(enforceMfa && !user.mfa) };
+      }
     }
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
     if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
@@ -85,7 +96,7 @@ export async function createApp({ database, seed = true } = {}) {
     }
   };
   app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
     if (!secret) throw fail(503, 'Online payments are not configured.');
     const expected = createHmac('sha256', secret).update(req.body).digest('hex');
     const signature = req.headers['x-razorpay-signature'] ?? '';
@@ -289,8 +300,12 @@ export async function createApp({ database, seed = true } = {}) {
     res.json({ ...publicOrder(order), queue_position: Math.max(1, queueAhead) });
   });
   app.post('/api/orders/:id/payment', async (req, res) => {
-    const [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND method='online' AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
+    let [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
     if (!order) throw fail(404, 'Payable order not found.');
+    if (order.method !== 'online') {
+      await db.query("UPDATE orders SET method='online' WHERE id=$1", [order.id]);
+      order.method = 'online';
+    }
     const keyId = process.env.RAZORPAY_KEY_ID, secret = process.env.RAZORPAY_KEY_SECRET;
     if (!config.payments || !keyId || !secret) throw fail(503, 'Online payments are unavailable.');
     const [document] = await db.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
@@ -308,6 +323,43 @@ export async function createApp({ database, seed = true } = {}) {
     }
     if (order.provider_order.startsWith('creating:')) throw fail(409, 'Payment setup needs reconciliation. Contact the shop.');
     res.json({ key: keyId, order_id: order.provider_order, amount: order.amount, currency: 'INR' });
+  });
+  app.post('/api/orders/:id/payment/verify', async (req, res) => {
+    let [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2", [req.params.id, digest(bearer(req))]);
+    if (!order) throw fail(404, 'Order not found.');
+    if (order.method !== 'online') {
+      await db.query("UPDATE orders SET method='online' WHERE id=$1", [order.id]);
+      order.method = 'online';
+    }
+    if (order.payment === 'paid') return res.json({ verified: true, status: order.status });
+    if (order.status !== 'awaiting_payment') throw fail(409, 'Order is not awaiting payment.');
+
+    const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
+    if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+      throw fail(400, 'Missing payment verification credentials.');
+    }
+
+    if (order.provider_order !== razorpay_order_id) {
+      throw fail(400, 'Payment order identifier mismatch.');
+    }
+
+    const secret = process.env.RAZORPAY_KEY_SECRET;
+    if (!secret) throw fail(503, 'Online payment verification unavailable.');
+
+    const expected = createHmac('sha256', secret).update(`${razorpay_order_id}|${razorpay_payment_id}`).digest('hex');
+    if (razorpay_signature.length !== expected.length || !timingSafeEqual(Buffer.from(razorpay_signature), Buffer.from(expected))) {
+      throw fail(400, 'Invalid payment signature verification.');
+    }
+
+    await db.transaction(async tx => {
+      const inserted = await tx.query('INSERT INTO payment_events (id,created) VALUES ($1,$2) ON CONFLICT(id) DO NOTHING RETURNING id', [razorpay_payment_id, now()]);
+      if (!inserted.length) return;
+      await collect(tx, order, razorpay_payment_id);
+      await audit(tx, 'gateway.verify', 'payment.verified', order.id);
+    });
+
+    const [updated] = await db.query('SELECT status, payment FROM orders WHERE id=$1', [order.id]);
+    res.json({ verified: true, status: updated?.status || 'queued' });
   });
   app.use('/api/owner', requireRole('owner'));
   app.get('/api/owner/shop', async (req, res) => res.json(await ownerShop(req)));

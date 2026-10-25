@@ -240,8 +240,9 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <label class="field">
               Payment Method
               <select id="method">
-                <option value="cash">Cash at counter</option>
+                ${health.payments ? '<option value="online">Online Payment (UPI, Cards, Netbanking)</option>' : ''}
                 <option value="upi" ${shop.upi_id ? 'selected' : 'disabled'}>Direct UPI · Shop verifies${shop.upi_id ? '' : ' (unavailable)'}</option>
+                <option value="cash" ${!shop.upi_id && !health.payments ? 'selected' : ''}>Cash at counter</option>
               </select>
             </label>
             <p class="muted small" id="payment-note">Pay cash to shopkeeper when collecting your printed paper.</p>
@@ -332,8 +333,10 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   }
 
   function updatePaymentHelp() {
-    const isUpi = methodSelect.value === 'upi';
-    document.querySelector('#payment-note').textContent = isUpi
+    const method = methodSelect.value;
+    document.querySelector('#payment-note').textContent = method === 'online'
+      ? 'Pay securely online with Google Pay, PhonePe, Cards or Netbanking. Order prints instantly upon confirmation.'
+      : method === 'upi'
       ? 'Pay directly to the shop’s UPI QR on the next screen. The shop verifies and prints immediately.'
       : 'Pay cash at the shop counter. Printing starts as soon as payment is confirmed.';
   }
@@ -371,25 +374,49 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     scheduleQuote();
   };
 
+  async function readChunkBase64(blob) {
+    if (typeof FileReader !== 'undefined') {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          const comma = typeof result === 'string' ? result.indexOf(',') : -1;
+          resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error('Failed to read chunk.'));
+        reader.readAsDataURL(blob);
+      });
+    }
+    const buffer = await blob.arrayBuffer();
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(buffer).toString('base64');
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    return btoa(binary);
+  }
+
   async function upload(file) {
     const cached = uploadsByFile.get(file);
     if (cached && cached.expires > Date.now()) return cached.value;
+    const t0 = performance.now();
     const info = await api('/api/uploads', { method: 'POST', body: { slug, name: file.name, size: file.size } });
     let nextPart = 0;
     const parts = Math.ceil(file.size / info.chunkSize);
     const workers = await Promise.allSettled(Array.from({ length: Math.min(3, parts) }, async () => {
       while (nextPart < parts) {
         const part = nextPart++, start = part * info.chunkSize;
-        const bytes = new Uint8Array(await file.slice(start, start + info.chunkSize).arrayBuffer());
-        let binary = '';
-        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: btoa(binary) } });
+        const chunkBlob = file.slice(start, Math.min(file.size, start + info.chunkSize));
+        const base64Data = await readChunkBase64(chunkBlob);
+        await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: base64Data } });
       }
     }));
     const failed = workers.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
     const value = { uploadId: info.id, token: info.token };
     uploadsByFile.set(file, { value, expires: Date.now() + 25 * 60000 });
+    console.debug(`[Upload] "${file.name}" uploaded in ${(performance.now() - t0).toFixed(0)}ms (${parts} chunks)`);
     return value;
   }
 

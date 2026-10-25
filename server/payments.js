@@ -16,8 +16,34 @@ export function paymentRoutes(app, { db, ownerOrder, requireRole, collect, audit
     const [order] = await db.query("SELECT o.*,u.upi_id,u.payee,u.reference FROM orders o JOIN upi_receipts u ON u.order_id=o.id WHERE o.id=$1 AND o.token=$2 AND o.method='upi'", [req.params.id, digest(req.headers.authorization?.replace(/^Bearer /, '') || '')]);
     if (!order) throw fail(404, 'UPI order not found.');
     if (order.status !== 'awaiting_payment') return res.json({ upi_id: order.upi_id, payee: order.payee, reference: order.reference });
-    const uri = `upi://pay?${new URLSearchParams({ pa: order.upi_id, pn: order.payee, am: (order.amount / 100).toFixed(2), cu: 'INR', tn: `SmartPrint ${order.id.slice(0, 8)}`, tr: order.id }).toString()}`;
-    res.json({ upi_id: order.upi_id, payee: order.payee, uri, image: await QRCode.toDataURL(uri), reference: order.reference });
+    const amountStr = (order.amount / 100).toFixed(2);
+    const upiParams = new URLSearchParams({
+      pa: order.upi_id,
+      pn: order.payee,
+      am: amountStr,
+      cu: 'INR',
+      tn: `SmartPrint ${order.id.slice(0, 8)}`,
+      tr: order.id
+    }).toString();
+    const uri = `upi://pay?${upiParams}`;
+    const apps = {
+      gpay: `intent://pay?${upiParams}#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end`,
+      phonepe: `phonepe://pay?${upiParams}`,
+      phonepe_intent: `intent://pay?${upiParams}#Intent;scheme=upi;package=com.phonepe.app;end`,
+      paytm: `paytmmp://pay?${upiParams}`,
+      paytm_intent: `intent://pay?${upiParams}#Intent;scheme=upi;package=net.one97.paytm;end`,
+      bhim: `intent://pay?${upiParams}#Intent;scheme=upi;package=in.org.npci.upiapp;end`
+    };
+    res.json({
+      upi_id: order.upi_id,
+      payee: order.payee,
+      amount: order.amount,
+      amount_formatted: amountStr,
+      uri,
+      apps,
+      image: await QRCode.toDataURL(uri, { width: 512, margin: 2, errorCorrectionLevel: 'M' }),
+      reference: order.reference
+    });
   });
   app.post('/api/orders/:id/upi', async (req, res) => {
     const [order] = await db.query("SELECT id FROM orders WHERE id=$1 AND token=$2 AND method='upi' AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(req.headers.authorization?.replace(/^Bearer /, '') || '')]);

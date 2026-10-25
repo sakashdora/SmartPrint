@@ -8,7 +8,9 @@ export function authRoutes(app, db, key, config) {
     const secret = token();
     await db.query('INSERT INTO sessions (id,user_id,expires,mfa) VALUES ($1,$2,$3,$4)', [digest(secret), user.id, new Date(Date.now() + 8 * 3600000).toISOString(), mfa ? 1 : 0]);
     res.cookie('sp_session', secret, cookieOptions);
-    return { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(process.env.ENFORCE_MFA === 'true' && !mfa) };
+    const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
+    const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+    return { id: user.id, email: user.email, role: user.role, mfaRequired: Boolean(enforceMfa && !mfa) };
   }
   const requireSession = (req, res, next) => req.user ? next() : next(fail(401, 'Please sign in.'));
   app.post('/api/auth/login', async (req, res) => {
@@ -21,10 +23,28 @@ export function authRoutes(app, db, key, config) {
     if (!user.password.startsWith('scrypt$')) await db.query('UPDATE users SET password=$1 WHERE id=$2 AND password=$3', [await hashPassword(password), user.id, user.password]);
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [user.id]);
     if (mfa) {
+      let mfaSatisfied = false;
       const step = totpStep(decrypt(mfa, key), req.body.code, mfa.last_step);
-      if (step === null) throw fail(401, 'Enter a fresh 6-digit authenticator code.');
-      const changed = await db.query('UPDATE mfa SET last_step=$1 WHERE user_id=$2 AND last_step<$1 RETURNING user_id', [step, user.id]);
-      if (!changed.length) throw fail(401, 'This verification code was already used.');
+      if (step !== null) {
+        const changed = await db.query('UPDATE mfa SET last_step=$1 WHERE user_id=$2 AND last_step<$1 RETURNING user_id', [step, user.id]);
+        if (!changed.length) throw fail(401, 'This verification code was already used.');
+        mfaSatisfied = true;
+      } else {
+        const rawCode = String(req.body.code || req.body.recovery_code || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        if (rawCode.length >= 8) {
+          let recoveryCodes = [];
+          try { recoveryCodes = JSON.parse(mfa.recovery_codes || '[]'); } catch {}
+          const codeHash = digest(rawCode);
+          const matchedIndex = recoveryCodes.findIndex(rc => rc.hash === codeHash && !rc.used);
+          if (matchedIndex !== -1) {
+            recoveryCodes[matchedIndex].used = 1;
+            recoveryCodes[matchedIndex].used_at = new Date().toISOString();
+            await db.query('UPDATE mfa SET recovery_codes=$1 WHERE user_id=$2', [JSON.stringify(recoveryCodes), user.id]);
+            mfaSatisfied = true;
+          }
+        }
+      }
+      if (!mfaSatisfied) throw fail(401, 'Enter a fresh 6-digit authenticator code or valid single-use recovery code.');
     }
     if (req.sessionId) await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]);
     res.json(await session(res, user, Boolean(mfa)));
@@ -40,15 +60,50 @@ export function authRoutes(app, db, key, config) {
   });
   app.post('/api/auth/mfa/confirm', requireSession, async (req, res) => {
     await limitRate(db, 'mfa', req.user.id, 10, 900);
+    const plainRecoveryCodes = Array.from({ length: 8 }, () => {
+      const b = randomBytes(4).toString('hex').toUpperCase();
+      return `${b.slice(0, 4)}-${b.slice(4, 8)}`;
+    });
+    const hashedCodes = plainRecoveryCodes.map(c => ({
+      hash: digest(c.replace(/[^A-Za-z0-9]/g, '').toUpperCase()),
+      used: 0
+    }));
     await db.transaction(async tx => {
       const [row] = await tx.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=0', [req.user.id]);
       const step = row && totpStep(decrypt(row, key), req.body.code);
       if (step == null) throw fail(400, 'Enter the current code from your authenticator app.');
-      const changed = await tx.query('UPDATE mfa SET enabled=1,last_step=$1 WHERE user_id=$2 AND enabled=0 RETURNING user_id', [step, req.user.id]);
+      const changed = await tx.query('UPDATE mfa SET enabled=1,last_step=$1,recovery_codes=$2 WHERE user_id=$3 AND enabled=0 RETURNING user_id', [step, JSON.stringify(hashedCodes), req.user.id]);
       if (!changed.length) throw fail(409, 'Authenticator already confirmed.');
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [req.user.id]);
     });
-    res.json(await session(res, req.user, true));
+    const s = await session(res, req.user, true);
+    res.json({ ...s, recoveryCodes: plainRecoveryCodes });
+  });
+  app.post('/api/auth/mfa/disable', requireSession, async (req, res) => {
+    await limitRate(db, 'mfa-disable', req.user.id, 5, 900);
+    const [user] = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
+    const password = req.body.password;
+    if (typeof password !== 'string' || !(await checkPassword(password, user.password))) {
+      throw fail(403, 'Your current password is required to disable two-factor authentication.');
+    }
+    const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [req.user.id]);
+    if (!mfa) throw fail(409, 'Authenticator is not active.');
+    const step = totpStep(decrypt(mfa, key), req.body.code);
+    let codeValid = step !== null;
+    if (!codeValid) {
+      const rawCode = String(req.body.code || req.body.recovery_code || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      let recoveryCodes = [];
+      try { recoveryCodes = JSON.parse(mfa.recovery_codes || '[]'); } catch {}
+      const codeHash = digest(rawCode);
+      const matched = recoveryCodes.find(rc => rc.hash === codeHash && !rc.used);
+      if (matched) codeValid = true;
+    }
+    if (!codeValid) throw fail(401, 'Enter the current 6-digit code or an unused recovery code to verify identity.');
+    await db.transaction(async tx => {
+      await tx.query('DELETE FROM mfa WHERE user_id=$1', [req.user.id]);
+      await tx.query('UPDATE sessions SET mfa=0 WHERE user_id=$1', [req.user.id]);
+    });
+    res.json({ ok: true, message: 'Two-factor authentication disabled.' });
   });
   app.post('/api/auth/password', requireSession, async (req, res) => {
     await limitRate(db, 'password', req.user.id, 5, 900);

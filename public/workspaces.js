@@ -432,21 +432,54 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
   let payment = '';
   if (order.method === 'upi' && order.status === 'awaiting_payment') {
     const upi = await api(`/api/orders/${receipt.id}/upi`, { token: receipt.token });
+    const formattedAmount = (order.amount / 100).toFixed(2);
     payment = `<section class="panel upi-card">
-      <h2>Pay ${money(order.amount)} directly to the shop</h2><p>Use the shop’s UPI QR or open your UPI app. Once the shop verifies the bank credit, the connected printer starts automatically.</p>
+      <h2>Pay ${money(order.amount)} directly to the shop</h2>
+      <p class="muted">Pay using the shop’s dynamic UPI QR or choose your payment app below. The exact amount and order reference are prefilled.</p>
+      
       <p>Pay to <strong>${escape(upi.payee)}</strong><br><span class="muted">${escape(upi.upi_id)}</span></p>
-      <div class="upi-qr-wrap"><img class="payment-qr" src="${upi.image}" alt="UPI payment QR"></div>
-      <div class="upi-links-row">
-        <a class="primary wide upi-link" href="${escape(upi.uri)}">Open UPI App</a>
-        <button class="secondary small copy-upi-btn" data-copy="${escape(upi.upi_id)}">Copy UPI ID</button>
+      <div class="upi-qr-wrap"><img class="payment-qr" src="${upi.image}" alt="UPI payment QR for ${escape(upi.payee)}"></div>
+      
+      <div class="upi-app-selection">
+        <strong>Open directly in your payment app:</strong>
+        <div class="upi-app-grid">
+          <a class="upi-app-btn phonepe" href="${escape(upi.apps?.phonepe || upi.uri)}" target="_blank" rel="noopener">
+            📱 PhonePe
+          </a>
+          <a class="upi-app-btn gpay" href="${escape(upi.apps?.gpay || upi.uri)}" target="_blank" rel="noopener">
+            🌐 Google Pay
+          </a>
+          <a class="upi-app-btn paytm" href="${escape(upi.apps?.paytm || upi.uri)}" target="_blank" rel="noopener">
+            💳 Paytm
+          </a>
+          <a class="upi-app-btn bhim" href="${escape(upi.apps?.bhim || upi.uri)}" target="_blank" rel="noopener">
+            🏦 BHIM / UPI
+          </a>
+        </div>
       </div>
-      <p class="muted small">Scan with Google Pay, PhonePe, Paytm, or BHIM.</p>
+
+      <div class="copy-actions-row">
+        <button class="secondary small copy-upi-btn" data-copy="${escape(upi.upi_id)}">📋 Copy UPI ID</button>
+        <button class="secondary small copy-amount-btn" data-copy="${escape(formattedAmount)}">📋 Copy ₹${formattedAmount}</button>
+      </div>
+
+      <p class="muted small" style="margin-top: 14px;">Once payment is credited, the shop confirms it and printing starts immediately.</p>
       <form id="upi-reference">
         <label class="field">After paying, enter the 12-digit UPI reference number:
           <input name="reference" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" value="${escape(upi.reference || '')}" placeholder="e.g. 328901234567" required>
         </label>
-        <button class="secondary wide">Share payment reference →</button>
+        <button class="primary wide">Share payment reference →</button>
       </form>
+    </section>`;
+  } else if (order.method === 'online' && order.status === 'awaiting_payment') {
+    payment = `<section class="panel online-pay-card">
+      <span class="online-pay-badge">Instant Verification</span>
+      <h2>Pay ${money(order.amount)} Online</h2>
+      <p class="muted">Pay securely using Google Pay, PhonePe, Paytm, Cards, or Netbanking. Once confirmed by the gateway, your document enters the print queue automatically.</p>
+      <button id="pay-online-btn" class="primary wide" style="margin-top: 12px; font-size: 1.05rem;">
+        💳 Pay ${money(order.amount)} Online Now →
+      </button>
+      <p class="inline-error" id="online-pay-error" role="alert"></p>
     </section>`;
   }
 
@@ -516,9 +549,78 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
 
   document.querySelector('.copy-upi-btn')?.addEventListener('click', e => {
     navigator.clipboard.writeText(e.target.dataset.copy);
-    e.target.textContent = 'Copied!';
-    setTimeout(() => e.target.textContent = 'Copy UPI ID', 2000);
+    e.target.textContent = '✓ UPI ID Copied!';
+    setTimeout(() => e.target.textContent = '📋 Copy UPI ID', 2000);
   });
+
+  document.querySelector('.copy-amount-btn')?.addEventListener('click', e => {
+    navigator.clipboard.writeText(e.target.dataset.copy);
+    e.target.textContent = '✓ Amount Copied!';
+    setTimeout(() => e.target.textContent = `📋 Copy ₹${e.target.dataset.copy}`, 2000);
+  });
+
+  const payOnlineBtn = document.querySelector('#pay-online-btn');
+  if (payOnlineBtn) {
+    payOnlineBtn.onclick = async () => {
+      payOnlineBtn.disabled = true;
+      payOnlineBtn.textContent = 'Loading checkout...';
+      const errorEl = document.querySelector('#online-pay-error');
+      if (errorEl) errorEl.textContent = '';
+
+      try {
+        const orderData = await api(`/api/orders/${receipt.id}/payment`, { method: 'POST', token: receipt.token });
+
+        if (!window.Razorpay) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+            script.onload = resolve;
+            script.onerror = () => reject(new Error('Failed to load online payment gateway. Please check internet connection.'));
+            document.head.appendChild(script);
+          });
+        }
+
+        const rzp = new window.Razorpay({
+          key: orderData.key,
+          amount: orderData.amount,
+          currency: orderData.currency || 'INR',
+          name: 'SmartPrint',
+          description: `Order #${receipt.id.slice(0, 8).toUpperCase()}`,
+          order_id: orderData.order_id,
+          handler: async response => {
+            payOnlineBtn.textContent = 'Verifying payment...';
+            try {
+              await api(`/api/orders/${receipt.id}/payment/verify`, {
+                method: 'POST',
+                token: receipt.token,
+                body: {
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_signature: response.razorpay_signature
+                }
+              });
+              notify('✅ Payment verified! Your document is queued for printing.');
+              refresh();
+            } catch (vErr) {
+              if (errorEl) errorEl.textContent = 'Payment received by gateway, awaiting server confirmation: ' + vErr.message;
+              refresh();
+            }
+          },
+          modal: {
+            ondismiss: () => {
+              payOnlineBtn.disabled = false;
+              payOnlineBtn.textContent = `💳 Pay ${money(order.amount)} Online Now →`;
+            }
+          }
+        });
+        rzp.open();
+      } catch (err) {
+        if (errorEl) errorEl.textContent = err.message || 'Could not initiate online payment.';
+        payOnlineBtn.disabled = false;
+        payOnlineBtn.textContent = `💳 Pay ${money(order.amount)} Online Now →`;
+      }
+    };
+  }
 
   document.querySelector('#upi-reference')?.addEventListener('submit', async event => {
     event.preventDefault();
