@@ -22,7 +22,7 @@ const getChallenge = (key) => {
 };
 
 export function authRoutes(app, db, key, config) {
-  const cookieOptions = { httpOnly: true, sameSite: 'strict', secure: config.production, path: '/', maxAge: 8 * 3600000 };
+  const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: config.production, path: '/', maxAge: 8 * 3600000 };
 
   const getRpID = (req) => {
     if (config.publicUrl) {
@@ -88,7 +88,7 @@ export function authRoutes(app, db, key, config) {
     res.json(await session(res, user, mfaSatisfied));
   });
 
-  app.post('/api/auth/logout', async (req, res) => { if (req.sessionId) await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]); res.clearCookie('sp_session', { path: '/', secure: config.production, sameSite: 'strict' }); res.json({ ok: true }); });
+  app.post('/api/auth/logout', async (req, res) => { if (req.sessionId) await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]); res.clearCookie('sp_session', { path: '/', httpOnly: true, secure: config.production, sameSite: 'lax' }); res.json({ ok: true }); });
   app.get('/api/me', (req, res) => res.json(req.user ?? null));
 
   app.get('/api/auth/mfa/status', requireSession, async (req, res) => {

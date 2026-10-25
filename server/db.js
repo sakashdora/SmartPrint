@@ -72,6 +72,14 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
               if (!err.message?.includes('permission denied') && !err.message?.includes('must be owner')) throw err;
             }
           }
+          try {
+            await client.query('SAVEPOINT sp_users_role_check');
+            await client.query("ALTER TABLE smartprint.users DROP CONSTRAINT IF EXISTS users_role_check");
+            await client.query("ALTER TABLE smartprint.users ADD CONSTRAINT users_role_check CHECK(role IN ('owner','admin','customer'))");
+            await client.query('RELEASE SAVEPOINT sp_users_role_check');
+          } catch (err) {
+            await client.query('ROLLBACK TO SAVEPOINT sp_users_role_check').catch(() => {});
+          }
           await client.query('COMMIT');
         } catch(error) {
           await client.query('ROLLBACK').catch(() => {});

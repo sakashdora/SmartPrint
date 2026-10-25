@@ -43,7 +43,7 @@ function environmentLabel() {
 }
 
 function header() {
-  const isWorkspace = me ? (me.role === 'admin' ? '#admin' : '#owner') : '#workspace';
+  const isWorkspace = me ? (me.role === 'admin' ? '#admin' : (me.role === 'customer' ? '#track' : '#owner')) : '#workspace';
   return `<header class="home-floating-header-wrapper">
     <div class="home-floating-nav">
       <div class="nav-brand-slot">${brand()}</div>
@@ -57,7 +57,7 @@ function header() {
       <div class="nav-right-actions">
         <a href="${isWorkspace}" class="nav-workspace-btn">
           ${icon('user')}
-          <span>${me ? 'Go to Workspace →' : 'Workspace sign in →'}</span>
+          <span>${me ? (me.role === 'customer' ? 'My Print Orders →' : 'Go to Workspace →') : 'Workspace sign in →'}</span>
         </a>
         <button id="home-mobile-toggle" class="home-mobile-menu-btn" aria-label="Toggle navigation">
           ${icon('menu')}
@@ -71,7 +71,7 @@ function header() {
         <a href="#how-it-works" class="mobile-nav-link">${icon('file')} How it works</a>
         <a href="#for-shop-owners" class="mobile-nav-link">${icon('shop')} For shop owners</a>
         <a href="#support" class="mobile-nav-link">${icon('support')} Support</a>
-        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? 'Workspace' : 'Workspace sign in'}</a>
+        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? (me.role === 'customer' ? 'My Print Orders' : 'Workspace') : 'Workspace sign in'}</a>
       </nav>
     </div>
   </header>${environmentLabel()}`;
@@ -91,7 +91,7 @@ function mount(content, { workspacePage = false } = {}) {
   document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => {
     await api('/api/auth/logout', { method: 'POST' });
     me = null;
-    location.hash = 'print';
+    location.hash = 'login';
     await route();
   }));
 }
@@ -337,7 +337,10 @@ async function triggerDirectPrint(id) {
 }
 
 async function owner(view) {
-  if (!me) { location.hash = 'login'; return; } if (me.role === 'admin') { location.hash = 'admin'; return; }
+  if (!me) { location.hash = 'login'; await route(); return; }
+  if (me.role === 'admin') { location.hash = 'admin'; await route(); return; }
+  if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
+  if (me.role !== 'owner') { location.hash = 'login'; await route(); return; }
   if (view === 'payments') return paymentsPage({ api, workspace, escape, notify });
   if (view === 'printers') return printersPage({ api, workspace, escape, notify });
   const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices'), api('/api/owner/qr').catch(() => null)]);
@@ -560,9 +563,11 @@ async function owner(view) {
 }
 function empty(title, body) { return `<div class="empty"><strong>${title}</strong><span class="muted">${body}</span></div>`; }
 async function admin(view) {
-  if (!me) { location.hash = 'login'; return; }
-  if (me.role !== 'admin') { location.hash = 'owner'; return; }
-  if (me.mfaRequired) { location.hash = 'security'; return; }
+  if (!me) { location.hash = 'login'; await route(); return; }
+  if (me.role === 'owner') { location.hash = 'owner'; await route(); return; }
+  if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
+  if (me.role !== 'admin') { location.hash = 'login'; await route(); return; }
+  if (me.mfaRequired) { location.hash = 'security'; await route(); return; }
   const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
   const snapshot = await load(), [shops, events, stats] = snapshot;
   let content;
@@ -675,13 +680,16 @@ function auth(register = false) {
         const result = await api('/api/auth/register', { method: 'POST', body: data });
         notify(result.message);
         location.hash = 'login';
+        await route();
       } else {
         const user = await api('/api/auth/login', {
           method: 'POST',
           body: { email: data.email, password: data.password, code: data.code || undefined }
         });
         me = user;
-        location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+        location.hash = target;
+        await route();
       }
     });
   };
@@ -702,18 +710,36 @@ function auth(register = false) {
       });
       me = user;
       notify('Signed in with Passkey!');
-      location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+      const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+      location.hash = target;
+      await route();
     });
   }
 }
 
 async function route() {
   try {
-    const view = location.hash.slice(1) || 'print';
+    const path = location.pathname;
+    const hash = location.hash.slice(1);
+    let view = hash;
+    if (!view) {
+      if (path === '/workspace' || path === '/login') {
+        if (me) {
+          view = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+          location.hash = view;
+        } else {
+          view = 'login';
+        }
+      } else {
+        view = 'print';
+      }
+    }
     if (view === 'workspace' || view === 'login' || view === 'admin-login') {
       if (me) {
         startNotificationStream();
-        location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+        location.hash = target;
+        await route();
         return;
       }
       auth(false);
@@ -729,21 +755,22 @@ async function route() {
         mount,
         escape,
         notify,
-        onVerified: user => {
+        onVerified: async user => {
           me = user;
-          location.hash = user.role === 'admin' ? 'admin' : 'owner';
-          route();
+          const target = user.role === 'admin' ? 'admin' : (user.role === 'customer' ? 'track' : 'owner');
+          location.hash = target;
+          await route();
         }
       });
     }
     if (view === 'account') {
-      if (!me) { location.hash = 'login'; return; }
+      if (!me) { location.hash = 'login'; await route(); return; }
       return accountPage({
         api,
         workspace,
         notify,
         admin: me.role === 'admin',
-        onSignedOut: () => { me = null; location.hash = 'login'; }
+        onSignedOut: async () => { me = null; location.hash = 'login'; await route(); }
       });
     }
     if (view === 'print') await customer();

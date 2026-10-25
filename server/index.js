@@ -53,7 +53,7 @@ export async function createApp({ database, seed = true } = {}) {
       const allowed = [config.origin, req.headers.host ? `https://${req.headers.host}` : null].filter(Boolean);
       if ((config.production && !req.headers.origin) || (req.headers.origin && !allowed.includes(req.headers.origin))) return next(fail(403, 'Request origin is not allowed.'));
     }
-    const sessionId = req.headers.cookie?.split('; ').find(v => v.startsWith('sp_session='))?.slice(11);
+    const sessionId = req.headers.cookie ? req.headers.cookie.split(';').map(c => c.trim()).find(v => v.startsWith('sp_session='))?.slice(11) : null;
     if (sessionId) {
       req.sessionId = digest(sessionId);
       const [user] = await db.query('SELECT u.id,u.email,u.role,u.status,s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);

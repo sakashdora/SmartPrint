@@ -484,7 +484,29 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
           try {
             const user = await api('/api/auth/mfa/confirm', { method: 'POST', body: { code: new FormData(e.target).get('code') } });
             notify('Authenticator confirmed! Two-factor authentication is active.');
-            onVerified(user);
+            if (user.recoveryCodes && user.recoveryCodes.length > 0) {
+              document.querySelector('#mfa-setup').innerHTML = `
+                <div style="background: var(--surface-hover, #f8fafc); border-radius: 12px; padding: 20px; margin-top: 14px; border: 1px solid var(--border, #e2e8f0);">
+                  <strong style="display: block; font-size: 15px; margin-bottom: 6px; color: #16a34a;">✓ Two-factor authentication is enabled</strong>
+                  <p style="font-size: 13px; margin: 0 0 12px;" class="muted">Save these single-use recovery codes in a safe place. If you ever lose your authenticator app, each code can be used once to sign in.</p>
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-family: monospace; font-size: 13px; font-weight: 700; background: #fff; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; margin-bottom: 14px;">
+                    ${user.recoveryCodes.map(code => `<div style="padding: 4px 6px; text-align: center; letter-spacing: 1px;">${escape(code)}</div>`).join('')}
+                  </div>
+                  <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button type="button" class="secondary" id="copy-recovery-codes">📋 Copy all codes</button>
+                    <button type="button" class="primary" id="mfa-proceed-btn">Continue to Workspace →</button>
+                  </div>
+                </div>
+              `;
+              document.querySelector('#copy-recovery-codes')?.addEventListener('click', () => {
+                navigator.clipboard.writeText(user.recoveryCodes.join('\n')).then(() => notify('Recovery codes copied to clipboard!'));
+              });
+              document.querySelector('#mfa-proceed-btn')?.addEventListener('click', () => {
+                onVerified(user);
+              });
+            } else {
+              onVerified(user);
+            }
           } catch(error) {
             notify(error.message);
             e.submitter.disabled = false;
@@ -500,7 +522,42 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
 
 export async function trackingPage({ api, mount, money, escape, receipt, notify, refresh }) {
   if (!receipt) {
-    mount(`<main class="welcome"><div class="welcome-icon">${icon('file')}</div><h1>Your print, from start to finish.</h1><p class="muted">Place an order to get your private receipt and follow its progress here.</p><div class="spaced"><a class="primary" href="#print">Print a file ${icon('arrow')}</a></div></main>`);
+    mount(`<main class="customer-order-shell" style="max-width: 580px; margin: 40px auto; padding: 24px;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <h1 class="customer-page-title" style="font-size: 26px; margin: 0 0 8px;">Track your print order</h1>
+        <p class="customer-page-subtitle" style="font-size: 14px; margin: 0;">Follow the live queue and status of your print job, or look up a placed order with your receipt token.</p>
+      </div>
+      <div class="panel" style="padding: 24px; border-radius: 12px; background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0);">
+        <form id="track-lookup-form">
+          <label class="field">
+            Order ID
+            <input name="orderId" placeholder="e.g. order UUID" required autocomplete="off">
+          </label>
+          <label class="field" style="margin-top: 12px;">
+            Receipt Token
+            <input name="orderToken" placeholder="Private order token" required autocomplete="off">
+          </label>
+          <button class="primary wide" style="margin-top: 16px;">Track this order →</button>
+        </form>
+      </div>
+      <div style="text-align: center; margin-top: 24px;">
+        <a class="secondary" href="#print">Place a new print order →</a>
+      </div>
+    </main>`);
+    document.querySelector('#track-lookup-form')?.addEventListener('submit', async e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const orderId = fd.get('orderId').trim();
+      const orderToken = fd.get('orderToken').trim();
+      try {
+        const order = await api(`/api/orders/${orderId}`, { token: orderToken });
+        const savedReceipt = { id: order.id, token: orderToken };
+        sessionStorage.setItem('receipt', JSON.stringify(savedReceipt));
+        trackingPage({ api, mount, money, escape, receipt: savedReceipt, notify, refresh });
+      } catch (err) {
+        notify(err.message || 'Could not find order. Please verify your Order ID and secret token.');
+      }
+    });
     return;
   }
   const order = await api(`/api/orders/${receipt.id}`, { token: receipt.token });
