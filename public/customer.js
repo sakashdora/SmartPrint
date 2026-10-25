@@ -1,7 +1,7 @@
 import { icon } from './ui.js';
 import { downloadPdf, showDocument } from './viewer.js';
 import { waitForQuote } from './preparation.js';
-import { cropImage } from './crop.js';
+import { cropImage, openDocumentEditor } from './crop.js';
 
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
@@ -293,7 +293,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   }
 
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
-  let files = [], quote = null, isCalculating = false, isOrdering = false;
+  let files = [], originalFiles = [], editedFiles = [], activeDocumentMode = 'original';
+  let quote = null, isCalculating = false, isOrdering = false;
   let revision = 0, calculateTimer, preview, pendingPreparation, sourceRevision = 0;
   let localPreviews = [];
   let preparedQuote;
@@ -389,12 +390,80 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
                     <span class="file-size-sub" id="display-file-size">0 KB</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;">
-                    <button type="button" class="secondary small btn-crop-doc" id="btn-crop-doc" style="display:none;" title="Scan & crop image">
+                    <button type="button" class="secondary small btn-crop-doc" id="btn-crop-doc" style="display:none;" title="Scan & crop document">
                       ${icon('crop')} Edit / Scan
                     </button>
                     <label class="secondary small btn-change-file" for="files">
                       ${icon('refresh')} Change
                     </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Dedicated Document Editor Section (Phase 3 & Phase 4) -->
+              <div class="document-editor-card" id="document-editor-card" hidden>
+                <div class="doc-editor-section-header">
+                  <div class="doc-editor-title-group">
+                    <span class="doc-editor-icon-badge">${icon('crop')}</span>
+                    <div>
+                      <strong class="doc-editor-title">Document Editor</strong>
+                      <span class="doc-editor-sub">Crop, correct perspective, enhance text clarity, or print original as-is.</span>
+                    </div>
+                  </div>
+                  <span class="badge active" id="doc-editor-status-badge">Original (Unedited)</span>
+                </div>
+
+                <!-- Mode Choice: Print Original vs Edit Document -->
+                <div class="doc-editor-mode-selector">
+                  <button type="button" class="doc-mode-toggle is-active" id="btn-choice-original" data-choice="original">
+                    <span class="mode-toggle-radio"></span>
+                    <div class="mode-toggle-content">
+                      <strong>Print Original</strong>
+                      <span>Print pristine file without edits (preserves vector PDF quality)</span>
+                    </div>
+                  </button>
+                  <button type="button" class="doc-mode-toggle" id="btn-choice-edit" data-choice="edit">
+                    <span class="mode-toggle-radio"></span>
+                    <div class="mode-toggle-content">
+                      <strong>Edit / Scan Document</strong>
+                      <span>Auto crop, 4-corner perspective, text enhance, redact</span>
+                    </div>
+                  </button>
+                </div>
+
+                <!-- Quick Action Toolbar -->
+                <div class="doc-editor-toolbar" id="doc-editor-toolbar">
+                  <div class="toolbar-chips-list">
+                    <button type="button" class="action-chip-btn" id="chip-doc-autocrop" title="Automatically detect corners and straighten">
+                      ✨ Auto Crop
+                    </button>
+                    <button type="button" class="action-chip-btn" id="chip-doc-corners" title="Adjust 4 independent corners">
+                      📐 4-Corner Crop
+                    </button>
+                    <button type="button" class="action-chip-btn" id="chip-doc-enhance" title="Boost text contrast and crispness">
+                      🪄 Enhance
+                    </button>
+                    <button type="button" class="action-chip-btn" id="chip-doc-blur" title="Redact private personal details">
+                      🔒 Redact / Blur
+                    </button>
+                    <button type="button" class="action-chip-btn" id="chip-doc-rotate" title="Rotate document 90°">
+                      ↻ Rotate 90°
+                    </button>
+                    <button type="button" class="action-chip-btn" id="chip-doc-filters" title="Grayscale or Clean B&W">
+                      🎨 Filters
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Active Edit Banner -->
+                <div class="doc-edit-active-banner" id="doc-edit-active-banner" hidden>
+                  <div class="active-banner-info">
+                    <span class="active-banner-pill">✓ Document Edited</span>
+                    <span class="active-banner-text" id="doc-edit-active-text">Scanner enhancements applied. Ready for printing.</span>
+                  </div>
+                  <div class="active-banner-actions">
+                    <button type="button" class="secondary small" id="btn-revert-original">Revert to Original</button>
+                    <button type="button" class="primary small" id="btn-adjust-edits">Adjust Edits</button>
                   </div>
                 </div>
               </div>
@@ -570,6 +639,10 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
             <div class="summary-spec-row">
               <span>Copies</span>
               <strong id="spec-copies">1</strong>
+            </div>
+            <div class="summary-spec-row" id="summary-doc-mode-row">
+              <span>Document</span>
+              <strong id="summary-doc-mode-text" class="badge">Original</strong>
             </div>
           </div>
 
@@ -881,42 +954,176 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       return;
     }
 
-    files = next;
+    originalFiles = [...next];
+    editedFiles = [...next];
+    activeDocumentMode = 'original';
+    files = originalFiles;
+
     dropzone.hidden = true;
     fileDisplay.hidden = false;
 
-    const names = files.map(f => f.name).join(' + ');
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    document.querySelector('#display-file-name').textContent = names;
-    document.querySelector('#display-file-size').textContent = `${formatBytes(totalSize)} · ${files.length === 1 ? '1 file' : '2 files'}`;
+    const editorCard = document.querySelector('#document-editor-card');
+    if (editorCard) editorCard.hidden = false;
+
+    updateFileMetaDisplay();
     statusBadge.textContent = `${files.length} file ready`;
     statusBadge.className = 'badge active';
 
+    function updateFileMetaDisplay() {
+      const activeList = activeDocumentMode === 'original' ? originalFiles : editedFiles;
+      const names = activeList.map(f => f.name).join(' + ');
+      const totalSize = activeList.reduce((sum, f) => sum + f.size, 0);
+      const nameEl = document.querySelector('#display-file-name');
+      const sizeEl = document.querySelector('#display-file-size');
+      if (nameEl) nameEl.textContent = names;
+      if (sizeEl) sizeEl.textContent = `${formatBytes(totalSize)} · ${activeList.length === 1 ? '1 file' : '2 files'}`;
+    }
+
+    function switchToOriginalMode() {
+      activeDocumentMode = 'original';
+      files = originalFiles;
+      document.querySelector('#btn-choice-original')?.classList.add('is-active');
+      document.querySelector('#btn-choice-edit')?.classList.remove('is-active');
+      const badge = document.querySelector('#doc-editor-status-badge');
+      if (badge) {
+        badge.textContent = 'Original (Unedited)';
+        badge.className = 'badge active';
+      }
+      const sumBadge = document.querySelector('#summary-doc-mode-text');
+      if (sumBadge) {
+        sumBadge.textContent = 'Original';
+        sumBadge.className = 'badge';
+      }
+      const banner = document.querySelector('#doc-edit-active-banner');
+      if (banner) banner.hidden = true;
+      updateFileMetaDisplay();
+      scheduleQuote();
+      void previewSources(files);
+      notify('Switched to Original document. Printing without edits.');
+    }
+
+    function switchToEditedMode() {
+      activeDocumentMode = 'edited';
+      files = editedFiles;
+      document.querySelector('#btn-choice-original')?.classList.remove('is-active');
+      document.querySelector('#btn-choice-edit')?.classList.add('is-active');
+      const badge = document.querySelector('#doc-editor-status-badge');
+      if (badge) {
+        badge.textContent = 'Scanned & Enhanced';
+        badge.className = 'badge printing';
+      }
+      const sumBadge = document.querySelector('#summary-doc-mode-text');
+      if (sumBadge) {
+        sumBadge.textContent = 'Scanned & Enhanced';
+        sumBadge.className = 'badge active';
+      }
+      const banner = document.querySelector('#doc-edit-active-banner');
+      if (banner) {
+        banner.hidden = false;
+        const bannerText = document.querySelector('#doc-edit-active-text');
+        if (bannerText && editedFiles[0]) {
+          bannerText.textContent = `Scanner enhancements applied (${editedFiles[0].name}).`;
+        }
+      }
+      updateFileMetaDisplay();
+      scheduleQuote();
+      void previewSources(files);
+      notify('Document updated with scanner enhancements.');
+    }
+
+    async function launchDocumentEditor(initialMode = 'auto') {
+      if (!files.length) return;
+      const targetFile = originalFiles[0];
+      let editableFile = targetFile;
+
+      // If PDF, render target page to high-DPI image for scanner operations
+      if (/\.pdf$/i.test(targetFile.name)) {
+        try {
+          notify('Preparing document page for editor...');
+          const pdfjs = await import('/vendor/pdfjs/pdf.mjs');
+          pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs';
+          const arrayBuf = await targetFile.arrayBuffer();
+          const task = pdfjs.getDocument({
+            data: new Uint8Array(arrayBuf),
+            isEvalSupported: false,
+            maxImageSize: 20_000_000,
+            standardFontDataUrl: '/vendor/pdfjs-fonts/',
+            wasmUrl: '/vendor/pdfjs-wasm/'
+          });
+          const pdf = await task.promise;
+          const page = await pdf.getPage(1);
+          const viewport = page.getViewport({ scale: 2.2 });
+          const offCanvas = document.createElement('canvas');
+          offCanvas.width = viewport.width;
+          offCanvas.height = viewport.height;
+          await page.render({ canvasContext: offCanvas.getContext('2d'), viewport }).promise;
+          const blob = await new Promise(res => offCanvas.toBlob(res, 'image/png'));
+          offCanvas.width = offCanvas.height = 1;
+          editableFile = new File([blob], targetFile.name.replace(/\.[^.]+$/, '') + '-page1.png', { type: 'image/png' });
+        } catch (err) {
+          notify('Unable to extract page for scanning: ' + err.message);
+          return;
+        }
+      }
+
+      try {
+        const result = await openDocumentEditor({
+          file: editableFile,
+          initialMode,
+          onPrintOriginal: () => {
+            switchToOriginalMode();
+          }
+        });
+
+        if (result && result.action === 'edited' && result.file) {
+          editedFiles = [result.file];
+          switchToEditedMode();
+        } else if (result && result.action === 'original') {
+          switchToOriginalMode();
+        }
+      } catch (err) {
+        notify(err.message);
+      }
+    }
+
+    // Connect mode selection buttons
+    const choiceOrig = document.querySelector('#btn-choice-original');
+    if (choiceOrig) choiceOrig.onclick = () => switchToOriginalMode();
+
+    const choiceEdit = document.querySelector('#btn-choice-edit');
+    if (choiceEdit) choiceEdit.onclick = () => launchDocumentEditor('auto');
+
+    // Connect quick action chips
+    const chipAuto = document.querySelector('#chip-doc-autocrop');
+    if (chipAuto) chipAuto.onclick = () => launchDocumentEditor('auto');
+
+    const chipCorners = document.querySelector('#chip-doc-corners');
+    if (chipCorners) chipCorners.onclick = () => launchDocumentEditor('perspective');
+
+    const chipEnhance = document.querySelector('#chip-doc-enhance');
+    if (chipEnhance) chipEnhance.onclick = () => launchDocumentEditor('enhance');
+
+    const chipBlur = document.querySelector('#chip-doc-blur');
+    if (chipBlur) chipBlur.onclick = () => launchDocumentEditor('blur');
+
+    const chipRotate = document.querySelector('#chip-doc-rotate');
+    if (chipRotate) chipRotate.onclick = () => launchDocumentEditor('rotate');
+
+    const chipFilters = document.querySelector('#chip-doc-filters');
+    if (chipFilters) chipFilters.onclick = () => launchDocumentEditor('filter');
+
+    // Connect active edit banner buttons
+    const revertBtn = document.querySelector('#btn-revert-original');
+    if (revertBtn) revertBtn.onclick = () => switchToOriginalMode();
+
+    const adjustBtn = document.querySelector('#btn-adjust-edits');
+    if (adjustBtn) adjustBtn.onclick = () => launchDocumentEditor('perspective');
+
     const cropBtn = document.querySelector('#btn-crop-doc');
     if (cropBtn) {
-      const hasImage = files.some(isImage);
-      cropBtn.hidden = !hasImage;
-      if (cropBtn.style) cropBtn.style.display = hasImage ? 'inline-flex' : 'none';
-      cropBtn.onclick = async () => {
-        const imgIndex = files.findIndex(isImage);
-        if (imgIndex === -1) return;
-        try {
-          const croppedFile = await cropImage(files[imgIndex]);
-          if (croppedFile) {
-            files[imgIndex] = croppedFile;
-            uploadsByFile.delete(files[imgIndex]);
-            const updatedNames = files.map(f => f.name).join(' + ');
-            const updatedTotalSize = files.reduce((sum, f) => sum + f.size, 0);
-            document.querySelector('#display-file-name').textContent = updatedNames;
-            document.querySelector('#display-file-size').textContent = `${formatBytes(updatedTotalSize)} · ${files.length === 1 ? '1 file' : '2 files'}`;
-            notify('Document updated with scanner enhancements.');
-            scheduleQuote();
-            void previewSources(files);
-          }
-        } catch (err) {
-          notify(err.message);
-        }
-      };
+      cropBtn.hidden = false;
+      if (cropBtn.style) cropBtn.style.display = 'inline-flex';
+      cropBtn.onclick = () => launchDocumentEditor('auto');
     }
 
     if (files.length === 2) {
