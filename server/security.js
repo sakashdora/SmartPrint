@@ -1,17 +1,28 @@
 import { randomBytes, scrypt, timingSafeEqual, createHash, createHmac, createCipheriv, createDecipheriv } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { promisify } from 'node:util';
+import { hash as argonHash, verify as argonVerify, Algorithm } from '@node-rs/argon2';
 const derive = promisify(scrypt);
 
 export const token = () => randomBytes(32).toString('hex');
 export const digest = value => createHash('sha256').update(String(value)).digest('hex');
 export async function hashPassword(password) {
-  const salt = randomBytes(16).toString('hex');
-  const key = await derive(password, salt, 64, { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
-  return `scrypt$32768$8$3$${salt}$${key.toString('hex')}`;
+  return await argonHash(password, {
+    algorithm: Algorithm.Argon2id,
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 4
+  });
 }
 export async function checkPassword(password, hash) {
-  if (typeof hash !== 'string') return false;
+  if (typeof hash !== 'string' || typeof password !== 'string') return false;
+  if (hash.startsWith('$argon2')) {
+    try {
+      return await argonVerify(hash, password);
+    } catch {
+      return false;
+    }
+  }
   let salt, expected, options;
   if (hash.startsWith('scrypt$')) {
     const parts = hash.split('$');

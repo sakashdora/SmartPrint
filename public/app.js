@@ -311,7 +311,9 @@ async function owner(view) {
 }
 function empty(title, body) { return `<div class="empty"><strong>${title}</strong><span class="muted">${body}</span></div>`; }
 async function admin(view) {
-  if (!me) { location.hash = 'admin-login'; return; } if (me.role !== 'admin') { location.hash = 'owner'; return; }
+  if (!me) { location.hash = 'login'; return; }
+  if (me.role !== 'admin') { location.hash = 'owner'; return; }
+  if (me.mfaRequired) { location.hash = 'security'; return; }
   const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit')]);
   const snapshot = await load(), [shops, events] = snapshot;
   let content;
@@ -324,12 +326,111 @@ async function admin(view) {
   document.querySelectorAll('[data-shop]').forEach(button => button.onclick = () => busy(button, async () => { if (button.dataset.status === 'suspended' && !confirm('Suspend this shop? It will no longer accept new orders.')) return; await api(`/api/admin/shops/${button.dataset.shop}/status`, { method: 'POST', body: { status: button.dataset.status } }); notify('Shop status updated.'); await admin(view); }));
   watchUpdates(load, snapshot, () => admin(view));
 }
-function auth(register, adminLogin = false) {
-  mount(`<main class="auth panel"><span class="eyebrow">${register ? 'JOIN SMARTPRINT' : 'WELCOME BACK'}</span><h1>${register ? 'Register your shop' : adminLogin ? 'Administrator sign in' : 'Shop owner sign in'}</h1><p class="muted">${register ? 'Register your shop. Set your prices. Start printing after approval.' : adminLogin ? 'For existing platform administrators. Admin accounts are provisioned privately.' : 'Sign in to manage your shop, payments and printers.'}</p><form id="auth-form">${register ? '<label class="field">Shop name<input name="name" required maxlength="100" autocomplete="organization"></label><label class="field">Shop location<input name="location" required maxlength="200" autocomplete="street-address"></label>' : ''}<label class="field">Email<input name="email" type="email" required autocomplete="username"></label><label class="field">Password<input name="password" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}"></label>${!register ? '<label class="field">Authenticator code (if enabled)<input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>' : ''}<button class="primary wide">${register ? 'Register shop →' : 'Sign in →'}</button></form>${!register && !adminLogin && health.demo ? '<div class="notice-inline">Local preview accounts only. Choose a workspace to explore.<div class="actions"><button class="secondary" data-demo="owner">Shop owner</button><a class="secondary" href="#admin-login">Platform admin</a></div></div>' : ''}<p class="foot" ${adminLogin ? 'hidden' : ''}><a href="${register ? '#login' : '#register'}">${register ? 'Already registered? Sign in' : 'New here? Register your shop'}</a></p></main>`);
-  document.querySelector('#auth-form').onsubmit = event => { event.preventDefault(); busy(event.submitter, async () => { const data = Object.fromEntries(new FormData(event.target)); if (!register) data.role = adminLogin ? 'admin' : 'owner'; if (register) { const result = await api('/api/auth/register', { method: 'POST', body: data }); notify(result.message); location.hash = 'login'; } else { me = await api('/api/auth/login', { method: 'POST', body: data }); location.hash = me.mfaRequired ? 'security' : me.role === 'admin' ? 'admin' : 'owner'; } }); };
-  document.querySelectorAll('[data-demo]').forEach(button => button.onclick = () => { document.querySelector('[name=email]').value = `${button.dataset.demo}@smartprint.local`; document.querySelector('[name=password]').value = 'SmartPrintDemo!2026'; document.querySelector('#auth-form').requestSubmit(document.querySelector('#auth-form button')); });
+
+function auth(register = false) {
+  mount(`<main class="auth panel">
+    <span class="eyebrow">${register ? 'JOIN SMARTPRINT' : 'WELCOME BACK'}</span>
+    <h1>${register ? 'Register your shop' : 'Sign in'}</h1>
+    <p class="muted">${register ? 'Register your shop. Set your prices. Start printing after admin approval.' : 'Sign in to access your shop workspace or administration platform.'}</p>
+    <form id="auth-form">
+      ${register ? '<label class="field">Shop name<input name="name" required maxlength="100" autocomplete="organization"></label><label class="field">Shop location<input name="location" required maxlength="200" autocomplete="street-address"></label>' : ''}
+      <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
+      <label class="field">Password<input name="password" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}"></label>
+      ${!register ? '<label class="field">Authenticator code (if enabled)<input name="code" inputmode="numeric" maxlength="19" placeholder="6-digit code or recovery code" autocomplete="one-time-code"></label>' : ''}
+      <button class="primary wide">${register ? 'Register shop →' : 'Sign in →'}</button>
+      ${!register ? '<button type="button" class="secondary wide" id="passkey-login" style="margin-top: 10px;">🔑 Sign in with Passkey</button>' : ''}
+    </form>
+    ${!register && health?.demo ? '<div class="notice-inline">Local demo environment active. Sign in with your registered account credentials.</div>' : ''}
+    <p class="foot"><a href="${register ? '#login' : '#register'}">${register ? 'Already registered? Sign in' : 'New here? Register your shop'}</a></p>
+  </main>`);
+
+  document.querySelector('#auth-form').onsubmit = event => {
+    event.preventDefault();
+    busy(event.submitter, async () => {
+      const data = Object.fromEntries(new FormData(event.target));
+      if (register) {
+        const result = await api('/api/auth/register', { method: 'POST', body: data });
+        notify(result.message);
+        location.hash = 'login';
+      } else {
+        const user = await api('/api/auth/login', {
+          method: 'POST',
+          body: { email: data.email, password: data.password, code: data.code || undefined }
+        });
+        me = user;
+        location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+      }
+    });
+  };
+
+  const passkeyBtn = document.querySelector('#passkey-login');
+  if (passkeyBtn) {
+    passkeyBtn.onclick = () => busy(passkeyBtn, async () => {
+      const email = document.querySelector('[name=email]').value.trim();
+      const browser = window.SimpleWebAuthnBrowser;
+      if (!browser || !browser.browserSupportsWebAuthn()) {
+        throw new Error('Passkeys/WebAuthn is not supported in this browser.');
+      }
+      const options = await api('/api/auth/webauthn/auth-options', { method: 'POST', body: { email: email || undefined } });
+      const assertion = await browser.startAuthentication({ optionsJSON: options });
+      const user = await api('/api/auth/webauthn/auth-verify', {
+        method: 'POST',
+        body: { response: assertion, challengeKey: options.challengeKey }
+      });
+      me = user;
+      notify('Signed in with Passkey!');
+      location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+    });
+  }
 }
-async function route() { try { const view = location.hash.slice(1) || 'print'; if (me?.mfaRequired || view === 'security') return securityPage({ api, mount, escape, notify, onVerified: user => { me = user; location.hash = user.role === 'admin' ? 'admin' : 'owner'; route(); } }); if (view === 'account') { if (!me) { location.hash = 'login'; return; } return accountPage({ api, workspace, notify, admin: me.role === 'admin', onSignedOut: () => { me = null; location.hash = 'login'; } }); } if (view === 'print') await customer(); else if (view === 'track') await tracking(); else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view); else if (['admin', 'shops', 'audit'].includes(view)) await admin(view); else auth(view === 'register', view === 'admin-login'); } catch (error) { mount(`<main class="container"><section class="panel"><h1>We couldn’t open this page.</h1><p class="error">${escape(error.message)}</p><a href="#login">Sign in</a> · <a href="#print">Try your shop again</a></section></main>`); } }
+
+async function route() {
+  try {
+    const view = location.hash.slice(1) || 'print';
+    if (view === 'login' || view === 'admin-login') {
+      if (me) {
+        location.hash = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : 'owner');
+        return;
+      }
+      auth(false);
+      return;
+    }
+    if (view === 'register') {
+      auth(true);
+      return;
+    }
+    if (me?.mfaRequired || view === 'security') {
+      return securityPage({
+        api,
+        mount,
+        escape,
+        notify,
+        onVerified: user => {
+          me = user;
+          location.hash = user.role === 'admin' ? 'admin' : 'owner';
+          route();
+        }
+      });
+    }
+    if (view === 'account') {
+      if (!me) { location.hash = 'login'; return; }
+      return accountPage({
+        api,
+        workspace,
+        notify,
+        admin: me.role === 'admin',
+        onSignedOut: () => { me = null; location.hash = 'login'; }
+      });
+    }
+    if (view === 'print') await customer();
+    else if (view === 'track') await tracking();
+    else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view);
+    else if (['admin', 'shops', 'audit'].includes(view)) await admin(view);
+    else auth(false);
+  } catch (error) {
+    mount(`<main class="container"><section class="panel"><h1>We couldn’t open this page.</h1><p class="error">${escape(error.message)}</p><a href="#login">Sign in</a> · <a href="#print">Try your shop again</a></section></main>`);
+  }
+}
 window.addEventListener('hashchange', async () => { stopUpdates(); await route(); window.scrollTo(0, 0); });
 try { [health, me] = await Promise.all([api('/api/health'), api('/api/me')]); await route(); } catch (error) { app.textContent = `Unable to connect: ${error.message}`; }
 

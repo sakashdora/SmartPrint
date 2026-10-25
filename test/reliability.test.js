@@ -45,7 +45,7 @@ test('production sessions survive app instances, require MFA, enforce origin and
   Object.assign(process.env, { NODE_ENV: 'production', ENFORCE_MFA: 'true', DATABASE_URL: 'postgresql://fixture:fixture@localhost/fixture?sslmode=verify-full', PUBLIC_BASE_URL: 'https://smartprint.example', FILE_ENCRYPTION_KEY: 'a'.repeat(64), CRON_SECRET: 'b'.repeat(32) });
   const db = await openDatabase({ url: null, path: ':memory:' }); await db.migrate();
   const password = 'Example-long-password!2026', hash = await hashPassword(password);
-  assert.ok(hash.startsWith('scrypt$')); assert.equal(await checkPassword('wrong', hash), false); assert.equal(await checkPassword(password, 'invalid'), false);
+  assert.ok(hash.startsWith('$argon2') || hash.startsWith('scrypt$')); assert.equal(await checkPassword('wrong', hash), false); assert.equal(await checkPassword(password, 'invalid'), false);
   await db.query("INSERT INTO users (id,email,password,role) VALUES ('admin','admin@test.invalid',$1,'admin')", [hash]);
   const first = await createApp({ database: db, seed: false }), second = await createApp({ database: { ...db, close: async () => {} }, seed: false });
   const a = await listen(first), b = await listen(second);
