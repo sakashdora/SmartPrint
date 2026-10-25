@@ -8,23 +8,23 @@ function actions(order, money) {
   const button = (action, label, primary = false, extraClass = '') => `<button class="${primary ? 'primary' : 'secondary'} ${extraClass}" data-action="${action}" data-id="${order.id}">${label}</button>`;
   const items = [];
   if (order.status === 'awaiting_payment') {
-    if (order.method === 'cash') items.push(button('cash', `Collect ${money(order.amount)}`, true));
-    if (order.method === 'upi') items.push(button('upi-confirm', 'Verify UPI', true));
+    if (order.method === 'cash') items.push(button('cash', `💵 Collect ${money(order.amount)}`, true, 'btn-collect-cash'));
+    if (order.method === 'upi') items.push(button('upi-confirm', '📱 Verify UPI', true, 'btn-verify-upi'));
   }
   if (order.status === 'queued') {
-    items.push(button('print-direct', '🖨️ Print Now', true), button('start', 'Print manually'));
+    items.push(button('print-direct', '🖨️ Print Now', true, 'btn-print-now'), button('start', 'Print manually', false, 'btn-manual-print'));
     if (!order.priority) items.push(button('priority', '⚡ Rush Job', false, 'rush-btn'));
   }
   if (['printing', 'awaiting_confirmation', 'needs_review'].includes(order.status)) {
-    items.push(button('complete', 'Confirm output', true));
-    if (order.status === 'printing' && !order.automatic) items.push(button('document', 'Download for print'));
-    items.push(button('resolve-failed', 'Print failed / stopped'));
+    items.push(button('complete', '✓ Confirm Output', true, 'btn-confirm-output'));
+    if (order.status === 'printing' && !order.automatic) items.push(button('document', 'Download PDF', false, 'btn-dl'));
+    items.push(button('resolve-failed', 'Print failed / stop', false, 'btn-failed'));
   }
   if (order.status === 'failed') {
-    items.push(button('retry', '🔄 Retry Print', true));
+    items.push(button('retry', '🔄 Retry Print', true, 'btn-retry'));
   }
-  if (['awaiting_payment', 'queued', 'failed', 'expired', 'payment_review'].includes(order.status)) items.push(button('cancel', 'Cancel'));
-  if (order.payment === 'paid' && ['cancelled', 'failed', 'expired', 'payment_review'].includes(order.status)) items.push(button('refund', 'Record refund'));
+  if (['awaiting_payment', 'queued', 'failed', 'expired', 'payment_review'].includes(order.status)) items.push(button('cancel', 'Cancel', false, 'btn-cancel'));
+  if (order.payment === 'paid' && ['cancelled', 'failed', 'expired', 'payment_review'].includes(order.status)) items.push(button('refund', 'Record refund', false, 'btn-refund'));
   return items.length ? `<div class="actions">${items.join('')}</div>` : `<span class="muted">${order.deleted_at ? 'File deleted' : 'Waiting for update'}</span>`;
 }
 

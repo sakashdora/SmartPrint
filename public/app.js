@@ -180,7 +180,6 @@ async function owner(view) {
     }
     if (action === 'document') { const blob = await downloadPdf(`/api/owner/orders/${id}/document`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `smartprint-${id.slice(0,8)}.pdf`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 300000); return; }
     if (action === 'complete' && !confirm('Have you checked that all pages printed successfully? This permanently deletes the live file.')) return;
-    if (action === 'cash' && !confirm('Confirm you have received the exact cash amount shown for this order.')) return;
     if (action === 'resolve-failed' && !confirm('Check the printed pages and cancel any remaining job in the Windows print queue first. Confirm this order was not fulfilled and printing has stopped.')) return;
     let reference;
     if (action === 'upi-confirm') { reference = prompt('Check the credit in your OWN UPI or bank app, then enter its 12-digit reference:'); if (!reference) return; }
