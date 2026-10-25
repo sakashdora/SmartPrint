@@ -218,15 +218,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     let secret = token();
     if (!device) {
       const id = randomUUID();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat,status_note,is_paused) VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,0)', [
-        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now(), 'Ready'
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
+        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now()
       ]);
       device = { id, name: printerName, active: 1 };
     } else {
-      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3, status_note=$4, is_paused=0 WHERE id=$5', [printerName, digest(secret), now(), 'Ready', device.id]);
+      await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
       device.name = printerName;
       device.active = 1;
     }
+    deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
 
     const serverUrl = process.env.PUBLIC_BASE_URL || (req.headers.host ? `https://${req.headers.host}` : `http://localhost:${process.env.PORT || 3000}`);
 
@@ -305,13 +306,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,status_note,is_paused FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(d => {
+      const meta = deviceMetadata.get(d.id) || {};
       const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 90000));
       return {
         ...d,
-        is_paused: d.is_paused ?? 0,
-        status_note: d.status_note ?? (d.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
+        is_paused: meta.is_paused ?? 0,
+        status_note: meta.status_note ?? (meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
       };
     }));
   });
@@ -320,23 +322,23 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const shop = await ownerShop(req), name = String(req.body.name || '').trim();
     if (name.length < 2 || name.length > 100) throw fail(400, 'Enter a printer name.');
     const id = randomUUID(), secret = token();
-    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,status_note,is_paused) VALUES ($1,$2,$3,$4,$5,$6,1,$7,0)', [
-      id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0, 'Ready'
+    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
+      id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0
     ]);
+    deviceMetadata.set(id, { is_paused: 0, status_note: 'Ready' });
     await audit(db, req.user.id, 'device.paired', id);
     res.status(201).json({ id, token: secret });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT id, is_paused FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    const [device] = await db.query('SELECT id FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Device not found.');
-    const nextState = device.is_paused ? 0 : 1;
-    await db.query('UPDATE devices SET is_paused=$1, status_note=$2 WHERE id=$3', [
-      nextState,
-      nextState ? 'Paused by owner' : 'Ready',
-      device.id
-    ]);
+    const meta = deviceMetadata.get(device.id) || { is_paused: 0 };
+    const nextState = meta.is_paused ? 0 : 1;
+    meta.is_paused = nextState;
+    meta.status_note = nextState ? 'Paused by owner' : 'Ready';
+    deviceMetadata.set(device.id, meta);
     await audit(db, req.user.id, nextState ? 'device.paused' : 'device.resumed', device.id);
     res.json({ ok: true, is_paused: nextState });
   });
@@ -390,12 +392,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
       const opts = typeof order.options === 'string' ? JSON.parse(order.options) : (order.options || {});
       opts.priority = Math.max((opts.priority || 0), 5);
-      const nextAttempt = (order.attempts || 1) + 1;
+      const nextAttempt = (opts.attempt || 1) + 1;
       opts.attempt = nextAttempt;
 
       await tx.query(
-        "UPDATE orders SET status='queued', options=$1, attempts=$2 WHERE id=$3",
-        [JSON.stringify(opts), nextAttempt, order.id]
+        "UPDATE orders SET status='queued', options=$1 WHERE id=$2",
+        [JSON.stringify(opts), order.id]
       );
 
       try {
@@ -499,8 +501,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const result = await db.transaction(async tx => {
       // Serialize claims from duplicated connector processes using the same credential.
       await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
-      const [devRow] = await tx.query('SELECT is_paused FROM devices WHERE id=$1', [req.device.id]);
-      if (devRow?.is_paused) return null;
+      if (deviceMetadata.get(req.device.id)?.is_paused) return null;
       const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]);
       if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
@@ -524,15 +525,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         }
       });
       if (!order) return null;
-      const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id, attempts", [order.id, now()]);
+      const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
       if (!changed.length) return null;
       await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
       await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires,state) VALUES ($1,$2,$3,$4,'claimed')", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);
+      const parsedOptions = typeof order.options === 'string' ? JSON.parse(order.options) : (order.options || {});
       return {
         id: order.id,
         token: leaseToken,
-        attempt: changed[0].attempts || 1,
-        options: typeof order.options === 'string' ? JSON.parse(order.options) : order.options
+        attempt: parsedOptions.attempt || 1,
+        options: parsedOptions
       };
     });
     res.json(result);

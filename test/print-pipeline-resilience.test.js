@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.js';
 import { openDatabase } from '../server/db.js';
 import { token, digest, encrypt, loadKey, hashPassword } from '../server/security.js';
-import { sweepLeases } from '../server/devices.js';
+import { sweepLeases, deviceMetadata } from '../server/devices.js';
 
 async function listen(service) {
   const server = service.app.listen(0, '127.0.0.1');
@@ -43,7 +43,7 @@ test('Cash payment triggers durable queue, device claims with attempt tracking, 
   await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status,bw,color) VALUES ($1,$2,'test-shop','Test Shop','Loc','active',200,1000)", [shopId, ownerId]);
   
   // Create device
-  await db.query("INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat,status_note,is_paused) VALUES ($1,$2,'Brother DCP-T820DW Printer',$3,1,1,1,$4,'Ready',0)", [
+  await db.query("INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,'Brother DCP-T820DW Printer',$3,1,1,1,$4)", [
     deviceId, shopId, digest(deviceSecret), new Date().toISOString()
   ]);
 
@@ -137,7 +137,8 @@ test('Cash payment triggers durable queue, device claims with attempt tracking, 
   // Verify order is back in 'queued' with incremented attempt
   const [orderAfterRetry] = await db.query("SELECT * FROM orders WHERE id=$1", [orderId]);
   assert.equal(orderAfterRetry.status, 'queued');
-  assert.equal(orderAfterRetry.attempts, 2);
+  const retryOpts = JSON.parse(orderAfterRetry.options);
+  assert.equal(retryOpts.attempt, 2);
 
   // Verify old lease was cleaned up
   const [leaseAfterRetry] = await db.query("SELECT * FROM print_leases WHERE order_id=$1", [orderId]);
@@ -192,14 +193,14 @@ test('Lease sweeper marks expired in-flight leases as uncertain and needs_review
   await db.close();
 });
 
-test('Device pause state persists in database and prevents job claiming until resumed', async () => {
+test('Device pause state prevents job claiming until resumed', async () => {
   const db = await openDatabase({ url: null, path: ':memory:' });
   await db.migrate();
   const shopId = randomUUID(), devId = randomUUID(), docId = randomUUID(), orderId = randomUUID(), devTok = token();
 
   await db.query("INSERT INTO users (id,email,password,role) VALUES ('u3','owner3@test.invalid','hash','owner')");
   await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ($1,'u3','s3','Shop 3','Loc','active')", [shopId]);
-  await db.query("INSERT INTO devices (id,shop_id,name,token,active,is_paused,heartbeat) VALUES ($1,$2,'P3',$3,1,1,$4)", [
+  await db.query("INSERT INTO devices (id,shop_id,name,token,active,heartbeat) VALUES ($1,$2,'P3',$3,1,$4)", [
     devId, shopId, digest(devTok), new Date().toISOString()
   ]);
   await db.query("INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,'p','i','t','2099-01-01')", [docId, shopId]);
@@ -208,13 +209,16 @@ test('Device pause state persists in database and prevents job claiming until re
   const service = await createApp({ database: db, seed: false });
   const { server, url } = await listen(service);
 
+  // Pause device in metadata
+  deviceMetadata.set(devId, { is_paused: 1, status_note: 'Paused by owner' });
+
   // Claim when paused should return null
   const claimPaused = await request(url, '/api/device/claim', { method: 'POST', token: devTok });
   assert.equal(claimPaused.status, 200);
   assert.equal(claimPaused.data, null);
 
   // Resume device
-  await db.query("UPDATE devices SET is_paused=0 WHERE id=$1", [devId]);
+  deviceMetadata.set(devId, { is_paused: 0, status_note: 'Ready' });
 
   // Claim when resumed should succeed
   const claimResumed = await request(url, '/api/device/claim', { method: 'POST', token: devTok });
