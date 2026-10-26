@@ -27,6 +27,12 @@ async function api(path, { method = 'GET', body, token, binary, snapshot, header
       errorDetails = await response.json();
       errorMsg = errorDetails.error || errorDetails.message || errorMsg;
     } catch {}
+    if (response.status === 401 && !path.startsWith('/api/me') && !path.startsWith('/api/auth/login')) {
+      me = null;
+      if (!location.hash.includes('login') && !location.hash.includes('print')) {
+        location.hash = 'login';
+      }
+    }
     throw Object.assign(new Error(errorMsg), { status: response.status, details: errorDetails });
   }
   return snapshot ? { rows: await response.json(), until: response.headers.get('X-Snapshot-At') } : binary ? response.blob() : response.json();
@@ -380,31 +386,48 @@ async function owner(view) {
     return printersPage({ api, workspace, escape, notify });
   }
 
-  const { ownerDashboard } = await import('./dashboards.js');
+  const { ownerDashboard } = await import('./dashboards.js?v=1.0.4');
   let store, orders, transactions = [], summary, devices = [], qr;
 
+  const load = () => {
+    if (view === 'settings') {
+      return Promise.all([
+        api('/api/owner/shop'),
+        cachedQrData ? Promise.resolve(cachedQrData) : api('/api/owner/qr').catch(() => null)
+      ]);
+    }
+    if (view === 'transactions') {
+      return Promise.all([
+        api('/api/owner/shop'),
+        api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`),
+        api('/api/owner/summary')
+      ]);
+    }
+    return Promise.all([
+      api('/api/owner/shop'),
+      api('/api/owner/orders'),
+      Promise.resolve([]),
+      api('/api/owner/summary'),
+      api('/api/owner/devices'),
+      cachedQrData ? Promise.resolve(cachedQrData) : api('/api/owner/qr').catch(() => null)
+    ]);
+  };
+
+  let snapshot;
   if (view === 'settings') {
     store = cachedOwnerSnapshot ? cachedOwnerSnapshot[0] : await api('/api/owner/shop');
     qr = cachedQrData || (cachedQrData = await api('/api/owner/qr'));
+    snapshot = [store, qr];
   } else if (view === 'transactions') {
-    [store, transactions, summary] = await Promise.all([
-      cachedOwnerSnapshot ? cachedOwnerSnapshot[0] : api('/api/owner/shop'),
-      api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`),
-      cachedOwnerSnapshot ? cachedOwnerSnapshot[3] : api('/api/owner/summary')
-    ]);
+    snapshot = await load();
+    [store, transactions, summary] = snapshot;
   } else {
     // Overview or Queue
     if (cachedOwnerSnapshot && (Date.now() - cachedOwnerTimestamp < 4000)) {
-      [store, orders, transactions, summary, devices, qr] = cachedOwnerSnapshot;
+      snapshot = cachedOwnerSnapshot;
+      [store, orders, transactions, summary, devices, qr] = snapshot;
     } else {
-      const snapshot = await Promise.all([
-        api('/api/owner/shop'),
-        api('/api/owner/orders'),
-        Promise.resolve([]),
-        api('/api/owner/summary'),
-        api('/api/owner/devices'),
-        cachedQrData ? Promise.resolve(cachedQrData) : api('/api/owner/qr').catch(() => null)
-      ]);
+      snapshot = await load();
       [store, orders, transactions, summary, devices, qr] = snapshot;
       cachedOwnerSnapshot = snapshot;
       cachedOwnerTimestamp = Date.now();
@@ -547,7 +570,7 @@ async function owner(view) {
     watchUpdates(load, snapshot, (nextSnapshot) => {
       if (nextSnapshot && Array.isArray(nextSnapshot[1])) {
         const nextOrders = nextSnapshot[1];
-        const prevQueued = orders.filter(o => o.status === 'queued').length;
+        const prevQueued = (orders || []).filter(o => o.status === 'queued').length;
         const nextQueued = nextOrders.filter(o => o.status === 'queued').length;
         if (nextQueued > prevQueued) {
           try {
@@ -635,7 +658,7 @@ async function admin(view) {
   if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
   if (me.role !== 'admin') { location.hash = 'login'; await route(); return; }
   if (me.mfaRequired) { location.hash = 'security'; await route(); return; }
-  const { adminDashboard } = await import('./dashboards.js');
+  const { adminDashboard } = await import('./dashboards.js?v=1.0.4');
   const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
   const snapshot = await load(), [shops, events, stats] = snapshot;
   let content;
@@ -646,7 +669,7 @@ async function admin(view) {
   } else if (view === 'settings-admin') {
     content = `<div class="workhead"><div><h1>Platform settings</h1><p class="muted">Global configuration, security policies, and administrator controls.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><h2>Security & Compliance</h2><p class="muted">MFA enforcement and role-based policies are active.</p><div class="notice-inline">Administrator accounts are protected with mandatory WebAuthn passkey or TOTP MFA. Public registration for administrators is disabled.</div><div style="margin-top: 16px;"><a href="#account" class="primary">Manage Account Security →</a></div></section>`;
   } else {
-    content = adminDashboard({ view, shops, events, stats, filter: shopFilter, escape, badge, time, empty });
+    content = adminDashboard({ view, shops, events, stats, filter: shopFilter, escape, badge, time, empty, money });
   }
   workspace(content, view, true);
   
@@ -731,7 +754,12 @@ function auth(register = false) {
     <form id="auth-form">
       ${register ? '<label class="field">Shop name<input name="name" required maxlength="100" autocomplete="organization"></label><label class="field">Shop location<input name="location" required maxlength="200" autocomplete="street-address"></label>' : ''}
       <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
-      <label class="field">Password<input name="password" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}"></label>
+      <label class="field">Password
+        <div class="password-input-wrapper">
+          <input name="password" id="auth-password-input" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}">
+          <button type="button" class="btn-toggle-password" id="auth-toggle-pass" aria-label="Show password" title="Show password">${icon('eye')}</button>
+        </div>
+      </label>
       ${!register ? '<div id="auth-totp-field" hidden><label class="field">6-digit Authenticator code<input name="code" inputmode="numeric" maxlength="19" placeholder="Enter 6-digit code or recovery code" autocomplete="one-time-code"></label></div>' : ''}
       <button class="primary wide" id="auth-submit-btn">${register ? 'Register shop →' : 'Sign in →'}</button>
       ${!register ? '<button type="button" class="secondary wide" id="passkey-login" style="margin-top: 10px;">🔑 Sign in with Passkey</button>' : ''}
@@ -739,6 +767,18 @@ function auth(register = false) {
     ${!register && health?.demo ? '<div class="notice-inline">Local demo environment active. Sign in with your registered account credentials.</div>' : ''}
     <p class="foot"><a href="${register ? '#login' : '#register'}">${register ? 'Already registered? Sign in' : 'New here? Register your shop'}</a></p>
   </main>`);
+
+  const togglePassBtn = document.querySelector('#auth-toggle-pass');
+  const passInput = document.querySelector('#auth-password-input');
+  if (togglePassBtn && passInput) {
+    togglePassBtn.onclick = () => {
+      const isPass = passInput.type === 'password';
+      passInput.type = isPass ? 'text' : 'password';
+      togglePassBtn.innerHTML = icon(isPass ? 'eye-off' : 'eye');
+      togglePassBtn.setAttribute('title', isPass ? 'Hide password' : 'Show password');
+      togglePassBtn.setAttribute('aria-label', isPass ? 'Hide password' : 'Show password');
+    };
+  }
 
   document.querySelector('#auth-form').onsubmit = event => {
     event.preventDefault();
@@ -863,6 +903,7 @@ async function route() {
         api,
         workspace,
         notify,
+        escape,
         admin: me.role === 'admin',
         onSignedOut: async () => { me = null; location.hash = 'login'; await route(); }
       });

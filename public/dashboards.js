@@ -405,27 +405,30 @@ function formatActivityTime(d) {
 }
 
 function renderDonutChart(activeCount, pendingCount, suspendedCount) {
-  const total = activeCount + pendingCount + suspendedCount;
-  const radius = 44;
-  const circumference = 2 * Math.PI * radius; // ~276.46
-  
+  const a = Number(activeCount) || 0;
+  const p = Number(pendingCount) || 0;
+  const s = Number(suspendedCount) || 0;
+  const total = a + p + s;
+  const radius = 38;
+  const circumference = 2 * Math.PI * radius; // ~238.76
+
   if (total === 0) {
     return `
       <div class="donut-chart-container">
-        <svg class="donut-chart-svg" viewBox="0 0 120 120" width="120" height="120">
-          <circle cx="60" cy="60" r="${radius}" fill="none" stroke="#F1F0EC" stroke-width="12" />
+        <svg class="donut-chart-svg" viewBox="0 0 100 100" width="100" height="100" aria-label="No shops registered">
+          <circle cx="50" cy="50" r="${radius}" fill="none" stroke="#E2E8F0" stroke-width="10" />
         </svg>
         <div class="donut-chart-center">
           <strong class="donut-center-number">0</strong>
-          <span class="donut-center-label">Total shops</span>
+          <span class="donut-center-label">Shops</span>
         </div>
       </div>
     `;
   }
 
-  const activeStroke = (activeCount / total) * circumference;
-  const pendingStroke = (pendingCount / total) * circumference;
-  const suspendedStroke = (suspendedCount / total) * circumference;
+  const activeStroke = (a / total) * circumference;
+  const pendingStroke = (p / total) * circumference;
+  const suspendedStroke = (s / total) * circumference;
 
   let offset = 0;
   const activeOffset = -offset;
@@ -436,11 +439,11 @@ function renderDonutChart(activeCount, pendingCount, suspendedCount) {
 
   return `
     <div class="donut-chart-container">
-      <svg class="donut-chart-svg" viewBox="0 0 120 120" width="120" height="120">
-        <circle cx="60" cy="60" r="${radius}" fill="none" stroke="#F1F0EC" stroke-width="12" />
-        ${activeStroke > 0 ? `<circle cx="60" cy="60" r="${radius}" fill="none" stroke="#059669" stroke-width="12" stroke-dasharray="${activeStroke} ${circumference - activeStroke}" stroke-dashoffset="${activeOffset}" transform="rotate(-90 60 60)" />` : ''}
-        ${pendingStroke > 0 ? `<circle cx="60" cy="60" r="${radius}" fill="none" stroke="#D97706" stroke-width="12" stroke-dasharray="${pendingStroke} ${circumference - pendingStroke}" stroke-dashoffset="${pendingOffset}" transform="rotate(-90 60 60)" />` : ''}
-        ${suspendedStroke > 0 ? `<circle cx="60" cy="60" r="${radius}" fill="none" stroke="#DC2626" stroke-width="12" stroke-dasharray="${suspendedStroke} ${circumference - suspendedStroke}" stroke-dashoffset="${suspendedOffset}" transform="rotate(-90 60 60)" />` : ''}
+      <svg class="donut-chart-svg" viewBox="0 0 100 100" width="100" height="100" aria-label="Shop access breakdown: ${a} active, ${p} pending, ${s} suspended">
+        <circle cx="50" cy="50" r="${radius}" fill="none" stroke="#F1F5F9" stroke-width="10" />
+        ${activeStroke > 0 ? `<circle cx="50" cy="50" r="${radius}" fill="none" stroke="#16a34a" stroke-width="10" stroke-dasharray="${activeStroke} ${circumference - activeStroke}" stroke-dashoffset="${activeOffset}" transform="rotate(-90 50 50)" />` : ''}
+        ${pendingStroke > 0 ? `<circle cx="50" cy="50" r="${radius}" fill="none" stroke="#d97706" stroke-width="10" stroke-dasharray="${pendingStroke} ${circumference - pendingStroke}" stroke-dashoffset="${pendingOffset}" transform="rotate(-90 50 50)" />` : ''}
+        ${suspendedStroke > 0 ? `<circle cx="50" cy="50" r="${radius}" fill="none" stroke="#dc2626" stroke-width="10" stroke-dasharray="${suspendedStroke} ${circumference - suspendedStroke}" stroke-dashoffset="${suspendedOffset}" transform="rotate(-90 50 50)" />` : ''}
       </svg>
       <div class="donut-chart-center">
         <strong class="donut-center-number">${total}</strong>
@@ -450,7 +453,121 @@ function renderDonutChart(activeCount, pendingCount, suspendedCount) {
   `;
 }
 
-export function adminDashboard({ view, shops, events, stats, filter, escape, badge, time, empty }) {
+function renderOperationalChart(stats, money, escape) {
+  const orders = stats?.orders || { total: 0, completed: 0, active: 0, awaiting: 0, failed: 0 };
+  const daily = Array.isArray(stats?.daily) ? stats.daily : [];
+  const totalOrders = orders.total || 0;
+  const completed = orders.completed || 0;
+  const activeJobs = orders.active || 0;
+  const awaiting = orders.awaiting || 0;
+  const failed = orders.failed || 0;
+
+  const compPct = totalOrders ? Math.round((completed / totalOrders) * 100) : 0;
+  const activePct = totalOrders ? Math.round((activeJobs / totalOrders) * 100) : 0;
+  const awaitPct = totalOrders ? Math.round((awaiting / totalOrders) * 100) : 0;
+  const failPct = totalOrders ? Math.round((failed / totalOrders) * 100) : 0;
+
+  let dailyHtml = '';
+  if (daily.length > 0) {
+    const maxDaily = Math.max(...daily.map(d => Number(d.count) || 0), 1);
+    const chartHeight = 84;
+    const barWidth = 32;
+    const gap = 16;
+    const totalWidth = daily.length * (barWidth + gap);
+
+    dailyHtml = `
+      <div class="daily-bars-chart-wrap">
+        <div class="daily-bars-header">
+          <span class="daily-chart-title">${icon('trending')} 7-Day Order Volume</span>
+          <span class="daily-chart-total">${daily.reduce((acc, d) => acc + Number(d.count || 0), 0)} orders this week</span>
+        </div>
+        <div class="daily-svg-container">
+          <svg viewBox="0 0 ${totalWidth} ${chartHeight + 28}" class="daily-chart-svg" preserveAspectRatio="xMidYMid meet">
+            <line x1="0" y1="${chartHeight}" x2="${totalWidth}" y2="${chartHeight}" stroke="#E2E8F0" stroke-width="1" />
+            ${daily.map((d, i) => {
+              const count = Number(d.count) || 0;
+              const height = count > 0 ? Math.max(8, Math.round((count / maxDaily) * chartHeight)) : 4;
+              const y = chartHeight - height;
+              const x = i * (barWidth + gap) + gap / 2;
+              const dateObj = new Date(d.day);
+              const label = isNaN(dateObj.getTime()) ? d.day.slice(5) : dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+              return `
+                <g class="chart-bar-group" tabindex="0">
+                  <title>${label}: ${count} order${count === 1 ? '' : 's'} (${money ? money(d.volume || 0) : ''})</title>
+                  <rect x="${x}" y="${y}" width="${barWidth}" height="${height}" rx="4" class="chart-bar-rect ${count > 0 ? 'bar-filled' : 'bar-empty'}" />
+                  ${count > 0 ? `<text x="${x + barWidth / 2}" y="${y - 4}" text-anchor="middle" class="chart-val-text">${count}</text>` : ''}
+                  <text x="${x + barWidth / 2}" y="${chartHeight + 16}" text-anchor="middle" class="chart-axis-label">${label}</text>
+                </g>
+              `;
+            }).join('')}
+          </svg>
+        </div>
+      </div>
+    `;
+  } else {
+    dailyHtml = `
+      <div class="daily-empty-state">
+        <span class="muted">${totalOrders > 0 ? 'Daily distribution will graph over the coming days.' : 'No customer print orders recorded yet. As orders are placed, live volume will graph here.'}</span>
+      </div>
+    `;
+  }
+
+  return `
+    <section class="panel admin-panel-card admin-ops-card">
+      <div class="admin-panel-head">
+        <div>
+          <h2 class="admin-panel-title">Operational Health & Order Status</h2>
+          <p class="admin-panel-sub">Authoritative distribution of ${totalOrders} platform orders across fulfillment states.</p>
+        </div>
+        <span class="badge active">${totalOrders} Total Orders</span>
+      </div>
+
+      <div class="ops-chart-body">
+        <div class="ops-status-grid">
+          <div class="ops-status-item">
+            <div class="ops-status-meta">
+              <span class="status-dot dot-green"></span>
+              <span class="ops-status-name">Completed</span>
+              <strong class="ops-status-val">${completed} <small>(${compPct}%)</small></strong>
+            </div>
+            <div class="ops-bar-track"><div class="ops-bar-fill fill-green" style="width: ${compPct}%;"></div></div>
+          </div>
+
+          <div class="ops-status-item">
+            <div class="ops-status-meta">
+              <span class="status-dot dot-blue"></span>
+              <span class="ops-status-name">Printing & Queued</span>
+              <strong class="ops-status-val">${activeJobs} <small>(${activePct}%)</small></strong>
+            </div>
+            <div class="ops-bar-track"><div class="ops-bar-fill fill-blue" style="width: ${activePct}%;"></div></div>
+          </div>
+
+          <div class="ops-status-item">
+            <div class="ops-status-meta">
+              <span class="status-dot dot-amber"></span>
+              <span class="ops-status-name">Awaiting Payment</span>
+              <strong class="ops-status-val">${awaiting} <small>(${awaitPct}%)</small></strong>
+            </div>
+            <div class="ops-bar-track"><div class="ops-bar-fill fill-amber" style="width: ${awaitPct}%;"></div></div>
+          </div>
+
+          <div class="ops-status-item">
+            <div class="ops-status-meta">
+              <span class="status-dot dot-red"></span>
+              <span class="ops-status-name">Cancelled / Failed</span>
+              <strong class="ops-status-val">${failed} <small>(${failPct}%)</small></strong>
+            </div>
+            <div class="ops-bar-track"><div class="ops-bar-fill fill-red" style="width: ${failPct}%;"></div></div>
+          </div>
+        </div>
+
+        ${dailyHtml}
+      </div>
+    </section>
+  `;
+}
+
+export function adminDashboard({ view, shops, events, stats, filter, escape, badge, time, empty, money }) {
   const pending = shops.filter(shop => shop.status === 'pending');
   const active = shops.filter(shop => shop.status === 'active');
   const suspended = shops.filter(shop => shop.status === 'suspended');
@@ -465,7 +582,7 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
     'shop.suspended': 'Shop suspended',
     'prices.updated': 'Shop prices updated',
     'print.confirmed.file_deleted': 'Print confirmed · File deleted',
-    'file.expired.deleted': 'file expired deleted',
+    'file.expired.deleted': 'File expired · Deleted',
     'cash.collected': 'Cash payment confirmed',
     'auth.login': 'Admin sign in',
     'mfa.enabled': 'MFA security enabled'
@@ -485,7 +602,7 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
       <div class="admin-header-left">
         <span class="admin-greeting">${greeting}, Administrator 👋</span>
         <h1 class="admin-page-title">${view === 'shops' ? 'Shop directory' : 'Platform overview'}</h1>
-        <p class="admin-page-sub">${view === 'shops' ? 'Review registrations and manage shop access.' : 'Manage shops, review applications and keep the platform running smoothly.'}</p>
+        <p class="admin-page-sub">${view === 'shops' ? 'Review registrations and manage shop access.' : 'Manage shops, review applications and monitor platform printing operations.'}</p>
       </div>
       <div class="admin-header-actions">
         <button type="button" class="secondary btn-refresh-pill" id="admin-refresh" aria-label="Refresh platform data">
@@ -497,63 +614,51 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
     <!-- 4 KPI Metrics Grid -->
     <div class="overview-metrics-grid admin-metrics-grid">
       <div class="metric-card admin-kpi-card">
-        <div class="metric-card-icon-wrap icon-green">
-          ${icon('shop')}
+        <div class="admin-kpi-top">
+          <div class="metric-card-icon-wrap icon-green">
+            ${icon('shop')}
+          </div>
+          <span class="trend-badge trend-green">${ordersToday > 0 ? `${ordersToday} today` : 'Active network'}</span>
         </div>
         <span class="metric-card-label">Registered shops</span>
         <strong class="metric-card-value">${totalShopsCount}</strong>
-        <div class="admin-kpi-meta">
-          <span class="metric-card-sub">${ordersTotal} total print orders</span>
-          <span class="trend-badge trend-green">${ordersToday} orders today</span>
-        </div>
-        <svg class="kpi-spark-wave wave-green" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,20 Q25,24 50,14 T100,6" fill="none" stroke="currentColor" stroke-width="2.5" />
-        </svg>
+        <span class="metric-card-sub">${ordersTotal} total print orders</span>
       </div>
 
       <div class="metric-card admin-kpi-card">
-        <div class="metric-card-icon-wrap icon-blue">
-          ${icon('users')}
+        <div class="admin-kpi-top">
+          <div class="metric-card-icon-wrap icon-blue">
+            ${icon('users')}
+          </div>
+          <span class="trend-badge trend-blue">${devicesOnline} / ${devicesTotal} devices online</span>
         </div>
         <span class="metric-card-label">Active shops</span>
         <strong class="metric-card-value">${activeShopsCount}</strong>
-        <div class="admin-kpi-meta">
-          <span class="metric-card-sub">Accepting live prints</span>
-          <span class="trend-badge trend-blue">${devicesOnline} / ${devicesTotal} devices online</span>
-        </div>
-        <svg class="kpi-spark-wave wave-blue" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,18 Q30,22 60,16 T100,8" fill="none" stroke="currentColor" stroke-width="2.5" />
-        </svg>
+        <span class="metric-card-sub">Accepting live customer orders</span>
       </div>
 
       <div class="metric-card admin-kpi-card">
-        <div class="metric-card-icon-wrap icon-amber">
-          ${icon('file')}
+        <div class="admin-kpi-top">
+          <div class="metric-card-icon-wrap icon-amber">
+            ${icon('file')}
+          </div>
+          <span class="trend-badge ${pendingShopsCount ? 'trend-amber' : 'trend-neutral'}">${pendingShopsCount ? `${pendingShopsCount} pending` : 'All reviewed'}</span>
         </div>
         <span class="metric-card-label">Awaiting review</span>
         <strong class="metric-card-value">${pendingShopsCount}</strong>
-        <div class="admin-kpi-meta">
-          <span class="metric-card-sub">Shop applications</span>
-          <span class="trend-badge trend-amber">${pendingShopsCount ? `↑ +${pendingShopsCount} pending` : 'All reviewed'}</span>
-        </div>
-        <svg class="kpi-spark-wave wave-amber" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,22 Q20,12 50,18 T100,4" fill="none" stroke="currentColor" stroke-width="2.5" />
-        </svg>
+        <span class="metric-card-sub">Shop applications</span>
       </div>
 
       <div class="metric-card admin-kpi-card">
-        <div class="metric-card-icon-wrap icon-purple">
-          ${icon('shield')}
+        <div class="admin-kpi-top">
+          <div class="metric-card-icon-wrap icon-purple">
+            ${icon('chart')}
+          </div>
+          <span class="trend-badge trend-purple">${money ? money(stats?.transactions?.volume ?? 0) : '₹0.00'}</span>
         </div>
-        <span class="metric-card-label">Suspended shops</span>
-        <strong class="metric-card-value">${suspendedShopsCount}</strong>
-        <div class="admin-kpi-meta">
-          <span class="metric-card-sub">Temporarily restricted</span>
-          <span class="trend-badge trend-neutral">${suspendedShopsCount === 0 ? 'None restricted' : `${suspendedShopsCount} restricted`}</span>
-        </div>
-        <svg class="kpi-spark-wave wave-purple" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,15 Q35,18 70,12 T100,10" fill="none" stroke="currentColor" stroke-width="2.5" />
-        </svg>
+        <span class="metric-card-label">Platform orders</span>
+        <strong class="metric-card-value">${ordersTotal}</strong>
+        <span class="metric-card-sub">${stats?.orders?.completed ?? 0} fulfilled prints</span>
       </div>
     </div>
 
@@ -564,8 +669,8 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
           ${icon('alert')}
         </div>
         <div class="alert-content-box">
-          <strong>${pending.length} ${pending.length === 1 ? 'shop is' : 'shops are'} waiting for approval</strong>
-          <p>Review pending applications to give shop owners access to print orders.</p>
+          <strong>${pending.length} ${pending.length === 1 ? 'shop application is' : 'shop applications are'} waiting for approval</strong>
+          <p>Review and approve pending applications to enable new shops to fulfill customer prints.</p>
         </div>
         <a href="#shops" class="btn-amber-review" id="review-shops">
           Review applications →
@@ -575,8 +680,9 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
 
     <!-- Main Two-Column Layout -->
     <div class="admin-main-layout">
-      <!-- Left Column: Applications Table & Recent Activity -->
+      <!-- Left Column: Operations Chart, Applications Table & Recent Activity -->
       <div class="admin-left-col">
+        ${view === 'admin' ? renderOperationalChart(stats, money, escape) : ''}
         <!-- Shop Applications Card -->
         <section class="panel admin-panel-card">
           <div class="admin-panel-head">

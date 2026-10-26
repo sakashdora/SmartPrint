@@ -92,6 +92,14 @@ export function solveHomography(p0, p1, p2, p3, W, H) {
 
 // Applies high-quality bilinear interpolation perspective warp from sourceCanvas to output
 export function warpPerspectiveCanvas(sourceCanvas, corners, outW, outH) {
+  // Cap destination to 2480px (300 DPI A4) to prevent multi-second main-thread blocking on 12MP+ photos
+  const maxDim = 2480;
+  if (outW > maxDim || outH > maxDim) {
+    const scale = Math.min(maxDim / outW, maxDim / outH);
+    outW = Math.max(10, Math.round(outW * scale));
+    outH = Math.max(10, Math.round(outH * scale));
+  }
+
   const output = document.createElement('canvas');
   output.width = outW;
   output.height = outH;
@@ -1202,7 +1210,23 @@ export async function openDocumentEditor({
             finalCanvas.getContext('2d').drawImage(currentSourceCanvas, 0, 0);
           } else {
             const quadDims = getQuadDimensions(corners.p0, corners.p1, corners.p2, corners.p3);
-            finalCanvas = warpPerspectiveCanvas(currentSourceCanvas, corners, quadDims.width, quadDims.height);
+            const isNearRect = Math.abs(corners.p0.y - corners.p1.y) <= 2 &&
+              Math.abs(corners.p3.y - corners.p2.y) <= 2 &&
+              Math.abs(corners.p0.x - corners.p3.x) <= 2 &&
+              Math.abs(corners.p1.x - corners.p2.x) <= 2;
+
+            if (isNearRect) {
+              const sx = Math.max(0, Math.min(corners.p0.x, corners.p3.x));
+              const sy = Math.max(0, Math.min(corners.p0.y, corners.p1.y));
+              const sw = Math.min(currentSourceCanvas.width - sx, Math.max(corners.p1.x, corners.p2.x) - sx);
+              const sh = Math.min(currentSourceCanvas.height - sy, Math.max(corners.p3.y, corners.p2.y) - sy);
+              finalCanvas = document.createElement('canvas');
+              finalCanvas.width = quadDims.width;
+              finalCanvas.height = quadDims.height;
+              finalCanvas.getContext('2d').drawImage(currentSourceCanvas, sx, sy, sw, sh, 0, 0, quadDims.width, quadDims.height);
+            } else {
+              finalCanvas = warpPerspectiveCanvas(currentSourceCanvas, corners, quadDims.width, quadDims.height);
+            }
           }
         }
 
@@ -1222,16 +1246,26 @@ export async function openDocumentEditor({
           fullCtx.putImageData(fullData, 0, 0);
         }
 
-        const blob = await new Promise(res => finalCanvas.toBlob(res, 'image/png'));
+        const isJpegSource = /\.(jpe?g)$/i.test(file.name) || file.type === 'image/jpeg';
+        let mime = isJpegSource ? 'image/jpeg' : 'image/png';
+        let blob = await new Promise(res => finalCanvas.toBlob(res, mime, 0.92));
+        if (blob && blob.size > 4 * 1048576 && mime === 'image/png') {
+          const jpgBlob = await new Promise(res => finalCanvas.toBlob(res, 'image/jpeg', 0.92));
+          if (jpgBlob && jpgBlob.size < blob.size) {
+            blob = jpgBlob;
+            mime = 'image/jpeg';
+          }
+        }
         finalCanvas.width = finalCanvas.height = 1;
 
         if (!blob || blob.size > 25 * 1048576) {
           throw new Error('Processed document image is too large. Please use a smaller selection.');
         }
 
+        const ext = mime === 'image/jpeg' ? '.jpg' : '.png';
         const suffix = activeFilter !== 'original' ? `-${activeFilter}` : '-scanned';
-        const cleanName = file.name.replace(/\.[^.]+$/, '') + `${suffix}.png`;
-        const processedFile = new File([blob], cleanName, { type: 'image/png' });
+        const cleanName = file.name.replace(/\.[^.]+$/, '') + `${suffix}${ext}`;
+        const processedFile = new File([blob], cleanName, { type: mime });
 
         if (onApply) onApply(processedFile);
         closeDialog({ action: 'edited', file: processedFile });

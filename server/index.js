@@ -39,7 +39,7 @@ export async function createApp({ database, seed = true } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.use(requestLogger);
-  if (config.production) app.set('trust proxy', 'loopback, linklocal, uniquelocal');
+  if (config.production) app.set('trust proxy', 1);
 
   app.use(async (req, res, next) => {
     res.set({
@@ -51,8 +51,30 @@ export async function createApp({ database, seed = true } = {}) {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
-      const allowed = [config.origin, req.headers.host ? `https://${req.headers.host}` : null].filter(Boolean);
-      if ((config.production && !req.headers.origin) || (req.headers.origin && !allowed.includes(req.headers.origin))) return next(fail(403, 'Request origin is not allowed.'));
+      const origin = req.headers.origin;
+      if (config.production && !origin) return next(fail(403, 'Request origin is not allowed.'));
+      if (origin) {
+        const allowed = new Set([config.origin]);
+        if (req.headers.host) {
+          const proto = req.headers['x-forwarded-proto'] || (req.secure || config.production ? 'https' : 'http');
+          allowed.add(`${proto}://${req.headers.host}`);
+          allowed.add(`https://${req.headers.host}`);
+          if (!config.production) allowed.add(`http://${req.headers.host}`);
+        }
+        if (!config.production) {
+          allowed.add('http://localhost:3000');
+          allowed.add('http://127.0.0.1:3000');
+          allowed.add('http://localhost:' + (process.env.PORT || 3000));
+          allowed.add('http://127.0.0.1:' + (process.env.PORT || 3000));
+        }
+        if (process.env.PUBLIC_BASE_URL) {
+          try { allowed.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
+        }
+        for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL']) {
+          if (process.env[hostVar]) allowed.add(`https://${process.env[hostVar]}`);
+        }
+        if (!allowed.has(origin)) return next(fail(403, 'Request origin is not allowed.'));
+      }
     }
 
     const sessionId = req.headers.cookie ? req.headers.cookie.split(';').map(c => c.trim()).find(v => v.startsWith('sp_session='))?.slice(11) : null;
@@ -579,15 +601,27 @@ export async function createApp({ database, seed = true } = {}) {
     res.json(rows);
   });
   app.get('/api/admin/stats', async (req, res) => {
-    const [[shopCounts], [orderCounts], [transCounts]] = await Promise.all([
+    const today = now().slice(0, 10);
+    const [[shopCounts], [orderCounts], [transCounts], [deviceCounts], dailyOrders] = await Promise.all([
       db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),0) AS active, COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0) AS pending, COALESCE(SUM(CASE WHEN status='suspended' THEN 1 ELSE 0 END),0) AS suspended FROM shops"),
-      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed, COALESCE(SUM(CASE WHEN status IN ('queued','printing') THEN 1 ELSE 0 END),0) AS active_jobs FROM orders"),
-      db.query("SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_collected FROM transactions")
+      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed, COALESCE(SUM(CASE WHEN status IN ('queued','printing') THEN 1 ELSE 0 END),0) AS active_jobs, COALESCE(SUM(CASE WHEN status IN ('awaiting_payment','awaiting_confirmation') THEN 1 ELSE 0 END),0) AS awaiting, COALESCE(SUM(CASE WHEN status IN ('failed','cancelled','expired') THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN substr(created, 1, 10)=$1 THEN 1 ELSE 0 END),0) AS today FROM orders", [today]),
+      db.query("SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_collected FROM transactions"),
+      db.query("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN active=1 AND heartbeat IS NOT NULL THEN 1 ELSE 0 END),0) AS online FROM devices"),
+      db.query("SELECT substr(created, 1, 10) AS day, COUNT(*) AS count, COALESCE(SUM(amount),0) AS volume FROM orders GROUP BY substr(created, 1, 10) ORDER BY day DESC LIMIT 7")
     ]);
     res.json({
       shops: { total: Number(shopCounts.total), active: Number(shopCounts.active), pending: Number(shopCounts.pending), suspended: Number(shopCounts.suspended) },
-      orders: { total: Number(orderCounts.total), completed: Number(orderCounts.completed), active: Number(orderCounts.active_jobs) },
-      transactions: { count: Number(transCounts.count), volume: Number(transCounts.total_collected) }
+      orders: {
+        total: Number(orderCounts.total),
+        completed: Number(orderCounts.completed),
+        active: Number(orderCounts.active_jobs),
+        awaiting: Number(orderCounts.awaiting),
+        failed: Number(orderCounts.failed),
+        today: Number(orderCounts.today)
+      },
+      devices: { total: Number(deviceCounts.total), online: Number(deviceCounts.online) },
+      transactions: { count: Number(transCounts.count), volume: Number(transCounts.total_collected) },
+      daily: dailyOrders.reverse()
     });
   });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));

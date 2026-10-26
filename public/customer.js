@@ -1,5 +1,5 @@
 import { icon } from './ui.js';
-import { downloadPdf, showDocument } from './viewer.js';
+import { downloadPdf, showDocument, getDocPageCount } from './viewer.js';
 import { waitForQuote } from './preparation.js';
 import { openDocumentEditor } from './crop.js';
 
@@ -294,7 +294,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   const isImage = file => /\.(png|jpe?g)$/i.test(file.name);
   let files = [], originalFiles = [], editedFiles = [], activeDocumentMode = 'original';
-  let quote = null, isCalculating = false, isOrdering = false;
+  let quote = null, isCalculating = false, isOrdering = false, knownPageCount = null;
   let revision = 0, calculateTimer, preview, pendingPreparation, sourceRevision = 0;
   let localPreviews = [];
   let preparedQuote;
@@ -750,6 +750,29 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   const previewButton = document.querySelector('#show-preview');
   const retryButton = document.querySelector('#retry-quote');
 
+  function updateInstantPriceDisplay() {
+    const pCount = knownPageCount ?? quote?.pages;
+    if (!pCount || !files.length) return;
+    const settings = readOptions();
+    const sidesPerCopy = settings.layout === 'card' ? 1 : Math.ceil(pCount / (settings.layout === 'two' ? 2 : 1));
+    const sides = sidesPerCopy * settings.copies;
+    const sheets = Math.ceil(sidesPerCopy / (settings.duplex ? 2 : 1)) * settings.copies;
+    const rate = settings.color === 'color' ? (shop.color ?? 1000) : (shop.bw ?? 200);
+    const amount = sides * rate;
+
+    const specPages = document.querySelector('#spec-pages');
+    if (specPages) specPages.textContent = String(pCount);
+    const specSheets = document.querySelector('#spec-sheets');
+    if (specSheets) specSheets.textContent = String(sheets);
+    const specCopies = document.querySelector('#spec-copies');
+    if (specCopies) specCopies.textContent = String(settings.copies);
+    const totalAmount = document.querySelector('#total-amount');
+    if (totalAmount) totalAmount.textContent = money(amount);
+    const priceSubnote = document.querySelector('#price-subnote');
+    if (priceSubnote) priceSubnote.textContent = `${pCount} page${pCount === 1 ? '' : 's'} · ${sides} side${sides === 1 ? '' : 's'} · ${sheets} sheet${sheets === 1 ? '' : 's'}`;
+    updateFileMetaDisplay(pCount);
+  }
+
   function updateSummarySpecs() {
     const options = readOptions();
     const colorEl = document.querySelector('#summary-spec-color');
@@ -760,6 +783,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     if (layoutEl) layoutEl.textContent = options.layout === 'card' ? 'ID Card (Fit)' : options.layout === 'two' ? '2 pages on 1' : 'Standard';
     const copiesEl = document.querySelector('#spec-copies');
     if (copiesEl) copiesEl.textContent = String(options.copies);
+    updateInstantPriceDisplay();
   }
 
   function updateFileMetaDisplay(pageCount) {
@@ -801,7 +825,9 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     }
     const banner = document.querySelector('#doc-edit-active-banner');
     if (banner) banner.hidden = true;
+    knownPageCount = originalFiles.every(isImage) ? originalFiles.length : knownPageCount;
     updateFileMetaDisplay();
+    updateInstantPriceDisplay();
     scheduleQuote();
     void previewSources(files);
     notify('Switched to Original document. Printing without edits.');
@@ -830,7 +856,9 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         bannerText.textContent = `Scanner enhancements applied (${editedFiles[0].name}).`;
       }
     }
+    knownPageCount = editedFiles.every(isImage) ? editedFiles.length : 1;
     updateFileMetaDisplay();
+    updateInstantPriceDisplay();
     scheduleQuote();
     void previewSources(files);
     notify('Document updated with scanner enhancements.');
@@ -1003,7 +1031,13 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         const type = /\.pdf$/i.test(file.name) ? 'application/pdf' : /\.png$/i.test(file.name) ? 'image/png' : 'image/jpeg';
         const view = await showDocument(panel, file.slice(0, file.size, type), { title: file.name });
         if (generation !== sourceRevision || !container.isConnected) view.destroy();
-        else localPreviews.push(view);
+        else {
+          localPreviews.push(view);
+          if (view?.numPages) {
+            knownPageCount = view.numPages;
+            updateInstantPriceDisplay();
+          }
+        }
       } catch {
         if (generation === sourceRevision) panel.textContent = 'Local preview unavailable. You can still upload and check the prepared print layout.';
       }
@@ -1144,7 +1178,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     errorEl.textContent = '';
     orderStatusText.textContent = 'Uploading document…';
     orderStatusText.className = 'badge pending';
-    document.querySelector('#total-amount').textContent = '...';
+    if (knownPageCount || quote?.pages) {
+      updateInstantPriceDisplay();
+    } else {
+      document.querySelector('#total-amount').textContent = '...';
+    }
 
     try {
       const settings = readOptions();
@@ -1169,6 +1207,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       pendingPreparation = null;
       if (generation !== revision || !form.isConnected) return;
       quote = result;
+      knownPageCount = result.pages;
       document.querySelector('#spec-pages').textContent = String(result.pages);
       document.querySelector('#spec-sheets').textContent = String(result.sheets);
       document.querySelector('#spec-copies').textContent = String(settings.copies);
@@ -1288,6 +1327,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         originalFiles = [];
         editedFiles = [];
         activeDocumentMode = 'original';
+        knownPageCount = null;
         dropzone.hidden = false;
         fileDisplay.hidden = true;
         const editorCard = document.querySelector('#document-editor-card');
@@ -1317,6 +1357,18 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       form.querySelector('[name=duplex][value=false]').checked = true;
     } else if (form.elements.layout.value === 'card') {
       form.elements.layout.value = 'single';
+    }
+
+    if (files.every(isImage)) {
+      knownPageCount = files.length;
+      updateInstantPriceDisplay();
+    } else if (/\.pdf$/i.test(files[0]?.name || '')) {
+      getDocPageCount(files[0]).then(count => {
+        if (count) {
+          knownPageCount = count;
+          updateInstantPriceDisplay();
+        }
+      }).catch(() => {});
     }
 
     scheduleQuote();
