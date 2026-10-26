@@ -1,11 +1,5 @@
-import { paymentsPage, printersPage, securityPage, trackingPage, accountPage } from './workspaces.js';
 import { watchUpdates, stopUpdates } from './live.js';
-import { renderCustomer } from './customer.js';
-import { downloadQrPoster } from './qr-poster.js';
-import { downloadPdf } from './viewer.js';
 import { icon, brand } from './ui.js';
-import { ownerDashboard, adminDashboard } from './dashboards.js';
-import { playChime, sendRealNotification } from './notifications.js';
 const app = document.querySelector('#app');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const money = n => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n / 100);
@@ -96,8 +90,14 @@ function mount(content, { workspacePage = false } = {}) {
   }));
 }
 async function busy(button, action) { button.disabled = true; try { await action(); } catch (error) { notify(error.message); } finally { button.disabled = false; } }
-async function customer() { return renderCustomer({ api, mount, money, escape, health, notify, onOrder: result => { receipt = result; sessionStorage.setItem('receipt', JSON.stringify(result)); location.hash = 'track'; } }); }
-async function tracking() { return trackingPage({ api, mount, money, escape, receipt, notify, refresh: route }); }
+async function customer() {
+  const { renderCustomer } = await import('./customer.js');
+  return renderCustomer({ api, mount, money, escape, health, notify, onOrder: result => { receipt = result; sessionStorage.setItem('receipt', JSON.stringify(result)); location.hash = 'track'; } });
+}
+async function tracking() {
+  const { trackingPage } = await import('./workspaces.js');
+  return trackingPage({ api, mount, money, escape, receipt, notify, refresh: route });
+}
 function workspace(content, active, admin = false) {
   const links = admin ? [
     ['admin', 'Overview', 'home'],
@@ -117,7 +117,32 @@ function workspace(content, active, admin = false) {
   ];
   const title = links.find(link => link[0] === active)?.[1] || 'Overview';
   const todayStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-  mount(`<div class="workspace">
+  const targetRole = admin ? 'admin' : 'owner';
+
+  // Fast In-Place Update if Workspace Shell already exists for same role
+  const existingShell = document.querySelector('.workspace');
+  if (existingShell && existingShell.dataset.role === targetRole) {
+    document.querySelectorAll('.workspace-nav .nav-link').forEach(link => {
+      const isCurrent = link.getAttribute('href') === `#${active}`;
+      link.classList.toggle('active', isCurrent);
+      if (isCurrent) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.mobile-bottom-nav .mobile-nav-item').forEach(item => {
+      item.classList.toggle('is-active', item.getAttribute('href') === `#${active}`);
+    });
+    const bc = document.querySelector('.admin-breadcrumbs strong, .workspace-toolbar strong');
+    if (bc) bc.textContent = title;
+    const contentSlot = document.querySelector('.workspace-content');
+    if (contentSlot) {
+      stopUpdates();
+      contentSlot.innerHTML = content;
+      window.scrollTo(0, 0);
+      return;
+    }
+  }
+
+  mount(`<div class="workspace" data-role="${targetRole}">
     <div class="mobile-topbar">
       <button id="mobile-nav-toggle" class="icon-button mobile-menu-btn" aria-label="Toggle navigation">${icon('menu')}</button>
       <div class="mobile-brand">${brand()}</div>
@@ -336,19 +361,61 @@ async function triggerDirectPrint(id) {
   }
 }
 
+let cachedOwnerSnapshot = null;
+let cachedOwnerTimestamp = 0;
+let cachedQrData = null;
+
 async function owner(view) {
   if (!me) { location.hash = 'login'; await route(); return; }
   if (me.role === 'admin') { location.hash = 'admin'; await route(); return; }
   if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
   if (me.role !== 'owner') { location.hash = 'login'; await route(); return; }
-  if (view === 'payments') return paymentsPage({ api, workspace, escape, notify });
-  if (view === 'printers') return printersPage({ api, workspace, escape, notify });
-  const load = () => Promise.all([api('/api/owner/shop'), api('/api/owner/orders'), api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`), api('/api/owner/summary'), api('/api/owner/devices'), api('/api/owner/qr').catch(() => null)]);
-  const snapshot = await load(), [store, orders, transactions, summary, devices, qr] = snapshot;
+  
+  if (view === 'payments') {
+    const { paymentsPage } = await import('./workspaces.js');
+    return paymentsPage({ api, workspace, escape, notify });
+  }
+  if (view === 'printers') {
+    const { printersPage } = await import('./workspaces.js');
+    return printersPage({ api, workspace, escape, notify });
+  }
+
+  const { ownerDashboard } = await import('./dashboards.js');
+  let store, orders, transactions = [], summary, devices = [], qr;
+
+  if (view === 'settings') {
+    store = cachedOwnerSnapshot ? cachedOwnerSnapshot[0] : await api('/api/owner/shop');
+    qr = cachedQrData || (cachedQrData = await api('/api/owner/qr'));
+  } else if (view === 'transactions') {
+    [store, transactions, summary] = await Promise.all([
+      cachedOwnerSnapshot ? cachedOwnerSnapshot[0] : api('/api/owner/shop'),
+      api(`/api/owner/transactions?limit=100&offset=${transactionOffset}`),
+      cachedOwnerSnapshot ? cachedOwnerSnapshot[3] : api('/api/owner/summary')
+    ]);
+  } else {
+    // Overview or Queue
+    if (cachedOwnerSnapshot && (Date.now() - cachedOwnerTimestamp < 4000)) {
+      [store, orders, transactions, summary, devices, qr] = cachedOwnerSnapshot;
+    } else {
+      const snapshot = await Promise.all([
+        api('/api/owner/shop'),
+        api('/api/owner/orders'),
+        Promise.resolve([]),
+        api('/api/owner/summary'),
+        api('/api/owner/devices'),
+        cachedQrData ? Promise.resolve(cachedQrData) : api('/api/owner/qr').catch(() => null)
+      ]);
+      [store, orders, transactions, summary, devices, qr] = snapshot;
+      cachedOwnerSnapshot = snapshot;
+      cachedOwnerTimestamp = Date.now();
+      if (qr) cachedQrData = qr;
+    }
+  }
+
   const head = title => `<div class="workhead"><div><div class="heading-context">${escape(store.name)} ${badge(store.status)}</div><h1>${title}</h1><p class="muted">${view === 'owner' ? 'Keep the queue moving and every payment accounted for.' : view === 'queue' ? 'Review payments, follow progress and confirm printed pages.' : 'Manage your shop with clear, up-to-date records.'}</p></div><div class="actions"><button class="icon-button" id="reload" aria-label="Refresh workspace">${icon('refresh')}</button><button type="button" class="secondary" id="remote-print-btn">📤 Remote Print</button>${view !== 'settings' ? `<a class="primary" href="#settings">${icon('qr')} View shop QR</a>` : ''}</div></div>`;
   let content;
   if (view === 'settings') {
-    const shopQr = qr || await api('/api/owner/qr');
+    const shopQr = qr || cachedQrData;
     content = `${head('Prices and shop QR')}<div class="grid"><section class="panel"><h2>Your print prices</h2><p class="muted">Per printed side. Two-up reduces sides; duplex reduces paper. Existing orders keep their quoted price.</p><form id="prices"><div class="fields"><label class="field">Black & white (₹)<input name="bw" type="number" min="0.01" max="1000" step="0.01" value="${store.bw / 100}" required></label><label class="field">Full colour (₹)<input name="color" type="number" min="0.01" max="1000" step="0.01" value="${store.color / 100}" required></label></div><button class="primary">Save prices</button><span class="muted"> Version ${store.version}</span></form><h2 class="spaced">Printer connection</h2><div class="notice-inline">Printers are managed from the Printers tab. Browser Direct printing and background spoolers print automatically.</div></section><section class="panel shop-qr-standee-card"><div class="qr-standee-header"><div class="qr-standee-badge">${icon('qr')} OFFICIAL COUNTER QR</div><h2 class="qr-standee-title">${escape(store.name)}</h2><p class="qr-standee-sub">Scan to print documents directly from your phone</p></div><div class="qr-code-frame"><div class="qr-corner top-left"></div><div class="qr-corner top-right"></div><div class="qr-corner bottom-left"></div><div class="qr-corner bottom-right"></div><img class="shop-counter-qr-img" data-url="${escape(shopQr.url)}" src="${shopQr.image}" alt="QR code for ${escape(store.name)}"></div><div class="qr-standee-steps"><div class="qr-step"><b>1</b> Scan QR</div><div class="qr-step"><b>2</b> Upload & Options</div><div class="qr-step"><b>3</b> Collect Print</div></div><div class="qr-standee-actions"><button type="button" class="primary" id="print-standee">${icon('printer')} Print Counter Standee</button><button type="button" class="secondary" id="download-qr-poster">${icon('download')} Download QR poster</button><button type="button" class="secondary" id="copy-shop-url">${icon('copy')} Copy Link</button><a class="secondary" href="/?shop=${encodeURIComponent(store.slug)}" target="_blank" rel="noopener">${icon('arrow')} Customer View ↗</a></div></section></div>`;
   } else if (view === 'transactions') {
     content = `${head('Transactions')}<p class="muted">Collected ${money(summary.collected)} · Refunded ${money(summary.refunded)} · Net ${money(summary.net)}. Updates every 5 seconds.</p><section class="panel"><div class="row"><h2>Collections · ${summary.transactions} total</h2><button id="export" class="secondary">Export CSV ↓</button></div>${transactions.length ? `<div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Order</th><th>Method</th><th>Collected</th><th>Refunded</th><th>Time</th></tr></thead><tbody>${transactions.map(t => `<tr><td>${escape(t.id.slice(0, 8))}</td><td>#${escape(t.order_id.slice(0, 8))}</td><td>${badge(t.method)}</td><td>${money(t.amount)}</td><td>${money(t.refund_amount || 0)}</td><td>${time(t.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No payments yet.', 'Cash and verified UPI payments will appear here.')}</section><div class="row spaced"><button class="secondary" id="previous-transactions" ${transactionOffset === 0 ? 'disabled' : ''}>Previous</button><span>Page ${Math.floor(transactionOffset / 100) + 1}</span><button class="secondary" id="next-transactions" ${transactionOffset + 100 >= summary.transactions ? 'disabled' : ''}>Next</button></div>`;
@@ -568,6 +635,7 @@ async function admin(view) {
   if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
   if (me.role !== 'admin') { location.hash = 'login'; await route(); return; }
   if (me.mfaRequired) { location.hash = 'security'; await route(); return; }
+  const { adminDashboard } = await import('./dashboards.js');
   const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
   const snapshot = await load(), [shops, events, stats] = snapshot;
   let content;
@@ -664,8 +732,8 @@ function auth(register = false) {
       ${register ? '<label class="field">Shop name<input name="name" required maxlength="100" autocomplete="organization"></label><label class="field">Shop location<input name="location" required maxlength="200" autocomplete="street-address"></label>' : ''}
       <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
       <label class="field">Password<input name="password" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}"></label>
-      ${!register ? '<label class="field">Authenticator code (if enabled)<input name="code" inputmode="numeric" maxlength="19" placeholder="6-digit code or recovery code" autocomplete="one-time-code"></label>' : ''}
-      <button class="primary wide">${register ? 'Register shop →' : 'Sign in →'}</button>
+      ${!register ? '<div id="auth-totp-field" hidden><label class="field">6-digit Authenticator code<input name="code" inputmode="numeric" maxlength="19" placeholder="Enter 6-digit code or recovery code" autocomplete="one-time-code"></label></div>' : ''}
+      <button class="primary wide" id="auth-submit-btn">${register ? 'Register shop →' : 'Sign in →'}</button>
       ${!register ? '<button type="button" class="secondary wide" id="passkey-login" style="margin-top: 10px;">🔑 Sign in with Passkey</button>' : ''}
     </form>
     ${!register && health?.demo ? '<div class="notice-inline">Local demo environment active. Sign in with your registered account credentials.</div>' : ''}
@@ -682,14 +750,29 @@ function auth(register = false) {
         location.hash = 'login';
         await route();
       } else {
-        const user = await api('/api/auth/login', {
-          method: 'POST',
-          body: { email: data.email, password: data.password, code: data.code || undefined }
-        });
-        me = user;
-        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
-        location.hash = target;
-        await route();
+        try {
+          const user = await api('/api/auth/login', {
+            method: 'POST',
+            body: { email: data.email, password: data.password, code: data.code || undefined }
+          });
+          me = user;
+          const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+          location.hash = target;
+          await route();
+        } catch (err) {
+          if (err.details?.mfaRequired) {
+            const totpField = document.querySelector('#auth-totp-field');
+            if (totpField) {
+              totpField.hidden = false;
+              const input = totpField.querySelector('input');
+              input.required = true;
+              input.focus();
+              notify('Enter the 6-digit code from your authenticator app to complete sign-in.');
+              return;
+            }
+          }
+          throw err;
+        }
       }
     });
   };
@@ -698,6 +781,15 @@ function auth(register = false) {
   if (passkeyBtn) {
     passkeyBtn.onclick = () => busy(passkeyBtn, async () => {
       const email = document.querySelector('[name=email]').value.trim();
+      if (!window.SimpleWebAuthnBrowser) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = '/simplewebauthn-browser.min.js';
+          s.onload = () => resolve(window.SimpleWebAuthnBrowser);
+          s.onerror = () => reject(new Error('Passkey module could not be loaded.'));
+          document.head.appendChild(s);
+        });
+      }
       const browser = window.SimpleWebAuthnBrowser;
       if (!browser || !browser.browserSupportsWebAuthn()) {
         throw new Error('Passkeys/WebAuthn is not supported in this browser.');
@@ -750,6 +842,7 @@ async function route() {
       return;
     }
     if (me?.mfaRequired || view === 'security') {
+      const { securityPage } = await import('./workspaces.js');
       return securityPage({
         api,
         mount,
@@ -765,6 +858,7 @@ async function route() {
     }
     if (view === 'account') {
       if (!me) { location.hash = 'login'; await route(); return; }
+      const { accountPage } = await import('./workspaces.js');
       return accountPage({
         api,
         workspace,

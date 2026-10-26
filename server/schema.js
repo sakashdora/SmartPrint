@@ -11,7 +11,7 @@ CREATE INDEX IF NOT EXISTS orders_shop ON orders(shop_id, created);
 CREATE INDEX IF NOT EXISTS documents_expiry ON documents(expires);
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires TEXT NOT NULL, mfa INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rate_limits (id TEXT PRIMARY KEY, count INTEGER NOT NULL, expires TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS mfa (user_id TEXT PRIMARY KEY REFERENCES users(id), payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step BIGINT NOT NULL DEFAULT -1, recovery_codes TEXT DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS mfa (user_id TEXT PRIMARY KEY REFERENCES users(id), payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step BIGINT NOT NULL DEFAULT -1, recovery_codes TEXT DEFAULT '[]', created TEXT);
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, public_key BYTEA NOT NULL, counter BIGINT NOT NULL DEFAULT 0, device_type TEXT, backed_up INTEGER DEFAULT 0, transports TEXT, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), name TEXT NOT NULL, token TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, heartbeat TEXT, color INTEGER NOT NULL DEFAULT 0, duplex INTEGER NOT NULL DEFAULT 0);
@@ -40,4 +40,6 @@ CREATE INDEX IF NOT EXISTS order_history_order ON order_history(order_id, create
 CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, shop_id TEXT REFERENCES shops(id), user_id TEXT REFERENCES users(id), order_id TEXT REFERENCES orders(id), event_type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, data TEXT DEFAULT '{}', is_read INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS notifications_shop ON notifications(shop_id, created);
 CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, created);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS orders_shop_status ON orders(shop_id, status);
 `;

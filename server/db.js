@@ -60,6 +60,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
             ['orders', 'file_name', "TEXT DEFAULT 'document.pdf'"],
             ['orders', 'priority', 'INTEGER DEFAULT 0'],
             ['mfa', 'recovery_codes', "TEXT DEFAULT '[]'"],
+            ['mfa', 'created', "TEXT"],
             ['users', 'status', "TEXT NOT NULL DEFAULT 'active'"],
             ['shop_payments', 'qr_image', 'TEXT'],
           ]) {
@@ -95,7 +96,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
   }
   mkdirSync('.data', { recursive: true });
   const sqlite = new DatabaseSync(path);
-  sqlite.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+  sqlite.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -64000; PRAGMA temp_store = MEMORY;');
   const direct = async (sql, params = []) => {
     const ordered = [];
     const statement = sqlite.prepare(sql.replace(/\$(\d+)/g, (_, n) => { ordered.push(params[Number(n) - 1]); return '?'; }));

@@ -40,6 +40,7 @@ export async function createApp({ database, seed = true } = {}) {
   app.disable('x-powered-by');
   app.use(requestLogger);
   if (config.production) app.set('trust proxy', 'loopback, linklocal, uniquelocal');
+
   app.use(async (req, res, next) => {
     res.set({
       'X-Content-Type-Options': 'nosniff',
@@ -53,6 +54,7 @@ export async function createApp({ database, seed = true } = {}) {
       const allowed = [config.origin, req.headers.host ? `https://${req.headers.host}` : null].filter(Boolean);
       if ((config.production && !req.headers.origin) || (req.headers.origin && !allowed.includes(req.headers.origin))) return next(fail(403, 'Request origin is not allowed.'));
     }
+
     const sessionId = req.headers.cookie ? req.headers.cookie.split(';').map(c => c.trim()).find(v => v.startsWith('sp_session='))?.slice(11) : null;
     if (sessionId) {
       req.sessionId = digest(sessionId);
@@ -65,7 +67,7 @@ export async function createApp({ database, seed = true } = {}) {
           const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
           const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
           const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
-          req.user = { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfaRequired: Boolean(enforceMfa && !user.mfa) };
+          req.user = { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfa: Boolean(user.mfa), mfaRequired: Boolean(enforceMfa && !user.mfa) };
         }
       }
     }
@@ -76,7 +78,7 @@ export async function createApp({ database, seed = true } = {}) {
   });
   const requireRole = role => (req, res, next) => !req.user ? next(fail(401, 'Please sign in.')) : req.user.mfaRequired ? next(fail(403, 'Set up your authenticator before using this workspace.')) : req.user.role !== role ? next(fail(403, 'This action is not available for your account.')) : next();
   const audit = (tx, actor, action, target) => tx.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), actor, action, target, now()]);
-  const ownerShop = async req => { const [shop] = await db.query('SELECT * FROM shops WHERE owner_id=$1', [req.user.id]); if (!shop) throw fail(404, 'Shop not found.'); return shop; };
+  const ownerShop = async req => { if (req._shop) return req._shop; const [shop] = await db.query('SELECT * FROM shops WHERE owner_id=$1', [req.user.id]); if (!shop) throw fail(404, 'Shop not found.'); req._shop = shop; return shop; };
   const ownerOrder = async req => { const shop = await ownerShop(req); const [order] = await db.query('SELECT * FROM orders WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]); if (!order) throw fail(404, 'Order not found.'); return order; };
   const bearer = req => req.headers.authorization?.replace(/^Bearer /, '') ?? '';
   const publicOrder = row => {
@@ -535,16 +537,25 @@ export async function createApp({ database, seed = true } = {}) {
     if (idempKey) await saveIdempotentResult(db, idempKey, req.user.id, 'order.complete', order.id, 200, result);
     res.json(result);
   });
+  const qrCache = new Map();
   app.put('/api/owner/prices', async (req, res) => {
     const shop = await ownerShop(req), { bw, color } = req.body;
     if (![bw, color].every(n => Number.isInteger(n) && n >= 1 && n <= 100000)) throw fail(400, 'Prices must be ₹0.01–₹1,000 per side.');
-    await db.transaction(async tx => { await tx.query('UPDATE shops SET bw=$1,color=$2,version=version+1 WHERE id=$3', [bw, color, shop.id]); await audit(tx, req.user.id, 'prices.updated', shop.id); }); res.json({ ok: true });
+    await db.transaction(async tx => { await tx.query('UPDATE shops SET bw=$1,color=$2,version=version+1 WHERE id=$3', [bw, color, shop.id]); await audit(tx, req.user.id, 'prices.updated', shop.id); });
+    qrCache.delete(shop.id);
+    res.json({ ok: true });
   });
   app.get('/api/owner/qr', async (req, res) => {
     const shop = await ownerShop(req);
     const base = config.production ? config.origin : `${req.protocol}://${req.headers.host}`;
     const url = new URL(`/?shop=${encodeURIComponent(shop.slug)}`, base).href;
-    res.json({ url, image: await QRCode.toDataURL(url, { width: 1200, margin: 4, errorCorrectionLevel: 'H' }) });
+    const cacheKey = `${shop.id}:${url}`;
+    let cached = qrCache.get(cacheKey);
+    if (!cached) {
+      cached = { url, image: await QRCode.toDataURL(url, { width: 1200, margin: 4, errorCorrectionLevel: 'H' }) };
+      qrCache.set(cacheKey, cached);
+    }
+    res.json(cached);
   });
   app.use('/api/admin', requireRole('admin'));
   app.get('/api/admin/shops', async (req, res) => res.json(await db.query('SELECT s.*,u.email FROM shops s JOIN users u ON u.id=s.owner_id ORDER BY s.name')));

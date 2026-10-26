@@ -442,6 +442,15 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
     passkeyBtn.onclick = async () => {
       passkeyBtn.disabled = true;
       try {
+        if (!window.SimpleWebAuthnBrowser) {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = '/simplewebauthn-browser.min.js';
+            s.onload = () => resolve(window.SimpleWebAuthnBrowser);
+            s.onerror = () => reject(new Error('Passkey module could not be loaded.'));
+            document.head.appendChild(s);
+          });
+        }
         const browser = window.SimpleWebAuthnBrowser;
         if (!browser || !browser.browserSupportsWebAuthn()) {
           throw new Error('Passkeys/WebAuthn is not supported in this browser.');
@@ -788,13 +797,330 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
     }
   });
 }
-export async function accountPage({ api, workspace, notify, admin, onSignedOut }) {
-  workspace('<div class="workhead"><div><h1>Account settings</h1><p class="muted">Change your password. This signs you out on every device.</p></div></div><section class="panel"><form id="password-form"><label class="field">Current password<input name="current" type="password" autocomplete="current-password" maxlength="128" required></label><label class="field">New password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label><label class="field">Confirm new password<input name="confirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label><button class="primary">Change password</button></form></section>', 'account', admin);
-  document.querySelector('#password-form').onsubmit = async event => {
-    event.preventDefault(); const values = Object.fromEntries(new FormData(event.target));
-    if (values.password !== values.confirm) return notify('The new passwords do not match.');
-    event.submitter.disabled = true;
-    try { await api('/api/auth/password', { method: 'POST', body: { current: values.current, password: values.password } }); notify('Password changed. Sign in again.'); onSignedOut(); }
-    catch (error) { notify(error.message); event.submitter.disabled = false; }
+export async function accountPage({ api, workspace, notify, admin, onSignedOut, escape }) {
+  const esc = escape || (v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])));
+  let status = { totp: false, enabledAt: null };
+  try { status = await api('/api/auth/mfa/status'); } catch {}
+  const hasTotp = Boolean(status.totp);
+
+  const render = () => {
+    const content = `
+      <div class="workhead">
+        <div>
+          <h1>Account settings</h1>
+          <p class="muted">Manage your credentials, password, and two-factor authentication.</p>
+        </div>
+      </div>
+
+      <div class="grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; align-items: start;">
+        <!-- Card 1: Password Management -->
+        <section class="panel">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <h2 style="margin: 0; font-size: 18px;">Password & Authentication</h2>
+            <span class="badge active">Active</span>
+          </div>
+          <p class="muted" style="margin: 0 0 16px; font-size: 13px;">Changing your password will invalidate all existing active sessions.</p>
+          
+          <form id="password-form">
+            <label class="field">Current password
+              <input name="current" type="password" autocomplete="current-password" maxlength="128" required placeholder="Enter current password">
+            </label>
+            <label class="field">New password
+              <input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Minimum 12 characters">
+            </label>
+            <label class="field">Confirm new password
+              <input name="confirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Confirm new password">
+            </label>
+            ${hasTotp ? `
+              <label class="field">6-digit Authenticator Code
+                <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" placeholder="000000" autocomplete="one-time-code">
+                <small class="muted" style="display:block;margin-top:4px;">Required to authorize password changes while 2FA is active.</small>
+              </label>
+            ` : ''}
+            <button class="primary wide" style="margin-top: 10px;" id="btn-change-password">Update password</button>
+          </form>
+        </section>
+
+        <!-- Card 2: Two-Factor Authentication (TOTP) -->
+        <section class="panel" id="totp-card">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <h2 style="margin: 0; font-size: 18px;">Two-Factor Authentication</h2>
+            <span class="badge ${hasTotp ? 'active' : 'suspended'}">${hasTotp ? 'Active (RFC 6238)' : 'Not Configured'}</span>
+          </div>
+          <p class="muted" style="margin: 0 0 16px; font-size: 13px;">
+            Protect your shop queue and payments with an Authenticator App (Google Authenticator, Microsoft Authenticator, 1Password, Authy).
+          </p>
+
+          ${hasTotp ? `
+            <div style="background: var(--surface-subtle, #f0fdf4); border: 1px solid #bbf7d0; border-radius: 12px; padding: 16px; margin-bottom: 16px;">
+              <strong style="display: flex; align-items: center; gap: 8px; color: #15803d; font-size: 14px;">
+                ${icon('check')} Authenticator app is active
+              </strong>
+              <p style="margin: 6px 0 0; font-size: 13px; color: #166534;">
+                A 6-digit TOTP verification code from your authenticator app is required whenever you sign in.
+              </p>
+              ${status.enabledAt ? `<small class="muted" style="display:block;margin-top:8px;">Active since: ${new Date(status.enabledAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</small>` : ''}
+            </div>
+
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+              <button type="button" class="secondary" id="btn-regen-recovery">🔄 Regenerate Recovery Codes</button>
+              <button type="button" class="secondary" id="btn-disable-2fa" style="color: #dc2626; border-color: #fecaca;">Disable 2FA</button>
+            </div>
+            
+            <div id="account-mfa-action-area" style="margin-top: 14px;"></div>
+          ` : `
+            <div style="background: var(--surface-subtle, #f8fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 16px; margin-bottom: 16px;">
+              <strong style="display: flex; align-items: center; gap: 6px; font-size: 14px;">
+                📱 Time-based One-Time Password (TOTP)
+              </strong>
+              <p class="muted" style="margin: 6px 0 0; font-size: 13px;">
+                Add an extra layer of defense against password theft. Generates offline verification codes that change every 30 seconds.
+              </p>
+            </div>
+            
+            <button type="button" class="primary wide" id="btn-enable-2fa">📱 Set up Authenticator App →</button>
+            <div id="account-mfa-setup-area" style="margin-top: 14px;"></div>
+          `}
+        </section>
+      </div>
+    `;
+
+    workspace(content, 'account', admin);
+    wireHandlers();
   };
+
+  const wireHandlers = () => {
+    // Password change submission
+    const passwordForm = document.querySelector('#password-form');
+    if (passwordForm) {
+      passwordForm.onsubmit = async event => {
+        event.preventDefault();
+        const values = Object.fromEntries(new FormData(event.target));
+        if (values.password !== values.confirm) return notify('The new passwords do not match.');
+        if (values.password.length < 12) return notify('Password must contain at least 12 characters.');
+        const btn = event.submitter || document.querySelector('#btn-change-password');
+        btn.disabled = true;
+        try {
+          await api('/api/auth/password', {
+            method: 'POST',
+            body: { current: values.current, password: values.password, code: values.code || undefined }
+          });
+          notify('Password changed successfully. Please sign in again.');
+          onSignedOut();
+        } catch (error) {
+          notify(error.message);
+          btn.disabled = false;
+        }
+      };
+    }
+
+    // Enable 2FA Click
+    const enableBtn = document.querySelector('#btn-enable-2fa');
+    if (enableBtn) {
+      enableBtn.onclick = async () => {
+        enableBtn.disabled = true;
+        const container = document.querySelector('#account-mfa-setup-area');
+        container.innerHTML = '<p class="muted">Generating secure authenticator setup key...</p>';
+        try {
+          const result = await api('/api/auth/mfa/setup', { method: 'POST' });
+          container.innerHTML = `
+            <div style="background: var(--surface-hover, #f8fafc); border-radius: 12px; padding: 18px; border: 1px solid var(--border, #e2e8f0);">
+              <h3 style="margin: 0 0 8px; font-size: 15px;">1. Scan QR with Authenticator App</h3>
+              <p class="muted" style="margin: 0 0 12px; font-size: 13px;">Open Google Authenticator, Microsoft Authenticator, or 1Password and scan:</p>
+              
+              <div style="text-align: center; margin: 12px 0;">
+                <img src="${result.image}" alt="TOTP QR Code" style="max-width: 170px; border-radius: 8px; border: 1px solid var(--border, #cbd5e1); padding: 4px; background: #fff; display: inline-block;">
+              </div>
+              
+              <p class="muted" style="margin: 10px 0 4px; font-size: 12px; text-align: center;">Or manually enter this secret setup key:</p>
+              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 14px;">
+                <code style="font-family: monospace; font-size: 14px; font-weight: 700; background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; letter-spacing: 1.5px;">${esc(result.secret)}</code>
+                <button type="button" class="secondary" id="btn-copy-totp-key" style="padding: 6px 10px; font-size: 12px;">Copy</button>
+              </div>
+
+              <h3 style="margin: 16px 0 8px; font-size: 15px;">2. Enter 6-digit Code to Confirm</h3>
+              <form id="confirm-mfa-form">
+                <label class="field">6-digit Code
+                  <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" required placeholder="000000" autocomplete="one-time-code" autofocus>
+                </label>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                  <button class="primary" style="flex: 1;" id="btn-submit-mfa-confirm">Confirm & Enable 2FA</button>
+                  <button type="button" class="secondary" id="btn-cancel-mfa-setup">Cancel</button>
+                </div>
+              </form>
+            </div>
+          `;
+
+          document.querySelector('#btn-copy-totp-key')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(result.secret).then(() => notify('Setup key copied to clipboard!'));
+          });
+
+          document.querySelector('#btn-cancel-mfa-setup')?.addEventListener('click', () => {
+            container.innerHTML = '';
+            enableBtn.disabled = false;
+          });
+
+          document.querySelector('#confirm-mfa-form').onsubmit = async e => {
+            e.preventDefault();
+            const submitBtn = document.querySelector('#btn-submit-mfa-confirm');
+            submitBtn.disabled = true;
+            try {
+              const res = await api('/api/auth/mfa/confirm', {
+                method: 'POST',
+                body: { code: new FormData(e.target).get('code') }
+              });
+              notify('✅ Two-Factor Authentication is now active!');
+              
+              if (res.recoveryCodes && res.recoveryCodes.length > 0) {
+                container.innerHTML = `
+                  <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 12px; padding: 20px; margin-top: 10px;">
+                    <strong style="color: #15803d; font-size: 15px; display: block; margin-bottom: 6px;">✓ 2FA Enabled & Single-Use Recovery Codes Generated</strong>
+                    <p style="font-size: 13px; color: #166534; margin: 0 0 12px;">
+                      Store these 8 single-use recovery codes in a secure password manager. If you ever lose access to your authenticator device, each code can be used once to sign in.
+                    </p>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; font-family: monospace; font-size: 13px; font-weight: 700; background: #fff; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; margin-bottom: 14px;">
+                      ${res.recoveryCodes.map(code => `<div style="padding: 4px; text-align: center; letter-spacing: 1px; color: #1e293b;">${esc(code)}</div>`).join('')}
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                      <button type="button" class="secondary" id="btn-copy-recovery-codes">📋 Copy all recovery codes</button>
+                      <button type="button" class="primary" id="btn-done-mfa-setup">Done</button>
+                    </div>
+                  </div>
+                `;
+
+                document.querySelector('#btn-copy-recovery-codes')?.addEventListener('click', () => {
+                  navigator.clipboard.writeText(res.recoveryCodes.join('\n')).then(() => notify('Recovery codes copied to clipboard!'));
+                });
+
+                document.querySelector('#btn-done-mfa-setup')?.addEventListener('click', async () => {
+                  await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+                });
+              } else {
+                await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+              }
+            } catch (err) {
+              notify(err.message);
+              submitBtn.disabled = false;
+            }
+          };
+        } catch (err) {
+          notify(err.message);
+          container.innerHTML = '';
+          enableBtn.disabled = false;
+        }
+      };
+    }
+
+    // Regenerate Recovery Codes Click
+    const regenBtn = document.querySelector('#btn-regen-recovery');
+    if (regenBtn) {
+      regenBtn.onclick = () => {
+        const area = document.querySelector('#account-mfa-action-area');
+        area.innerHTML = `
+          <div style="background: var(--surface-hover, #f8fafc); border: 1px solid var(--border, #cbd5e1); border-radius: 12px; padding: 16px;">
+            <h3 style="margin: 0 0 6px; font-size: 14px;">Regenerate Recovery Codes</h3>
+            <p class="muted" style="margin: 0 0 12px; font-size: 12.5px;">
+              Generating new recovery codes will immediately invalidate all previously issued recovery codes.
+            </p>
+            <form id="regen-recovery-form">
+              <label class="field">Current password
+                <input name="password" type="password" required autocomplete="current-password" placeholder="Confirm your password">
+              </label>
+              <label class="field">Current 6-digit Authenticator Code
+                <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" required placeholder="000000" autocomplete="one-time-code">
+              </label>
+              <div style="display: flex; gap: 8px; margin-top: 10px;">
+                <button class="primary" id="btn-submit-regen">Generate New Codes</button>
+                <button type="button" class="secondary" id="btn-cancel-regen">Cancel</button>
+              </div>
+            </form>
+          </div>
+        `;
+
+        document.querySelector('#btn-cancel-regen')?.addEventListener('click', () => { area.innerHTML = ''; });
+        document.querySelector('#regen-recovery-form').onsubmit = async e => {
+          e.preventDefault();
+          const btn = document.querySelector('#btn-submit-regen');
+          btn.disabled = true;
+          try {
+            const formData = new FormData(e.target);
+            const res = await api('/api/auth/mfa/recovery-codes/regenerate', {
+              method: 'POST',
+              body: { password: formData.get('password'), code: formData.get('code') }
+            });
+            notify('✅ New recovery codes generated successfully!');
+            area.innerHTML = `
+              <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 12px; padding: 16px;">
+                <strong style="color: #15803d; font-size: 14px; display: block; margin-bottom: 6px;">New Recovery Codes</strong>
+                <p style="font-size: 12.5px; color: #166534; margin: 0 0 10px;">Make sure to copy and save these codes. Previous codes are now invalid.</p>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; font-family: monospace; font-size: 13px; font-weight: 700; background: #fff; padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; margin-bottom: 10px;">
+                  ${res.recoveryCodes.map(code => `<div style="padding: 4px; text-align: center; letter-spacing: 1px;">${esc(code)}</div>`).join('')}
+                </div>
+                <div style="display: flex; gap: 8px;">
+                  <button type="button" class="secondary" id="btn-copy-new-codes">📋 Copy codes</button>
+                  <button type="button" class="primary" id="btn-close-regen">Done</button>
+                </div>
+              </div>
+            `;
+            document.querySelector('#btn-copy-new-codes')?.addEventListener('click', () => {
+              navigator.clipboard.writeText(res.recoveryCodes.join('\n')).then(() => notify('Recovery codes copied!'));
+            });
+            document.querySelector('#btn-close-regen')?.addEventListener('click', () => { area.innerHTML = ''; });
+          } catch (err) {
+            notify(err.message);
+            btn.disabled = false;
+          }
+        };
+      };
+    }
+
+    // Disable 2FA Click
+    const disableBtn = document.querySelector('#btn-disable-2fa');
+    if (disableBtn) {
+      disableBtn.onclick = () => {
+        const area = document.querySelector('#account-mfa-action-area');
+        area.innerHTML = `
+          <div style="background: #fff1f2; border: 1px solid #fecdd3; border-radius: 12px; padding: 16px;">
+            <h3 style="margin: 0 0 6px; font-size: 14px; color: #9f1239;">Disable Two-Factor Authentication</h3>
+            <p style="margin: 0 0 12px; font-size: 12.5px; color: #be123c;">
+              Warning: Disabling 2FA lowers account security. Re-authentication with your current password and a valid 2FA code is required.
+            </p>
+            <form id="disable-2fa-form">
+              <label class="field">Current password
+                <input name="password" type="password" required autocomplete="current-password" placeholder="Confirm your password">
+              </label>
+              <label class="field">6-digit Authenticator Code or Recovery Code
+                <input name="code" type="text" maxlength="19" required placeholder="6-digit code or recovery code" autocomplete="one-time-code">
+              </label>
+              <div style="display: flex; gap: 8px; margin-top: 10px;">
+                <button class="primary" style="background: #dc2626; border-color: #dc2626;" id="btn-confirm-disable">Yes, Disable 2FA</button>
+                <button type="button" class="secondary" id="btn-cancel-disable">Cancel</button>
+              </div>
+            </form>
+          </div>
+        `;
+
+        document.querySelector('#btn-cancel-disable')?.addEventListener('click', () => { area.innerHTML = ''; });
+        document.querySelector('#disable-2fa-form').onsubmit = async e => {
+          e.preventDefault();
+          const btn = document.querySelector('#btn-confirm-disable');
+          btn.disabled = true;
+          try {
+            const formData = new FormData(e.target);
+            await api('/api/auth/mfa/disable', {
+              method: 'POST',
+              body: { password: formData.get('password'), code: formData.get('code') }
+            });
+            notify('Two-factor authentication disabled.');
+            await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+          } catch (err) {
+            notify(err.message);
+            btn.disabled = false;
+          }
+        };
+      };
+    }
+  };
+
+  render();
 }
