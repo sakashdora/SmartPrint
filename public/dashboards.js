@@ -392,12 +392,15 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
           <p class="utility-qr-desc">Display this QR code at your shop counter. Customers can scan it with their phone camera to order.</p>
           <div class="utility-qr-frame">
             ${qr && qr.image ? `
-              <img src="${qr.image}" alt="Shop QR Code" class="utility-qr-img">
+              <img src="${qr.image}" data-url="${escape(qr.url || '')}" alt="Shop QR Code" class="utility-qr-img">
             ` : `
               <div class="qr-placeholder-box">${icon('qr')}</div>
             `}
           </div>
-          <a href="#settings" class="btn-deep-teal wide">${icon('qr')} View & Print Shop QR Card →</a>
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <a href="#settings" class="btn-deep-teal wide" style="margin:0;display:flex;align-items:center;justify-content:center;gap:6px;">${icon('qr')} Standee &amp; Prices</a>
+            <button type="button" class="secondary" id="dash-download-qr-poster" title="Download High-Res Counter Poster" style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;padding:8px 12px;">${icon('download')} Poster</button>
+          </div>
           <div class="utility-privacy-alert">
             ${icon('info')}
             <span>Files are deleted after confirmed printing. Transaction records stay available.</span>

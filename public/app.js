@@ -1,5 +1,8 @@
 import { watchUpdates, stopUpdates } from './live.js';
 import { icon, brand } from './ui.js';
+import { downloadPdf } from './viewer.js';
+import { downloadQrPoster } from './qr-poster.js';
+import { playChime, sendRealNotification } from './notifications.js';
 const app = document.querySelector('#app');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const money = n => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n / 100);
@@ -557,18 +560,36 @@ async function owner(view) {
   }
   document.querySelector('#prices')?.addEventListener('submit', event => { event.preventDefault(); busy(event.submitter, async () => { const form = new FormData(event.target); await api('/api/owner/prices', { method: 'PUT', body: { bw: Math.round(Number(form.get('bw')) * 100), color: Math.round(Number(form.get('color')) * 100) } }); notify('Prices updated for new quotes.'); await owner(view); }); });
   document.querySelector('#print-standee')?.addEventListener('click', () => { window.print(); });
-  document.querySelector('#download-qr-poster')?.addEventListener('click', event => busy(event.currentTarget, async () => {
-    const qr = await api('/api/owner/qr');
-    await downloadQrPoster(store, qr);
-  }));
-  document.querySelector('#copy-shop-url')?.addEventListener('click', () => {
-    const shopUrl = document.querySelector('.shop-counter-qr-img').dataset.url;
-    if (navigator.clipboard) {
+  const handleDownloadQrPoster = event => busy(event.currentTarget, async () => {
+    let currentStore = store;
+    if (!currentStore) {
+      currentStore = await api('/api/owner/shop');
+      store = currentStore;
+    }
+    let shopQr = qr || cachedQrData;
+    if (!shopQr || !shopQr.image) {
+      shopQr = await api('/api/owner/qr');
+      cachedQrData = shopQr;
+    }
+    if (!shopQr || !shopQr.image) {
+      throw new Error('QR code could not be loaded. Please try again.');
+    }
+    await downloadQrPoster(currentStore, shopQr);
+    notify('Counter QR poster downloaded.');
+  });
+  document.querySelector('#download-qr-poster')?.addEventListener('click', handleDownloadQrPoster);
+  document.querySelector('#dash-download-qr-poster')?.addEventListener('click', handleDownloadQrPoster);
+
+  const handleCopyShopUrl = () => {
+    const img = document.querySelector('.shop-counter-qr-img') || document.querySelector('.utility-qr-img');
+    const shopUrl = img?.dataset?.url || (window.location.origin + '/?shop=' + encodeURIComponent(store?.slug || ''));
+    if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(shopUrl).then(() => notify('Shop QR link copied to clipboard!')).catch(() => notify('Link: ' + shopUrl));
     } else {
       notify('Link: ' + shopUrl);
     }
-  });
+  };
+  document.querySelector('#copy-shop-url')?.addEventListener('click', handleCopyShopUrl);
   document.querySelector('#previous-transactions')?.addEventListener('click', () => { transactionOffset = Math.max(0, transactionOffset - 100); owner(view); });
   document.querySelector('#next-transactions')?.addEventListener('click', () => { transactionOffset += 100; owner(view); });
   if (['owner','queue','transactions'].includes(view)) {
