@@ -35,6 +35,7 @@ export function applyAspectRatio(box, ratio, maxWidth, maxHeight) {
 export function isConvexQuad(p0, p1, p2, p3) {
   if (!p0 || !p1 || !p2 || !p3) return false;
   const pts = [p0, p1, p2, p3];
+  if (pts.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
   let sign = 0;
   for (let i = 0; i < 4; i++) {
     const a = pts[i];
@@ -49,19 +50,55 @@ export function isConvexQuad(p0, p1, p2, p3) {
   return true;
 }
 
+// Strictly orders 4 points into [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+export function orderCorners(pts) {
+  const arr = Array.isArray(pts) ? pts : [pts?.p0, pts?.p1, pts?.p2, pts?.p3];
+  const safeArr = arr.map((p, idx) => ({
+    x: (p && Number.isFinite(p.x)) ? p.x : (idx === 1 || idx === 2 ? 100 : 0),
+    y: (p && Number.isFinite(p.y)) ? p.y : (idx >= 2 ? 100 : 0)
+  }));
+
+  // Sort by sum of coordinates (x + y):
+  // Top-Left (p0) has the smallest sum; Bottom-Right (p2) has the largest sum
+  const sumSorted = [...safeArr].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const p0 = sumSorted[0];
+  const p2 = sumSorted[3];
+
+  // The remaining two points are Top-Right (p1) and Bottom-Left (p3):
+  // Sort remaining by difference (y - x):
+  // Top-Right has smaller (y - x) (large x, small y)
+  // Bottom-Left has larger (y - x) (small x, large y)
+  const remaining = [sumSorted[1], sumSorted[2]];
+  remaining.sort((a, b) => (a.y - a.x) - (b.y - b.x));
+  const p1 = remaining[0];
+  const p3 = remaining[1];
+
+  return { p0, p1, p2, p3 };
+}
+
 // Calculates optimal destination dimensions preserving document aspect ratio
 export function getQuadDimensions(p0, p1, p2, p3) {
-  const topW = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-  const botW = Math.hypot(p2.x - p3.x, p2.y - p3.y);
-  const leftH = Math.hypot(p3.x - p0.x, p3.y - p0.y);
-  const rightH = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-  const width = Math.max(10, Math.round(Math.max(topW, botW)));
-  const height = Math.max(10, Math.round(Math.max(leftH, rightH)));
+  const safeHypot = (x1, y1, x2, y2) => {
+    const dx = (Number.isFinite(x2) ? x2 : 0) - (Number.isFinite(x1) ? x1 : 0);
+    const dy = (Number.isFinite(y2) ? y2 : 0) - (Number.isFinite(y1) ? y1 : 0);
+    return Math.hypot(dx, dy);
+  };
+  const topW = safeHypot(p0?.x, p0?.y, p1?.x, p1?.y);
+  const botW = safeHypot(p3?.x, p3?.y, p2?.x, p2?.y);
+  const leftH = safeHypot(p0?.x, p0?.y, p3?.x, p3?.y);
+  const rightH = safeHypot(p1?.x, p1?.y, p2?.x, p2?.y);
+  const maxW = Math.max(topW || 0, botW || 0);
+  const maxH = Math.max(leftH || 0, rightH || 0);
+  const width = Math.max(10, Math.round(Number.isFinite(maxW) ? maxW : 10));
+  const height = Math.max(10, Math.round(Number.isFinite(maxH) ? maxH : 10));
   return { width, height };
 }
 
 // Paul Heckbert closed-form projective mapping from rectangle [0, W] x [0, H] to quad [p0, p1, p2, p3]
 export function solveHomography(p0, p1, p2, p3, W, H) {
+  const safeW = Math.max(1, Number.isFinite(W) ? W : 1);
+  const safeH = Math.max(1, Number.isFinite(H) ? H : 1);
+
   const dx1 = p1.x - p2.x;
   const dx2 = p3.x - p2.x;
   const sx = p0.x - p1.x + p2.x - p3.x;
@@ -78,82 +115,126 @@ export function solveHomography(p0, p1, p2, p3, W, H) {
     }
   }
 
-  const a = (p1.x - p0.x + g * p1.x) / W;
-  const b = (p3.x - p0.x + h * p3.x) / H;
+  const a = (p1.x - p0.x + g * p1.x) / safeW;
+  const b = (p3.x - p0.x + h * p3.x) / safeH;
   const c = p0.x;
-  const d = (p1.y - p0.y + g * p1.y) / W;
-  const e = (p3.y - p0.y + h * p3.y) / H;
+  const d = (p1.y - p0.y + g * p1.y) / safeW;
+  const e = (p3.y - p0.y + h * p3.y) / safeH;
   const f = p0.y;
-  const g_step = g / W;
-  const h_step = h / H;
+  const g_step = g / safeW;
+  const h_step = h / safeH;
+
+  // Safe fallback to affine projection if any coefficient is NaN or Infinity
+  if (![a, b, c, d, e, f, g_step, h_step].every(Number.isFinite)) {
+    return {
+      a: (p1.x - p0.x) / safeW,
+      b: (p3.x - p0.x) / safeH,
+      c: p0.x,
+      d: (p1.y - p0.y) / safeW,
+      e: (p3.y - p0.y) / safeH,
+      f: p0.y,
+      g_step: 0,
+      h_step: 0
+    };
+  }
 
   return { a, b, c, d, e, f, g_step, h_step };
 }
 
 // Applies high-quality bilinear interpolation perspective warp from sourceCanvas to output
 export function warpPerspectiveCanvas(sourceCanvas, corners, outW, outH) {
+  if (!sourceCanvas || sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+    const emptyCanvas = document.createElement('canvas');
+    emptyCanvas.width = emptyCanvas.height = 1;
+    return emptyCanvas;
+  }
+
+  // Ensure output dimensions are valid positive integers
+  let safeOutW = Math.max(10, Math.round(Number.isFinite(outW) ? outW : 10));
+  let safeOutH = Math.max(10, Math.round(Number.isFinite(outH) ? outH : 10));
+
   // Cap destination to 1400px (crisp 200-300 DPI print quality) for sub-second perspective warp
   const maxDim = 1400;
-  if (outW > maxDim || outH > maxDim) {
-    const scale = Math.min(maxDim / outW, maxDim / outH);
-    outW = Math.max(10, Math.round(outW * scale));
-    outH = Math.max(10, Math.round(outH * scale));
+  if (safeOutW > maxDim || safeOutH > maxDim) {
+    const scale = Math.min(maxDim / safeOutW, maxDim / safeOutH);
+    safeOutW = Math.max(10, Math.round(safeOutW * scale));
+    safeOutH = Math.max(10, Math.round(safeOutH * scale));
   }
 
   const output = document.createElement('canvas');
-  output.width = outW;
-  output.height = outH;
+  output.width = safeOutW;
+  output.height = safeOutH;
   const outCtx = output.getContext('2d');
   const srcCtx = sourceCanvas.getContext('2d');
 
   const srcW = sourceCanvas.width;
   const srcH = sourceCanvas.height;
   const srcData = srcCtx.getImageData(0, 0, srcW, srcH);
-  const dstData = outCtx.createImageData(outW, outH);
+  const dstData = outCtx.createImageData(safeOutW, safeOutH);
 
   const sData = srcData.data;
   const dData = dstData.data;
 
-  const { p0, p1, p2, p3 } = corners;
-  const { a, b, c, d, e, f, g_step, h_step } = solveHomography(p0, p1, p2, p3, outW, outH);
+  // Guarantee corners are strictly ordered [TL, TR, BR, BL]
+  const ordered = orderCorners(corners);
+  const { p0, p1, p2, p3 } = ordered;
+  const { a, b, c, d, e, f, g_step, h_step } = solveHomography(p0, p1, p2, p3, safeOutW, safeOutH);
 
-  for (let v = 0; v < outH; v++) {
-    let numX = b * v + c;
-    let numY = e * v + f;
-    let denom = h_step * v + 1;
-    const rowOffset = v * outW * 4;
+  for (let v = 0; v < safeOutH; v++) {
+    const rowOffset = v * safeOutW * 4;
+    const v_term_x = b * v + c;
+    const v_term_y = e * v + f;
+    const v_term_denom = h_step * v + 1;
 
-    for (let u = 0; u < outW; u++) {
-      const invD = 1 / denom;
-      const sxCoord = numX * invD;
-      const syCoord = numY * invD;
+    for (let u = 0; u < safeOutW; u++) {
+      const denom = v_term_denom + g_step * u;
+      if (Math.abs(denom) > 1e-7) {
+        const invD = 1 / denom;
+        const sxCoord = (v_term_x + a * u) * invD;
+        const syCoord = (v_term_y + d * u) * invD;
 
-      const x0 = Math.floor(sxCoord);
-      const y0 = Math.floor(syCoord);
+        if (Number.isFinite(sxCoord) && Number.isFinite(syCoord)) {
+          const x0 = Math.floor(sxCoord);
+          const y0 = Math.floor(syCoord);
 
-      if (x0 >= 0 && x0 < srcW - 1 && y0 >= 0 && y0 < srcH - 1) {
-        const fx = sxCoord - x0;
-        const fy = syCoord - y0;
-        const idx00 = (y0 * srcW + x0) * 4;
-        const idx10 = idx00 + 4;
-        const idx01 = idx00 + srcW * 4;
-        const idx11 = idx01 + 4;
+          if (x0 >= 0 && x0 < srcW - 1 && y0 >= 0 && y0 < srcH - 1) {
+            const fx = sxCoord - x0;
+            const fy = syCoord - y0;
+            const idx00 = (y0 * srcW + x0) * 4;
+            const idx10 = idx00 + 4;
+            const idx01 = idx00 + srcW * 4;
+            const idx11 = idx01 + 4;
 
-        const w00 = (1 - fx) * (1 - fy);
-        const w10 = fx * (1 - fy);
-        const w01 = (1 - fx) * fy;
-        const w11 = fx * fy;
+            const w00 = (1 - fx) * (1 - fy);
+            const w10 = fx * (1 - fy);
+            const w01 = (1 - fx) * fy;
+            const w11 = fx * fy;
 
-        const outIdx = rowOffset + u * 4;
-        dData[outIdx] = w00 * sData[idx00] + w10 * sData[idx10] + w01 * sData[idx01] + w11 * sData[idx11];
-        dData[outIdx + 1] = w00 * sData[idx00 + 1] + w10 * sData[idx10 + 1] + w01 * sData[idx01 + 1] + w11 * sData[idx11 + 1];
-        dData[outIdx + 2] = w00 * sData[idx00 + 2] + w10 * sData[idx10 + 2] + w01 * sData[idx01 + 2] + w11 * sData[idx11 + 2];
-        dData[outIdx + 3] = 255;
+            const outIdx = rowOffset + u * 4;
+            dData[outIdx] = Math.round(w00 * sData[idx00] + w10 * sData[idx10] + w01 * sData[idx01] + w11 * sData[idx11]);
+            dData[outIdx + 1] = Math.round(w00 * sData[idx00 + 1] + w10 * sData[idx10 + 1] + w01 * sData[idx01 + 1] + w11 * sData[idx11 + 1]);
+            dData[outIdx + 2] = Math.round(w00 * sData[idx00 + 2] + w10 * sData[idx10 + 2] + w01 * sData[idx01 + 2] + w11 * sData[idx11 + 2]);
+            dData[outIdx + 3] = 255;
+            continue;
+          } else if (x0 >= 0 && x0 < srcW && y0 >= 0 && y0 < srcH) {
+            // Nearest-neighbor fallback for single-pixel boundary edge
+            const idx = (y0 * srcW + x0) * 4;
+            const outIdx = rowOffset + u * 4;
+            dData[outIdx] = sData[idx];
+            dData[outIdx + 1] = sData[idx + 1];
+            dData[outIdx + 2] = sData[idx + 2];
+            dData[outIdx + 3] = 255;
+            continue;
+          }
+        }
       }
 
-      numX += a;
-      numY += d;
-      denom += g_step;
+      // Default background for pixels outside source range: white document paper
+      const outIdx = rowOffset + u * 4;
+      dData[outIdx] = 255;
+      dData[outIdx + 1] = 255;
+      dData[outIdx + 2] = 255;
+      dData[outIdx + 3] = 255;
     }
   }
 
@@ -639,7 +720,7 @@ export async function openDocumentEditor({
       <!-- Canvas container with responsive viewport -->
       <div class="editor-canvas-wrapper" style="position:relative;background:#0f172a;border-radius:10px;overflow:hidden;display:flex;justify-content:center;align-items:center;padding:8px;min-height:280px;max-height:55dvh;">
         <canvas class="crop-canvas" id="editor-interactive-canvas" aria-label="Interactive document scanner canvas"></canvas>
-        <div id="canvas-loading-spinner" style="display:none;position:absolute;inset:0;background:rgba(15,23,42,0.7);color:white;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-size:13px;font-weight:600;">
+        <div id="canvas-loading-spinner" style="display:none;position:absolute;inset:0;background:rgba(15,23,42,0.75);color:white;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-size:13px;font-weight:600;z-index:30;">
           <div class="spinner" style="width:28px;height:28px;border:3px solid rgba(255,255,255,0.3);border-top-color:#2563eb;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
           <span>Processing document...</span>
         </div>
@@ -677,6 +758,25 @@ export async function openDocumentEditor({
     const subRect = dialog.querySelector('#subtoolbar-rect');
     const subBlur = dialog.querySelector('#subtoolbar-blur');
     const subFilters = dialog.querySelector('#subtoolbar-filters');
+
+    // Centralized processing state controller with safe UI release
+    const setProcessing = (isProcessing, message = 'Processing document...') => {
+      applying = isProcessing;
+      if (spinner) {
+        spinner.style.display = isProcessing ? 'flex' : 'none';
+        const msgEl = spinner.querySelector('span');
+        if (msgEl && message) msgEl.textContent = message;
+      }
+      dialog.querySelectorAll('button, input').forEach(el => {
+        el.disabled = isProcessing;
+      });
+      if (!isProcessing) {
+        updateHistoryButtons();
+      }
+    };
+
+    // Guarantee that spinner is never left visible on initial mount
+    setProcessing(false);
 
     // Wire Compare Original button
     const compareBtn = dialog.querySelector('#btn-toggle-compare');
@@ -735,25 +835,39 @@ export async function openDocumentEditor({
     // Calculate display canvas scale
     const updateDisplayScale = () => {
       curDims = getTransformedDimensions();
-      const maxDisplayW = Math.min(1000, window.innerWidth - 60);
-      const maxDisplayH = Math.min(650, window.innerHeight * 0.52);
-      const scale = Math.min(1, maxDisplayW / curDims.width, maxDisplayH / curDims.height);
-      canvas.width = Math.max(1, Math.round(curDims.width * scale));
-      canvas.height = Math.max(1, Math.round(curDims.height * scale));
+      const safeW = Math.max(1, curDims.width || 1);
+      const safeH = Math.max(1, curDims.height || 1);
+      const maxDisplayW = Math.max(200, Math.min(1000, (window.innerWidth || 1024) - 60));
+      const maxDisplayH = Math.max(200, Math.min(650, (window.innerHeight || 768) * 0.52));
+      const scale = Math.min(1, maxDisplayW / safeW, maxDisplayH / safeH);
+      canvas.width = Math.max(1, Math.round(safeW * scale));
+      canvas.height = Math.max(1, Math.round(safeH * scale));
     };
 
     updateDisplayScale();
 
     // Map coordinates between display canvas and full-res image space
-    const toCanvasPoint = pt => ({
-      x: (pt.x / curDims.width) * canvas.width,
-      y: (pt.y / curDims.height) * canvas.height
-    });
+    const toCanvasPoint = pt => {
+      const w = Math.max(1, curDims.width || 1);
+      const h = Math.max(1, curDims.height || 1);
+      const x = (pt && Number.isFinite(pt.x)) ? pt.x : 0;
+      const y = (pt && Number.isFinite(pt.y)) ? pt.y : 0;
+      return {
+        x: (x / w) * canvas.width,
+        y: (y / h) * canvas.height
+      };
+    };
 
-    const toImagePoint = (cx, cy) => ({
-      x: Math.max(0, Math.min(curDims.width, (cx / canvas.width) * curDims.width)),
-      y: Math.max(0, Math.min(curDims.height, (cy / canvas.height) * curDims.height))
-    });
+    const toImagePoint = (cx, cy) => {
+      const cw = Math.max(1, canvas.width || 1);
+      const ch = Math.max(1, canvas.height || 1);
+      const safeX = Number.isFinite(cx) ? cx : 0;
+      const safeY = Number.isFinite(cy) ? cy : 0;
+      return {
+        x: Math.max(0, Math.min(curDims.width, (safeX / cw) * curDims.width)),
+        y: Math.max(0, Math.min(curDims.height, (safeY / ch) * curDims.height))
+      };
+    };
 
     // Draw main interactive canvas
     const draw = () => {
@@ -908,8 +1022,10 @@ export async function openDocumentEditor({
     // Pointer events on canvas for 4-corner, rect, and redact box dragging
     const getPointerPos = event => {
       const rect = canvas.getBoundingClientRect();
-      const cx = (event.clientX - rect.left) * (canvas.width / rect.width);
-      const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
+      const rw = Math.max(1, rect.width || canvas.width || 1);
+      const rh = Math.max(1, rect.height || canvas.height || 1);
+      const cx = (event.clientX - rect.left) * (canvas.width / rw);
+      const cy = (event.clientY - rect.top) * (canvas.height / rh);
       return { cx, cy, imgPt: toImagePoint(cx, cy) };
     };
 
@@ -980,11 +1096,21 @@ export async function openDocumentEditor({
     canvas.onpointerup = canvas.onpointercancel = () => {
       isDraggingHandle = -1;
       dragAnchor = null;
+      if (activeTool === 'perspective' || activeTool === 'auto') {
+        if (!isConvexQuad(corners.p0, corners.p1, corners.p2, corners.p3)) {
+          corners = orderCorners(corners);
+          errorMsg.textContent = '';
+          applyBtn.disabled = false;
+          draw();
+        }
+      }
     };
 
     // Tool tab buttons
     dialog.querySelectorAll('.editor-tab-btn').forEach(btn => {
       btn.onclick = () => {
+        if (applying) return;
+        setProcessing(false);
         const tool = btn.dataset.tool;
         if (tool === 'rotate') {
           pushState();
@@ -1005,7 +1131,7 @@ export async function openDocumentEditor({
           pushState();
           const autoCorners = detectCornersOnCanvas();
           if (autoCorners && isConvexQuad(autoCorners.p0, autoCorners.p1, autoCorners.p2, autoCorners.p3)) {
-            corners = autoCorners;
+            corners = orderCorners(autoCorners);
             errorMsg.textContent = 'Auto crop detected document edges.';
             errorMsg.style.color = '#15803d';
           } else {
@@ -1013,6 +1139,14 @@ export async function openDocumentEditor({
             errorMsg.style.color = '#475569';
           }
           activeTool = 'perspective';
+          updateToolVisibility();
+          return;
+        }
+        if (tool === 'perspective') {
+          pushState();
+          corners = orderCorners(corners);
+          activeTool = 'perspective';
+          errorMsg.textContent = '';
           updateToolVisibility();
           return;
         }
@@ -1178,30 +1312,38 @@ export async function openDocumentEditor({
 
     // Apply & Continue button
     applyBtn.onclick = async () => {
-      applying = true;
-      spinner.style.display = 'flex';
-      dialog.querySelectorAll('button, input').forEach(el => el.disabled = true);
+      if (applying) return;
+      errorMsg.textContent = '';
+      setProcessing(true, 'Processing document...');
+      // Allow browser to render the loading indicator before heavy canvas operations
+      await new Promise(r => setTimeout(r, 25));
 
       try {
         let finalCanvas;
 
         if (activeTool === 'rect') {
           // Rectangular crop from rotated canvas
+          const safeW = Math.max(10, Math.round(rectBox.width || 10));
+          const safeH = Math.max(10, Math.round(rectBox.height || 10));
+          const safeLeft = Math.max(0, Math.min(curDims.width - safeW, Math.round(rectBox.left || 0)));
+          const safeTop = Math.max(0, Math.min(curDims.height - safeH, Math.round(rectBox.top || 0)));
+
           finalCanvas = document.createElement('canvas');
-          finalCanvas.width = rectBox.width;
-          finalCanvas.height = rectBox.height;
+          finalCanvas.width = safeW;
+          finalCanvas.height = safeH;
           const fCtx = finalCanvas.getContext('2d');
           fCtx.drawImage(
             currentSourceCanvas,
-            rectBox.left, rectBox.top, rectBox.width, rectBox.height,
-            0, 0, rectBox.width, rectBox.height
+            safeLeft, safeTop, safeW, safeH,
+            0, 0, safeW, safeH
           );
         } else {
           // Perspective crop using projective homography
-          const isFullQuad = corners.p0.x === 0 && corners.p0.y === 0 &&
-            corners.p1.x === curDims.width && corners.p1.y === 0 &&
-            corners.p2.x === curDims.width && corners.p2.y === curDims.height &&
-            corners.p3.x === 0 && corners.p3.y === curDims.height;
+          const ordered = orderCorners(corners);
+          const isFullQuad = ordered.p0.x <= 2 && ordered.p0.y <= 2 &&
+            Math.abs(ordered.p1.x - curDims.width) <= 2 && ordered.p1.y <= 2 &&
+            Math.abs(ordered.p2.x - curDims.width) <= 2 && Math.abs(ordered.p2.y - curDims.height) <= 2 &&
+            ordered.p3.x <= 2 && Math.abs(ordered.p3.y - curDims.height) <= 2;
 
           if (isFullQuad) {
             finalCanvas = document.createElement('canvas');
@@ -1209,23 +1351,23 @@ export async function openDocumentEditor({
             finalCanvas.height = curDims.height;
             finalCanvas.getContext('2d').drawImage(currentSourceCanvas, 0, 0);
           } else {
-            const quadDims = getQuadDimensions(corners.p0, corners.p1, corners.p2, corners.p3);
-            const isNearRect = Math.abs(corners.p0.y - corners.p1.y) <= 6 &&
-              Math.abs(corners.p3.y - corners.p2.y) <= 6 &&
-              Math.abs(corners.p0.x - corners.p3.x) <= 6 &&
-              Math.abs(corners.p1.x - corners.p2.x) <= 6;
+            const quadDims = getQuadDimensions(ordered.p0, ordered.p1, ordered.p2, ordered.p3);
+            const isNearRect = Math.abs(ordered.p0.y - ordered.p1.y) <= 4 &&
+              Math.abs(ordered.p3.y - ordered.p2.y) <= 4 &&
+              Math.abs(ordered.p0.x - ordered.p3.x) <= 4 &&
+              Math.abs(ordered.p1.x - ordered.p2.x) <= 4;
 
             if (isNearRect) {
-              const sx = Math.max(0, Math.min(corners.p0.x, corners.p3.x));
-              const sy = Math.max(0, Math.min(corners.p0.y, corners.p1.y));
-              const sw = Math.min(currentSourceCanvas.width - sx, Math.max(corners.p1.x, corners.p2.x) - sx);
-              const sh = Math.min(currentSourceCanvas.height - sy, Math.max(corners.p3.y, corners.p2.y) - sy);
+              const sx = Math.max(0, Math.min(ordered.p0.x, ordered.p3.x));
+              const sy = Math.max(0, Math.min(ordered.p0.y, ordered.p1.y));
+              const sw = Math.max(10, Math.min(currentSourceCanvas.width - sx, Math.max(ordered.p1.x, ordered.p2.x) - sx));
+              const sh = Math.max(10, Math.min(currentSourceCanvas.height - sy, Math.max(ordered.p3.y, ordered.p2.y) - sy));
               finalCanvas = document.createElement('canvas');
               finalCanvas.width = quadDims.width;
               finalCanvas.height = quadDims.height;
               finalCanvas.getContext('2d').drawImage(currentSourceCanvas, sx, sy, sw, sh, 0, 0, quadDims.width, quadDims.height);
             } else {
-              finalCanvas = warpPerspectiveCanvas(currentSourceCanvas, corners, quadDims.width, quadDims.height);
+              finalCanvas = warpPerspectiveCanvas(currentSourceCanvas, ordered, quadDims.width, quadDims.height);
             }
           }
         }
@@ -1247,7 +1389,22 @@ export async function openDocumentEditor({
         }
 
         const mime = 'image/jpeg';
-        let blob = await new Promise(res => finalCanvas.toBlob(res, 'image/jpeg', 0.90));
+        const blob = await new Promise((res, rej) => {
+          const timer = setTimeout(() => {
+            rej(new Error('Image encoding timed out. Please try again.'));
+          }, 8000);
+          try {
+            finalCanvas.toBlob(b => {
+              clearTimeout(timer);
+              if (b) res(b);
+              else rej(new Error('Failed to encode cropped image.'));
+            }, mime, 0.90);
+          } catch (encodeErr) {
+            clearTimeout(timer);
+            rej(encodeErr);
+          }
+        });
+
         finalCanvas.width = finalCanvas.height = 1;
 
         if (!blob || blob.size > 25 * 1048576) {
@@ -1262,11 +1419,10 @@ export async function openDocumentEditor({
         if (onApply) onApply(processedFile);
         closeDialog({ action: 'edited', file: processedFile });
       } catch (err) {
-        errorMsg.textContent = err.message;
-        applying = false;
-        spinner.style.display = 'none';
-        dialog.querySelectorAll('button, input').forEach(el => el.disabled = false);
-        updateHistoryButtons();
+        console.error('[DocumentEditor] Error applying edits:', err);
+        errorMsg.textContent = err.message || 'An error occurred while processing the document.';
+      } finally {
+        setProcessing(false);
       }
     };
 

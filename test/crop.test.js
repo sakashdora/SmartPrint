@@ -130,3 +130,50 @@ test('applyBlurToImageData blurs targeted region and preserves unaffected areas'
   // Unaffected area outside redact box
   assert.equal(d[(5 * W + 5) * 4], 0);
 });
+
+test('orderCorners strictly maps quad corners to [Top-Left, Top-Right, Bottom-Right, Bottom-Left]', async () => {
+  const { orderCorners } = await import('../public/crop.js');
+
+  // Scrambled input: [Bottom-Right, Top-Left, Bottom-Left, Top-Right]
+  const scrambled = {
+    p0: { x: 500, y: 700 }, // BR
+    p1: { x: 20, y: 30 },   // TL
+    p2: { x: 25, y: 690 },  // BL
+    p3: { x: 490, y: 35 }   // TR
+  };
+
+  const ordered = orderCorners(scrambled);
+  assert.equal(ordered.p0.x, 20);
+  assert.equal(ordered.p0.y, 30);
+  assert.equal(ordered.p1.x, 490);
+  assert.equal(ordered.p1.y, 35);
+  assert.equal(ordered.p2.x, 500);
+  assert.equal(ordered.p2.y, 700);
+  assert.equal(ordered.p3.x, 25);
+  assert.equal(ordered.p3.y, 690);
+
+  // Fallback resilience on non-finite coordinates
+  const degenerate = orderCorners({ p0: null, p1: { x: NaN, y: Infinity }, p2: undefined, p3: { x: 10, y: 20 } });
+  assert.ok(Number.isFinite(degenerate.p0.x) && Number.isFinite(degenerate.p0.y));
+  assert.ok(Number.isFinite(degenerate.p1.x) && Number.isFinite(degenerate.p1.y));
+  assert.ok(Number.isFinite(degenerate.p2.x) && Number.isFinite(degenerate.p2.y));
+  assert.ok(Number.isFinite(degenerate.p3.x) && Number.isFinite(degenerate.p3.y));
+});
+
+test('solveHomography and getQuadDimensions resist NaN and zero denominators', () => {
+  // Degenerate dimensions
+  const dims = getQuadDimensions({ x: NaN, y: 0 }, { x: 0, y: NaN }, null, undefined);
+  assert.ok(dims.width >= 10 && Number.isFinite(dims.width));
+  assert.ok(dims.height >= 10 && Number.isFinite(dims.height));
+
+  // Zero-width/height homography solve
+  const homo = solveHomography({ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, 0, 0);
+  assert.ok(Number.isFinite(homo.a));
+  assert.ok(Number.isFinite(homo.b));
+  assert.ok(Number.isFinite(homo.c));
+  assert.ok(Number.isFinite(homo.d));
+  assert.ok(Number.isFinite(homo.e));
+  assert.ok(Number.isFinite(homo.f));
+  assert.ok(Number.isFinite(homo.g_step));
+  assert.ok(Number.isFinite(homo.h_step));
+});
