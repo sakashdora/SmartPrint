@@ -711,7 +711,7 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
               <table class="premium-admin-table">
                 <thead>
                   <tr>
-                    <th style="width: 32px;"><input type="checkbox" aria-label="Select all applications"></th>
+                    <th style="width: 32px;"><input type="checkbox" id="select-all-shops" aria-label="Select all applications"></th>
                     <th>SHOP</th>
                     <th>OWNER</th>
                     <th>APPLIED ON</th>
@@ -724,7 +724,7 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
                     const initial = (shop.name || shop.email || 'S').charAt(0).toUpperCase();
                     return `
                       <tr class="shop-app-row" data-status="${shop.status}">
-                        <td><input type="checkbox" aria-label="Select ${escape(shop.name)}"></td>
+                        <td><input type="checkbox" class="shop-row-select" data-shop-select="${shop.id}" aria-label="Select ${escape(shop.name)}"></td>
                         <td class="col-shop-meta">
                           <div class="shop-brand-item">
                             <div class="shop-store-icon">${icon('shop')}</div>
@@ -759,9 +759,6 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
                               <button type="button" class="btn-reject-sm" data-shop="${shop.id}" data-status="suspended">
                                 ${icon('cross')} Reject
                               </button>
-                              <button type="button" class="icon-button action-dots-btn" aria-label="More actions">
-                                ${icon('dots')}
-                              </button>
                             ` : shop.status === 'active' ? `
                               <button type="button" class="btn-reject-sm" data-shop="${shop.id}" data-status="suspended">
                                 Suspend
@@ -771,6 +768,15 @@ export function adminDashboard({ view, shops, events, stats, filter, escape, bad
                                 Reactivate
                               </button>
                             `}
+                            <div class="action-dropdown-wrapper">
+                              <button type="button" class="icon-button action-dots-btn" data-toggle-shop-menu="${shop.id}" aria-label="More actions">
+                                ${icon('dots')}
+                              </button>
+                              <div class="action-dropdown-menu" id="shop-menu-${shop.id}" hidden>
+                                <a href="/?shop=${encodeURIComponent(shop.slug)}" target="_blank" class="menu-action-item">Open Customer View</a>
+                                <button type="button" class="menu-action-item" data-action="copy-shop-link" data-slug="${escape(shop.slug)}">Copy Shop Link</button>
+                              </div>
+                            </div>
                           </div>
                         </td>
                       </tr>

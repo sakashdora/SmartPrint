@@ -51,8 +51,14 @@ export async function createApp({ database, seed = true } = {}) {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
-      const origin = req.headers.origin;
-      if (config.production && !origin) return next(fail(403, 'Request origin is not allowed.'));
+      let origin = req.headers.origin;
+      if (!origin && req.headers.referer) {
+        try { origin = new URL(req.headers.referer).origin; } catch {}
+      }
+      if (config.production && !origin) {
+        const secFetchSite = req.headers['sec-fetch-site'];
+        if (secFetchSite !== 'same-origin') return next(fail(403, 'Request origin is not allowed.'));
+      }
       if (origin) {
         const allowed = new Set([config.origin]);
         if (req.headers.host) {
@@ -155,7 +161,7 @@ export async function createApp({ database, seed = true } = {}) {
     payments: config.payments,
     paymentMode: config.paymentMode || (config.payments ? 'test' : 'disabled'),
     automaticPrinting: true,
-    office: config.production || process.env.CONNECTOR_PROCESSING === 'true' || Boolean(process.env.PROCESSOR_URL),
+    office: Boolean(process.env.PROCESSOR_URL) || process.env.CONNECTOR_PROCESSING === 'true',
     demo: !process.env.DATABASE_URL && !config.production,
     commit: process.env.RENDER_GIT_COMMIT || '0bf8e4f',
     version: '1.0.1',

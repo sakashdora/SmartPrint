@@ -12,7 +12,7 @@ export function uploadRoutes(app, db, key) {
     await db.transaction(async tx => {
       await tx.query('UPDATE shops SET version=version WHERE id=$1 RETURNING id', [shop.id]);
       const [uploads] = await tx.query('SELECT COALESCE(SUM(size),0) AS size FROM uploads WHERE shop_id=$1', [shop.id]);
-      const [documents] = await tx.query('SELECT COALESCE(SUM(LENGTH(payload)),0) AS size FROM documents WHERE shop_id=$1', [shop.id]);
+      const [documents] = await tx.query('SELECT COALESCE(SUM(OCTET_LENGTH(payload)),0) AS size FROM documents WHERE shop_id=$1', [shop.id]);
       if (Number(uploads.size) + Number(documents.size) + size > 200 * CHUNK) throw fail(429, 'This shop has too many waiting files. Ask the shop to finish or cancel pending orders.');
       await tx.query('INSERT INTO uploads (id,shop_id,token,name,size,expires) VALUES ($1,$2,$3,$4,$5,$6)', [id, shop.id, digest(secret), name, size, new Date(Date.now() + 30 * 60000).toISOString()]);
     });

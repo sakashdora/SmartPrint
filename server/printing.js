@@ -38,6 +38,12 @@ export async function prepare(files, options) {
   }
   const selection = selectedPages(options.range, source.getPageCount());
   if (!selection.length || (options.layout === 'card' && selection.length !== 2)) throw new Error('Select both images for a card pair.');
+  for (const pageIndex of selection) {
+    const page = source.getPage(pageIndex);
+    if (!page.node.Contents()) {
+      page.drawText(' ', { x: 0, y: 0, size: 1, opacity: 0 });
+    }
+  }
   const output = await PDFDocument.create();
   await source.flush();
   const embedded = await output.embedPages(selection.map(i => source.getPage(i)));

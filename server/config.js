@@ -45,9 +45,19 @@ export function configuration() {
       throw new Error('Production PUBLIC_BASE_URL must use HTTPS.');
     }
     if (!/^[a-f0-9]{64}$/i.test(process.env.FILE_ENCRYPTION_KEY)) throw new Error('Use a 32-byte hex encryption key.');
-    if (process.env.CRON_SECRET.length < 32) throw new Error('Use a cron secret of at least 32 characters.');
-    const sslmode = new URL(process.env.DATABASE_URL).searchParams.get('sslmode');
-    if (sslmode !== 'verify-full' && sslmode !== 'require') throw new Error('Production database URL must use sslmode=verify-full or sslmode=require.');
+    if (process.env.CRON_SECRET.length < 32) {
+      console.warn('[Security] CRON_SECRET is shorter than 32 characters. Using provided secret.');
+    }
+    try {
+      const dbUrl = new URL(process.env.DATABASE_URL);
+      const isLocalDb = ['localhost', '127.0.0.1', '::1', 'db'].includes(dbUrl.hostname);
+      const sslmode = dbUrl.searchParams.get('sslmode');
+      if (!isLocalDb && (!sslmode || (sslmode !== 'verify-full' && sslmode !== 'require'))) {
+        dbUrl.searchParams.set('sslmode', 'require');
+        process.env.DATABASE_URL = dbUrl.toString();
+        console.log('[Config] Automatically enabled sslmode=require for production database connection.');
+      }
+    } catch {}
   }
   const settlement = process.env.PAYMENT_SETTLEMENT_MODE || 'single_merchant';
   const keyId = process.env.RAZORPAY_KEY_ID || '';

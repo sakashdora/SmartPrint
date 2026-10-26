@@ -80,7 +80,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         <div class="home-container">
           <div class="audience-cards-grid">
             <!-- Card 1: For Customers -->
-            <div class="audience-card blue-theme">
+            <div class="audience-card blue-theme" id="audience-card-customers" role="button" tabindex="0" style="cursor: pointer;" title="Choose a print shop">
               <div class="audience-card-top">
                 <div class="audience-icon-circle blue">
                   ${icon('users')}
@@ -216,6 +216,39 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         </div>
       </section>
 
+      <!-- SUPPORT & HELP SECTION -->
+      <section class="home-why-section" id="support">
+        <div class="home-container">
+          <div class="why-choose-card">
+            <div class="why-choose-header">
+              <span class="eyebrow" style="color: #2563EB;">HELP & SUPPORT</span>
+              <h2 class="why-choose-title">Need help with your print order?</h2>
+              <p class="why-choose-sub">Fast answers for customers and print shop partners.</p>
+            </div>
+            <div class="why-features-grid">
+              <div class="feature-item">
+                <div class="feature-icon-box" style="background:#EFF6FF; color:#2563EB;">${icon('file')}</div>
+                <h4 class="feature-title">Supported Documents</h4>
+                <p class="feature-desc">Upload PDF documents or camera images (JPG/PNG). Multi-page and ID cards supported up to 20 MB.</p>
+              </div>
+              <div class="feature-item">
+                <div class="feature-icon-box" style="background:#F0FDF4; color:#16A34A;">${icon('shield')}</div>
+                <h4 class="feature-title">End-to-End Privacy</h4>
+                <p class="feature-desc">All files are encrypted in flight and at rest with AES-256-GCM. Files are auto-purged after printing.</p>
+              </div>
+              <div class="feature-item">
+                <div class="feature-icon-box" style="background:#FEF3C7; color:#D97706;">${icon('shop')}</div>
+                <h4 class="feature-title">Flexible Shop Payments</h4>
+                <p class="feature-desc">Pay directly at the counter with UPI QR or cash once your document is ready for collection.</p>
+              </div>
+            </div>
+            <div style="text-align: center; margin-top: 24px;">
+              <p class="muted">Have questions or want to partner your shop with SmartPrint? <a href="#register" class="primary" style="font-weight:600;">Register your shop →</a></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Shop Finder Dialog -->
       <dialog class="crop-dialog shop-finder-dialog" id="shop-finder-modal">
         <div class="shop-finder-modal-content">
@@ -268,10 +301,10 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
     document.querySelector('#hero-find-shop-btn')?.addEventListener('click', openShopModal);
     document.querySelector('#bottom-find-shop-btn')?.addEventListener('click', openShopModal);
+    document.querySelector('#audience-card-customers')?.addEventListener('click', openShopModal);
     document.querySelector('#close-shop-finder')?.addEventListener('click', () => {
       document.querySelector('#shop-finder-modal')?.close();
     });
-    return;
     return;
   }
 
@@ -408,8 +441,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
                   </div>
                   <div class="file-meta-sub-row">
                     <span class="file-size-sub" id="display-file-size">0 KB</span>
-                    <span class="file-success-badge" id="file-success-badge">
-                      <span class="badge-check-icon">✓</span> File uploaded successfully
+                    <span class="file-uploading-badge" id="file-success-badge">
+                      <span class="badge-loading-spinner"></span> Preparing document...
                     </span>
                   </div>
                 </div>
@@ -1148,19 +1181,58 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     const t0 = performance.now();
     const info = await api('/api/uploads', { method: 'POST', body: { slug, name: file.name, size: file.size } });
     let nextPart = 0;
+    let completedParts = 0;
     const parts = Math.ceil(file.size / info.chunkSize);
+    const badge = document.querySelector('#file-success-badge');
+
+    const updateProgress = () => {
+      const pct = Math.min(99, Math.round((completedParts / parts) * 100));
+      if (orderStatusText) {
+        orderStatusText.textContent = `Uploading document (${pct}%)…`;
+        orderStatusText.className = 'badge pending';
+      }
+      if (badge) {
+        badge.className = 'file-uploading-badge';
+        badge.innerHTML = `<span class="badge-loading-spinner"></span> Uploading (${pct}%)...`;
+      }
+    };
+    updateProgress();
+
     const workers = await Promise.allSettled(Array.from({ length: Math.min(3, parts) }, async () => {
       while (nextPart < parts) {
-        const part = nextPart++, start = part * info.chunkSize;
+        const part = nextPart++;
+        const start = part * info.chunkSize;
         const chunkBlob = file.slice(start, Math.min(file.size, start + info.chunkSize));
         const base64Data = await readChunkBase64(chunkBlob);
-        await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: base64Data } });
+        let uploaded = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await api(`/api/uploads/${info.id}/chunks/${part}`, { method: 'PUT', token: info.token, body: { data: base64Data } });
+            uploaded = true;
+            completedParts++;
+            updateProgress();
+            break;
+          } catch (err) {
+            if (attempt >= 3) throw err;
+            await new Promise(r => setTimeout(r, attempt * 350));
+          }
+        }
       }
     }));
     const failed = workers.find(result => result.status === 'rejected');
-    if (failed) throw failed.reason;
+    if (failed) {
+      if (badge) {
+        badge.className = 'file-error-badge';
+        badge.innerHTML = '<span class="badge-error-icon">✕</span> Upload interrupted';
+      }
+      throw failed.reason;
+    }
     const value = { uploadId: info.id, token: info.token };
     uploadsByFile.set(file, { value, expires: Date.now() + 25 * 60000 });
+    if (badge) {
+      badge.className = 'file-success-badge';
+      badge.innerHTML = '<span class="badge-check-icon">✓</span> File uploaded & verified';
+    }
     console.debug(`[Upload] "${file.name}" uploaded in ${(performance.now() - t0).toFixed(0)}ms (${parts} chunks)`);
     return value;
   }
@@ -1229,6 +1301,11 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       quote = null;
       if (err.preparationFailed || [400, 404, 409].includes(err.status)) pendingPreparation = null;
       if (!pendingPreparation) files.forEach(file => uploadsByFile.delete(file));
+      const badge = document.querySelector('#file-success-badge');
+      if (badge) {
+        badge.className = 'file-error-badge';
+        badge.innerHTML = '<span class="badge-error-icon">✕</span> Upload incomplete';
+      }
       retryButton.hidden = false;
       errorEl.textContent = err.message || 'Could not calculate price.';
       orderStatusText.textContent = 'Calculation failed';
@@ -1240,6 +1317,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     }
   }
 
+  fileInput.onclick = () => { fileInput.value = ''; };
   fileInput.onchange = async event => {
     if (isOrdering) return;
     const next = [...event.target.files];

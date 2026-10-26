@@ -86,6 +86,11 @@ function mount(content, { workspacePage = false } = {}) {
     mobileToggle.onclick = () => {
       mobileDrawer.hidden = !mobileDrawer.hidden;
     };
+    mobileDrawer.querySelectorAll('a').forEach(link => {
+      link.addEventListener('click', () => {
+        mobileDrawer.hidden = true;
+      });
+    });
   }
 
   document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => {
@@ -743,6 +748,36 @@ async function admin(view) {
     await admin(view);
   }));
 
+  const selectAll = document.querySelector('#select-all-shops');
+  if (selectAll) {
+    selectAll.onchange = () => {
+      document.querySelectorAll('.shop-row-select').forEach(cb => { cb.checked = selectAll.checked; });
+    };
+  }
+
+  document.querySelectorAll('[data-toggle-shop-menu]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const shopId = btn.dataset.toggleShopMenu;
+      const menu = document.querySelector(`#shop-menu-${shopId}`);
+      if (!menu) return;
+      const willOpen = menu.hidden;
+      document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
+      menu.hidden = !willOpen;
+    };
+  });
+  document.querySelectorAll('[data-action="copy-shop-link"]').forEach(btn => {
+    btn.onclick = async () => {
+      const url = `${location.origin}/?shop=${encodeURIComponent(btn.dataset.slug)}`;
+      await navigator.clipboard.writeText(url).catch(() => {});
+      notify('Shop customer link copied to clipboard.');
+      document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
+    };
+  });
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.action-dropdown-menu').forEach(m => m.hidden = true);
+  }, { passive: true });
+
   watchUpdates(load, snapshot, () => admin(view));
 }
 
@@ -908,7 +943,15 @@ async function route() {
         onSignedOut: async () => { me = null; location.hash = 'login'; await route(); }
       });
     }
-    if (view === 'print') await customer();
+    if (view === 'print' || ['how-it-works', 'for-shop-owners', 'support'].includes(view)) {
+      await customer();
+      if (['how-it-works', 'for-shop-owners', 'support'].includes(view)) {
+        setTimeout(() => {
+          const el = document.getElementById(view);
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }, 80);
+      }
+    }
     else if (view === 'track') await tracking();
     else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view);
     else if (['admin', 'shops', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);

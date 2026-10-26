@@ -7,6 +7,8 @@ const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE I
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = '.data/smartprint.sqlite' } = {}) {
   if (url) {
+    let hasSmartprintSchema = true;
+    const qualify = sql => hasSmartprintSchema ? sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2') : sql;
     const pool = new pg.Pool({ connectionString: url, max: 5, connectionTimeoutMillis: 10000, idleTimeoutMillis: 60000 });
     pool.on('error', () => console.error('Idle database connection closed; the next request will reconnect.'));
     const connect = async () => {
@@ -43,9 +45,17 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
           if (!schemaCheck.rows?.[0]?.oid) {
             try {
               await client.query('CREATE SCHEMA IF NOT EXISTS smartprint');
+              hasSmartprintSchema = true;
             } catch (err) {
-              if (!err.message?.includes('permission denied')) throw err;
+              if (err.message?.includes('permission denied')) {
+                hasSmartprintSchema = false;
+                console.warn('[SmartPrint DB] "smartprint" schema could not be created (permission denied). Using default/public schema.');
+              } else {
+                throw err;
+              }
             }
+          } else {
+            hasSmartprintSchema = true;
           }
           await client.query('BEGIN');
           try {
@@ -66,7 +76,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
-              await client.query(`ALTER TABLE smartprint.${table} ADD COLUMN IF NOT EXISTS ${column} ${def}`);
+              await client.query(`ALTER TABLE ${hasSmartprintSchema ? 'smartprint.' : ''}${table} ADD COLUMN IF NOT EXISTS ${column} ${def}`);
               await client.query(`RELEASE SAVEPOINT sp_${table}_${column}`);
             } catch (err) {
               await client.query(`ROLLBACK TO SAVEPOINT sp_${table}_${column}`).catch(() => {});
@@ -75,8 +85,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
           }
           try {
             await client.query('SAVEPOINT sp_users_role_check');
-            await client.query("ALTER TABLE smartprint.users DROP CONSTRAINT IF EXISTS users_role_check");
-            await client.query("ALTER TABLE smartprint.users ADD CONSTRAINT users_role_check CHECK(role IN ('owner','admin','customer'))");
+            await client.query(`ALTER TABLE ${hasSmartprintSchema ? 'smartprint.' : ''}users DROP CONSTRAINT IF EXISTS users_role_check`);
+            await client.query(`ALTER TABLE ${hasSmartprintSchema ? 'smartprint.' : ''}users ADD CONSTRAINT users_role_check CHECK(role IN ('owner','admin','customer'))`);
             await client.query('RELEASE SAVEPOINT sp_users_role_check');
           } catch (err) {
             await client.query('ROLLBACK TO SAVEPOINT sp_users_role_check').catch(() => {});

@@ -8,10 +8,13 @@ export async function paymentsPage({ api, workspace, escape, notify }) {
 export async function printersPage({ api, workspace, escape, notify }) {
   // Proactively check local Windows PC bridge (auto-syncs local printers if local service is present)
   try {
-    const local = await fetch('http://127.0.0.1:3000/api/local/printers', { signal: AbortSignal.timeout(1200) })
-      .then(r => r.json()).catch(() => null);
-    if (local && Array.isArray(local.printers) && local.printers.length > 0) {
-      await api('/api/owner/printers/scanned-report', { method: 'POST', body: { printers: local.printers } }).catch(() => {});
+    const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
+    if (isLocal) {
+      const local = await fetch('/api/local/printers', { signal: AbortSignal.timeout(1200) })
+        .then(r => r.json()).catch(() => null);
+      if (local && Array.isArray(local.printers) && local.printers.length > 0) {
+        await api('/api/owner/printers/scanned-report', { method: 'POST', body: { printers: local.printers } }).catch(() => {});
+      }
     }
   } catch {}
 

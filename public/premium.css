@@ -1520,6 +1520,49 @@ body:has(.customer-shell) {
   font-weight: 900;
 }
 
+.file-uploading-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #2563EB;
+}
+
+.badge-loading-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #93C5FD;
+  border-top-color: #2563EB;
+  border-radius: 50%;
+  animation: badge-spin 0.8s linear infinite;
+}
+
+@keyframes badge-spin {
+  to { transform: rotate(360deg); }
+}
+
+.file-error-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #DC2626;
+}
+
+.badge-error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #DC2626;
+  color: white;
+  font-size: 9px;
+  font-weight: 900;
+}
+
 .file-actions-wrap {
   display: flex;
   align-items: center;
