@@ -1029,7 +1029,13 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     localPreviews.forEach(view => view.destroy());
     localPreviews = [];
     const container = document.querySelector('#source-preview');
+    container.hidden = false;
     container.replaceChildren();
+    const docPreview = document.querySelector('#document-preview');
+    if (docPreview) {
+      docPreview.replaceChildren();
+      docPreview.hidden = true;
+    }
     const emptyState = document.querySelector('#preview-empty-state');
     const previewPill = document.querySelector('#preview-pill');
     const previewFooter = document.querySelector('#preview-footer');
@@ -1089,6 +1095,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       preview?.destroy();
       preview = await showDocument(document.querySelector('#document-preview'), blob);
       if (generation !== revision) { preview?.destroy(); return; }
+      document.querySelector('#document-preview').hidden = false;
       document.querySelector('#source-preview').hidden = true;
       help.textContent = 'These are the prepared pages for your selected print options.';
     } catch (error) { if (generation === revision) help.textContent = error.message; }

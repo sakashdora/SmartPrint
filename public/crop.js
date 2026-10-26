@@ -544,12 +544,14 @@ export async function openDocumentEditor({
   }
 
   return new Promise(resolve => {
-    let rotation = 0; // 0, 90, 180, 270
+    let rotation = initialMode === 'rotate' ? 90 : 0; // 0, 90, 180, 270
     let activeFilter = initialMode === 'enhance' ? 'enhance' : (initialMode === 'filter' ? 'bw' : 'original');
     let activeRatio = null; // null (free), 0.707 (A4 port), 1.414 (A4 land), 1.586 (ID Card)
-    let activeTool = (initialMode === 'enhance' || initialMode === 'filter')
-      ? 'filter'
-      : (initialMode === 'blur' ? 'blur' : initialMode === 'rect' ? 'rect' : 'perspective');
+    let activeTool = (initialMode === 'enhance')
+      ? 'enhance'
+      : (initialMode === 'filter'
+        ? 'filter'
+        : (initialMode === 'blur' ? 'blur' : initialMode === 'rect' ? 'rect' : 'perspective'));
     let blurStrength = 10;
     let redactBox = null;
     let isDraggingHandle = -1;
@@ -759,6 +761,11 @@ export async function openDocumentEditor({
     const subBlur = dialog.querySelector('#subtoolbar-blur');
     const subFilters = dialog.querySelector('#subtoolbar-filters');
 
+    const updateHistoryButtons = () => {
+      if (undoBtn) undoBtn.disabled = historyStack.length === 0 || applying;
+      if (redoBtn) redoBtn.disabled = redoStack.length === 0 || applying;
+    };
+
     // Centralized processing state controller with safe UI release
     const setProcessing = (isProcessing, message = 'Processing document...') => {
       applying = isProcessing;
@@ -781,23 +788,6 @@ export async function openDocumentEditor({
     // Wire Compare Original button
     const compareBtn = dialog.querySelector('#btn-toggle-compare');
     if (compareBtn) {
-      const startCompare = e => {
-        if (e) e.preventDefault();
-        isComparing = true;
-        compareBtn.classList.add('is-active');
-        compareBtn.style.background = '#c7d2fe';
-        draw();
-      };
-      const stopCompare = e => {
-        if (e) e.preventDefault();
-        isComparing = false;
-        compareBtn.classList.remove('is-active');
-        compareBtn.style.background = '#e0e7ff';
-        draw();
-      };
-      compareBtn.onpointerdown = startCompare;
-      compareBtn.onpointerup = stopCompare;
-      compareBtn.onpointercancel = stopCompare;
       compareBtn.onclick = e => {
         e.preventDefault();
         isComparing = !isComparing;
@@ -827,18 +817,15 @@ export async function openDocumentEditor({
       updateHistoryButtons();
     };
 
-    const updateHistoryButtons = () => {
-      undoBtn.disabled = historyStack.length === 0 || applying;
-      redoBtn.disabled = redoStack.length === 0 || applying;
-    };
-
     // Calculate display canvas scale
     const updateDisplayScale = () => {
       curDims = getTransformedDimensions();
       const safeW = Math.max(1, curDims.width || 1);
       const safeH = Math.max(1, curDims.height || 1);
-      const maxDisplayW = Math.max(200, Math.min(1000, (window.innerWidth || 1024) - 60));
-      const maxDisplayH = Math.max(200, Math.min(650, (window.innerHeight || 768) * 0.52));
+      const winW = (typeof window !== 'undefined' && window.innerWidth) ? window.innerWidth : 1024;
+      const winH = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 768;
+      const maxDisplayW = Math.max(200, Math.min(1000, winW - 60));
+      const maxDisplayH = Math.max(200, Math.min(650, winH * 0.52));
       const scale = Math.min(1, maxDisplayW / safeW, maxDisplayH / safeH);
       canvas.width = Math.max(1, Math.round(safeW * scale));
       canvas.height = Math.max(1, Math.round(safeH * scale));
@@ -1009,9 +996,10 @@ export async function openDocumentEditor({
     const updateToolVisibility = () => {
       subRect.style.display = activeTool === 'rect' ? 'flex' : 'none';
       subBlur.style.display = activeTool === 'blur' ? 'flex' : 'none';
-      subFilters.style.display = activeTool === 'filter' ? 'flex' : 'none';
+      subFilters.style.display = (activeTool === 'filter' || activeTool === 'enhance') ? 'flex' : 'none';
       dialog.querySelectorAll('.editor-tab-btn').forEach(btn => {
-        btn.classList.toggle('is-active', btn.dataset.tool === activeTool);
+        const t = btn.dataset.tool;
+        btn.classList.toggle('is-active', t === activeTool || (activeTool === 'enhance' && t === 'enhance'));
       });
       dialog.querySelectorAll('.crop-filter-btn').forEach(btn => {
         btn.classList.toggle('is-active', btn.dataset.filter === activeFilter);
@@ -1153,7 +1141,7 @@ export async function openDocumentEditor({
         if (tool === 'enhance') {
           pushState();
           activeFilter = 'enhance';
-          activeTool = 'filter';
+          activeTool = 'enhance';
           updateToolVisibility();
           return;
         }
