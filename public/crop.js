@@ -158,49 +158,141 @@ export function detectDocumentCorners(imageData, width, height) {
   if (!imageData || !width || !height) return null;
   const data = imageData.data;
 
-  const getLum = (x, y) => {
-    const i = (y * width + x) * 4;
-    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-  };
-
-  const bgAvg = (getLum(0, 0) + getLum(width - 1, 0) + getLum(0, height - 1) + getLum(width - 1, height - 1)) / 4;
-  const thresh = Math.max(20, Math.abs(bgAvg - 128) * 0.7);
-
-  let p0 = { x: width, y: height, val: Infinity };      // min (x + y)
-  let p1 = { x: 0, y: height, val: -Infinity };          // max (x - y)
-  let p2 = { x: 0, y: 0, val: -Infinity };               // max (x + y)
-  let p3 = { x: width, y: 0, val: Infinity };           // min (x - y)
-  let docPixelCount = 0;
-
+  // 1. Multi-scale grid luminance sampling
   const step = Math.max(1, Math.floor(Math.min(width, height) / 100));
+  const sampleW = Math.ceil(width / step);
+  const sampleH = Math.ceil(height / step);
+  const lums = new Float32Array(sampleW * sampleH);
 
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      const lum = getLum(x, y);
-      if (Math.abs(lum - bgAvg) > thresh) {
-        docPixelCount++;
-        const sum = x + y;
-        const diff = x - y;
-        if (sum < p0.val) { p0.val = sum; p0.x = x; p0.y = y; }
-        if (diff > p1.val) { p1.val = diff; p1.x = x; p1.y = y; }
-        if (sum > p2.val) { p2.val = sum; p2.x = x; p2.y = y; }
-        if (diff < p3.val) { p3.val = diff; p3.x = x; p3.y = y; }
+  let sum = 0, sumSq = 0, count = 0;
+  let minLum = 255, maxLum = 0;
+
+  for (let sy = 0; sy < sampleH; sy++) {
+    const y = Math.min(height - 1, sy * step);
+    for (let sx = 0; sx < sampleW; sx++) {
+      const x = Math.min(width - 1, sx * step);
+      const idx = (y * width + x) * 4;
+      const l = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      lums[sy * sampleW + sx] = l;
+      sum += l;
+      sumSq += l * l;
+      if (l < minLum) minLum = l;
+      if (l > maxLum) maxLum = l;
+      count++;
+    }
+  }
+
+  const mean = sum / count;
+  const variance = (sumSq / count) - (mean * mean);
+
+  // Fallback for uniform blank or near-zero contrast images
+  if (variance < 15 || (maxLum - minLum) < 25) {
+    const insetX = Math.round(width * 0.05);
+    const insetY = Math.round(height * 0.05);
+    return {
+      p0: { x: insetX, y: insetY },
+      p1: { x: width - insetX, y: insetY },
+      p2: { x: width - insetX, y: height - insetY },
+      p3: { x: insetX, y: height - insetY },
+      confidence: 'fallback'
+    };
+  }
+
+  // 2. Otsu global threshold on sampled grid
+  const hist = new Int32Array(256);
+  for (let i = 0; i < count; i++) {
+    hist[Math.min(255, Math.max(0, Math.round(lums[i])))]++;
+  }
+
+  let total = count, sumB = 0, wB = 0, maximum = 0, otsuThresh = 128;
+  let sum1 = 0;
+  for (let i = 0; i < 256; i++) sum1 += i * hist[i];
+
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += i * hist[i];
+    const mB = sumB / wB;
+    const mF = (sum1 - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maximum) {
+      maximum = between;
+      otsuThresh = Math.round((mB + mF) / 2);
+    }
+  }
+
+  // 3. Border background sampling
+  let borderSum = 0, borderCount = 0;
+  for (let sx = 0; sx < sampleW; sx++) {
+    borderSum += lums[sx] + lums[(sampleH - 1) * sampleW + sx];
+    borderCount += 2;
+  }
+  for (let sy = 1; sy < sampleH - 1; sy++) {
+    borderSum += lums[sy * sampleW] + lums[sy * sampleW + sampleW - 1];
+    borderCount += 2;
+  }
+  const borderMean = borderSum / borderCount;
+  const docIsBrighter = borderMean < otsuThresh;
+
+  // 4. Edge gradient magnitude
+  const edges = new Float32Array(sampleW * sampleH);
+  for (let sy = 1; sy < sampleH - 1; sy++) {
+    for (let sx = 1; sx < sampleW - 1; sx++) {
+      const dx = lums[sy * sampleW + sx + 1] - lums[sy * sampleW + sx - 1];
+      const dy = lums[(sy + 1) * sampleW + sx] - lums[(sy - 1) * sampleW + sx];
+      edges[sy * sampleW + sx] = Math.hypot(dx, dy);
+    }
+  }
+
+  // 5. Gather document candidate points
+  const candidates = [];
+  const edgeCutoff = Math.max(15, (maxLum - minLum) * 0.25);
+  for (let sy = 0; sy < sampleH; sy++) {
+    const y = Math.min(height - 1, sy * step);
+    for (let sx = 0; sx < sampleW; sx++) {
+      const x = Math.min(width - 1, sx * step);
+      const lum = lums[sy * sampleW + sx];
+      const isDoc = docIsBrighter ? (lum > otsuThresh) : (lum < otsuThresh);
+      const edge = edges[sy * sampleW + sx];
+      if (isDoc || edge > edgeCutoff) {
+        candidates.push({ x, y });
       }
     }
   }
 
-  const totalSamples = Math.ceil(height / step) * Math.ceil(width / step);
-  const docRatio = docPixelCount / totalSamples;
+  const docRatio = candidates.length / (sampleW * sampleH);
+  if (docRatio > 0.08 && docRatio < 0.98) {
+    let p0 = { x: width, y: height, val: Infinity };
+    let p1 = { x: 0, y: height, val: -Infinity };
+    let p2 = { x: 0, y: 0, val: -Infinity };
+    let p3 = { x: width, y: 0, val: Infinity };
 
-  const quad = {
-    p0: { x: p0.x, y: p0.y },
-    p1: { x: p1.x, y: p1.y },
-    p2: { x: p2.x, y: p2.y },
-    p3: { x: p3.x, y: p3.y }
-  };
+    for (const pt of candidates) {
+      const sum = pt.x + pt.y;
+      const diff = pt.x - pt.y;
+      if (sum < p0.val) { p0.val = sum; p0.x = pt.x; p0.y = pt.y; }
+      if (diff > p1.val) { p1.val = diff; p1.x = pt.x; p1.y = pt.y; }
+      if (sum > p2.val) { p2.val = sum; p2.x = pt.x; p2.y = pt.y; }
+      if (diff < p3.val) { p3.val = diff; p3.x = pt.x; p3.y = pt.y; }
+    }
 
-  if (docRatio > 0.1 && docRatio < 0.98 && isConvexQuad(quad.p0, quad.p1, quad.p2, quad.p3)) {
-    return { ...quad, confidence: 'high' };
+    const quad = {
+      p0: { x: Math.max(0, Math.min(width, p0.x)), y: Math.max(0, Math.min(height, p0.y)) },
+      p1: { x: Math.max(0, Math.min(width, p1.x)), y: Math.max(0, Math.min(height, p1.y)) },
+      p2: { x: Math.max(0, Math.min(width, p2.x)), y: Math.max(0, Math.min(height, p2.y)) },
+      p3: { x: Math.max(0, Math.min(width, p3.x)), y: Math.max(0, Math.min(height, p3.y)) }
+    };
+
+    if (isConvexQuad(quad.p0, quad.p1, quad.p2, quad.p3)) {
+      const dims = getQuadDimensions(quad.p0, quad.p1, quad.p2, quad.p3);
+      const quadArea = dims.width * dims.height;
+      const totalArea = width * height;
+      if (quadArea > totalArea * 0.12 && quadArea < totalArea * 0.98) {
+        return { ...quad, confidence: 'high' };
+      }
+    }
   }
 
   // Safe fallback to 5% inset quadrilateral
@@ -258,10 +350,17 @@ export function applyFilterToImageData(imageData, filterMode) {
       data[i + 2] = Math.max(0, Math.min(255, factor * (data[i + 2] - 128) + 128));
     }
   } else if (filterMode === 'enhance') {
-    // Document text clarity & contrast boost (unsharp mask + dynamic range expansion)
+    // High-performance document text clarity & background whitening curve
     for (let i = 0; i < len; i += 4) {
       const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      let adjLum = lum > 140 ? lum + (255 - lum) * 0.4 : lum * 0.75;
+      let adjLum;
+      if (lum >= 130) {
+        // Brighten paper background towards pure white
+        adjLum = Math.min(255, lum + (255 - lum) * 0.45);
+      } else {
+        // Darken text/ink/lines for razor-sharp readability
+        adjLum = Math.max(0, lum * 0.72);
+      }
       const scale = lum > 0 ? adjLum / lum : 1;
       data[i] = Math.max(0, Math.min(255, Math.round(data[i] * scale)));
       data[i + 1] = Math.max(0, Math.min(255, Math.round(data[i + 1] * scale)));
@@ -357,14 +456,17 @@ export async function openDocumentEditor({
 
   return new Promise(resolve => {
     let rotation = 0; // 0, 90, 180, 270
-    let activeFilter = 'original'; // original, enhance, bw, grayscale, contrast
+    let activeFilter = initialMode === 'enhance' ? 'enhance' : (initialMode === 'filter' ? 'bw' : 'original');
     let activeRatio = null; // null (free), 0.707 (A4 port), 1.414 (A4 land), 1.586 (ID Card)
-    let activeTool = initialMode === 'blur' ? 'blur' : initialMode === 'rect' ? 'rect' : 'perspective';
+    let activeTool = (initialMode === 'enhance' || initialMode === 'filter')
+      ? 'filter'
+      : (initialMode === 'blur' ? 'blur' : initialMode === 'rect' ? 'rect' : 'perspective');
     let blurStrength = 10;
     let redactBox = null;
     let isDraggingHandle = -1;
     let dragAnchor = null;
     let applying = false;
+    let isComparing = false;
 
     // History stacks for undo/redo
     const historyStack = [];
@@ -515,13 +617,14 @@ export async function openDocumentEditor({
         </div>
 
         <!-- Filters subtoolbar -->
-        <div id="subtoolbar-filters" style="display:none;align-items:center;gap:6px;font-size:12px;background:#f1f5f9;padding:6px 10px;border-radius:8px;">
+        <div id="subtoolbar-filters" style="display:none;align-items:center;flex-wrap:wrap;gap:6px;font-size:12px;background:#f1f5f9;padding:6px 10px;border-radius:8px;">
           <span style="font-weight:600;color:#475569;">Document Filter:</span>
           <button type="button" class="secondary small crop-filter-btn is-active" data-filter="original">Original</button>
           <button type="button" class="secondary small crop-filter-btn" data-filter="enhance">✨ Enhanced</button>
           <button type="button" class="secondary small crop-filter-btn" data-filter="bw">Clean B&W</button>
           <button type="button" class="secondary small crop-filter-btn" data-filter="grayscale">Grayscale</button>
           <button type="button" class="secondary small crop-filter-btn" data-filter="contrast">High Contrast</button>
+          <button type="button" class="secondary small btn-toggle-compare" id="btn-toggle-compare" style="margin-left:auto;font-weight:600;background:#e0e7ff;color:#3730a3;border-color:#c7d2fe;" title="Hold or click to compare with unenhanced original">👁️ Compare Original</button>
         </div>
       </div>
 
@@ -553,6 +656,7 @@ export async function openDocumentEditor({
     document.body.append(dialog);
 
     const canvas = dialog.querySelector('#editor-interactive-canvas');
+    canvas.style.touchAction = 'none';
     const ctx = canvas.getContext('2d');
     const errorMsg = dialog.querySelector('#editor-error-msg');
     const undoBtn = dialog.querySelector('#btn-editor-undo');
@@ -565,6 +669,35 @@ export async function openDocumentEditor({
     const subRect = dialog.querySelector('#subtoolbar-rect');
     const subBlur = dialog.querySelector('#subtoolbar-blur');
     const subFilters = dialog.querySelector('#subtoolbar-filters');
+
+    // Wire Compare Original button
+    const compareBtn = dialog.querySelector('#btn-toggle-compare');
+    if (compareBtn) {
+      const startCompare = e => {
+        if (e) e.preventDefault();
+        isComparing = true;
+        compareBtn.classList.add('is-active');
+        compareBtn.style.background = '#c7d2fe';
+        draw();
+      };
+      const stopCompare = e => {
+        if (e) e.preventDefault();
+        isComparing = false;
+        compareBtn.classList.remove('is-active');
+        compareBtn.style.background = '#e0e7ff';
+        draw();
+      };
+      compareBtn.onpointerdown = startCompare;
+      compareBtn.onpointerup = stopCompare;
+      compareBtn.onpointercancel = stopCompare;
+      compareBtn.onclick = e => {
+        e.preventDefault();
+        isComparing = !isComparing;
+        compareBtn.classList.toggle('is-active', isComparing);
+        compareBtn.style.background = isComparing ? '#c7d2fe' : '#e0e7ff';
+        draw();
+      };
+    }
 
     // Push state for Undo
     const pushState = () => {
@@ -621,11 +754,21 @@ export async function openDocumentEditor({
       // Draw base rotated image
       ctx.drawImage(currentSourceCanvas, 0, 0, canvas.width, canvas.height);
 
-      // Apply filter on display preview
-      if (activeFilter !== 'original') {
+      // Apply filter on display preview (skipped while actively comparing original)
+      if (activeFilter !== 'original' && !isComparing) {
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         applyFilterToImageData(imgData, activeFilter);
         ctx.putImageData(imgData, 0, 0);
+      }
+
+      if (isComparing) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(30, 41, 59, 0.85)';
+        ctx.fillRect(8, 8, 165, 24);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '600 11.5px sans-serif';
+        ctx.fillText('👁️ Original Document', 16, 24);
+        ctx.restore();
       }
 
       // Apply blur on display preview if requested
@@ -674,11 +817,11 @@ export async function openDocumentEditor({
         ctx.closePath();
         ctx.stroke();
 
-        // 4 corner draggable handles
+        // 4 corner draggable handles with enhanced touch visibility
         const drawHandle = (pt, label) => {
           ctx.save();
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+          ctx.arc(pt.x, pt.y, 11, 0, Math.PI * 2);
           ctx.fillStyle = '#2563eb';
           ctx.fill();
           ctx.lineWidth = 2.5;
@@ -686,7 +829,7 @@ export async function openDocumentEditor({
           ctx.stroke();
 
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+          ctx.arc(pt.x, pt.y, 3, 0, Math.PI * 2);
           ctx.fillStyle = '#ffffff';
           ctx.fill();
           ctx.restore();
@@ -727,7 +870,7 @@ export async function openDocumentEditor({
         drawGrip(rx + rw, ry + rh);
         drawGrip(rx, ry + rh);
       } else if (activeTool === 'blur' && redactBox) {
-        // Redact box outline
+        // Redaction box preview
         const rx = (redactBox.left / curDims.width) * canvas.width;
         const ry = (redactBox.top / curDims.height) * canvas.height;
         const rw = (redactBox.width / curDims.width) * canvas.width;
@@ -748,6 +891,9 @@ export async function openDocumentEditor({
       dialog.querySelectorAll('.editor-tab-btn').forEach(btn => {
         btn.classList.toggle('is-active', btn.dataset.tool === activeTool);
       });
+      dialog.querySelectorAll('.crop-filter-btn').forEach(btn => {
+        btn.classList.toggle('is-active', btn.dataset.filter === activeFilter);
+      });
       draw();
     };
 
@@ -766,8 +912,8 @@ export async function openDocumentEditor({
       canvas.setPointerCapture(event.pointerId);
 
       if (activeTool === 'perspective' || activeTool === 'auto') {
-        // Check corner handles (hit radius 28px)
-        const hitRadius = 28;
+        // Check corner handles (touch-friendly radius 34px minimum)
+        const hitRadius = Math.max(34, Math.round(canvas.width * 0.08));
         const pts = [
           toCanvasPoint(corners.p0),
           toCanvasPoint(corners.p1),
@@ -807,6 +953,7 @@ export async function openDocumentEditor({
           applyBtn.disabled = false;
         } else {
           errorMsg.textContent = 'Keep quadrilateral convex and corners properly ordered.';
+          errorMsg.style.color = '#dc2626';
         }
         draw();
       } else if (dragAnchor && activeTool === 'rect') {
@@ -852,8 +999,10 @@ export async function openDocumentEditor({
           if (autoCorners && isConvexQuad(autoCorners.p0, autoCorners.p1, autoCorners.p2, autoCorners.p3)) {
             corners = autoCorners;
             errorMsg.textContent = 'Auto crop detected document edges.';
+            errorMsg.style.color = '#15803d';
           } else {
             errorMsg.textContent = 'Could not reliably detect document edges. Manual selection active.';
+            errorMsg.style.color = '#475569';
           }
           activeTool = 'perspective';
           updateToolVisibility();
@@ -861,7 +1010,7 @@ export async function openDocumentEditor({
         }
         if (tool === 'enhance') {
           pushState();
-          activeFilter = activeFilter === 'enhance' ? 'original' : 'enhance';
+          activeFilter = 'enhance';
           activeTool = 'filter';
           updateToolVisibility();
           return;

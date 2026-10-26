@@ -1,6 +1,7 @@
 import { icon } from './ui.js';
 import { downloadPdf, showDocument } from './viewer.js';
 import { waitForQuote } from './preparation.js';
+import { openDocumentEditor } from './crop.js';
 
 export async function renderCustomer({ api, mount, money, escape, health, notify, onOrder }) {
   let slug = new URLSearchParams(location.search).get('shop');
@@ -837,7 +838,9 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
   async function launchDocumentEditor(initialMode = 'auto') {
     if (!files.length) return;
-    const targetFile = originalFiles[0];
+    const targetFile = (activeDocumentMode === 'edited' && editedFiles.length)
+      ? editedFiles[0]
+      : originalFiles[0];
     let editableFile = targetFile;
 
     // If PDF, render target page to high-DPI image for scanner operations
@@ -994,6 +997,7 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     if (!supported) return;
     await Promise.all(selected.map(async file => {
       const panel = document.createElement('div');
+      panel.className = 'preview-item-panel';
       container.append(panel);
       try {
         const type = /\.pdf$/i.test(file.name) ? 'application/pdf' : /\.png$/i.test(file.name) ? 'image/png' : 'image/jpeg';
@@ -1274,6 +1278,38 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       cropBtn.hidden = false;
       if (cropBtn.style) cropBtn.style.display = 'inline-flex';
       cropBtn.onclick = () => launchDocumentEditor('auto');
+    }
+
+    const removeBtn = document.querySelector('#btn-remove-file');
+    if (removeBtn) {
+      removeBtn.onclick = () => {
+        fileInput.value = '';
+        files = [];
+        originalFiles = [];
+        editedFiles = [];
+        activeDocumentMode = 'original';
+        dropzone.hidden = false;
+        fileDisplay.hidden = true;
+        const editorCard = document.querySelector('#document-editor-card');
+        if (editorCard) editorCard.hidden = true;
+        const previewEmpty = document.querySelector('#preview-empty-state');
+        if (previewEmpty) previewEmpty.hidden = false;
+        const previewPane = document.querySelector('#document-preview-pane');
+        if (previewPane) previewPane.hidden = true;
+        const changeHdr = document.querySelector('#btn-change-header');
+        if (changeHdr) changeHdr.hidden = true;
+        statusBadge.textContent = 'Awaiting file';
+        statusBadge.className = 'badge';
+        quote = null;
+        placeBtn.disabled = true;
+        previewButton.disabled = true;
+        previewSources([]);
+      };
+    }
+
+    const changeHdr = document.querySelector('#btn-change-header');
+    if (changeHdr) {
+      changeHdr.onclick = () => fileInput.click();
     }
 
     if (files.length === 2) {
