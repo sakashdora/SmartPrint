@@ -43,6 +43,13 @@ export async function getDocPageCount(blob) {
   if (blob.type && blob.type.startsWith('image/')) return 1;
   if (blob.type === 'application/pdf' || /\.pdf$/i.test(blob.name || '')) {
     try {
+      const slice = await blob.slice(0, Math.min(blob.size, 131072)).text();
+      const match = slice.match(/\/Count\s+(\d+)/);
+      if (match && Number(match[1]) > 0 && Number(match[1]) <= 500) {
+        return Number(match[1]);
+      }
+    } catch {}
+    try {
       pdfjs ??= await import('/vendor/pdfjs/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs';
       const task = pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false, maxImageSize: 20_000_000, standardFontDataUrl: '/vendor/pdfjs-fonts/', wasmUrl: '/vendor/pdfjs-wasm/' });

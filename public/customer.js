@@ -920,14 +920,14 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
         });
         const pdf = await task.promise;
         const page = await pdf.getPage(1);
-        const viewport = page.getViewport({ scale: 2.2 });
+        const viewport = page.getViewport({ scale: 1.5 });
         const offCanvas = document.createElement('canvas');
         offCanvas.width = viewport.width;
         offCanvas.height = viewport.height;
         await page.render({ canvasContext: offCanvas.getContext('2d'), viewport }).promise;
-        const blob = await new Promise(res => offCanvas.toBlob(res, 'image/png'));
+        const blob = await new Promise(res => offCanvas.toBlob(res, 'image/jpeg', 0.90));
         offCanvas.width = offCanvas.height = 1;
-        editableFile = new File([blob], targetFile.name.replace(/\.[^.]+$/, '') + '-page1.png', { type: 'image/png' });
+        editableFile = new File([blob], targetFile.name.replace(/\.[^.]+$/, '') + '-page1.jpg', { type: 'image/jpeg' });
       } catch (err) {
         notify('Unable to extract page for scanning: ' + err.message);
         return;
@@ -1250,11 +1250,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
     errorEl.textContent = '';
     orderStatusText.textContent = 'Uploading document…';
     orderStatusText.className = 'badge pending';
-    if (knownPageCount || quote?.pages) {
-      updateInstantPriceDisplay();
-    } else {
-      document.querySelector('#total-amount').textContent = '...';
-    }
+    knownPageCount = knownPageCount || quote?.pages || (files.every(isImage) ? files.length : 1);
+    updateInstantPriceDisplay();
 
     try {
       const settings = readOptions();
@@ -1441,12 +1438,17 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
       knownPageCount = files.length;
       updateInstantPriceDisplay();
     } else if (/\.pdf$/i.test(files[0]?.name || '')) {
+      knownPageCount = 1;
+      updateInstantPriceDisplay();
       getDocPageCount(files[0]).then(count => {
         if (count) {
           knownPageCount = count;
           updateInstantPriceDisplay();
         }
       }).catch(() => {});
+    } else {
+      knownPageCount = 1;
+      updateInstantPriceDisplay();
     }
 
     scheduleQuote();

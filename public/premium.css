@@ -8770,4 +8770,335 @@ html, body {
   }
 }
 
+/* ==========================================================================
+   SMARTPRINT SENIOR STABILIZATION & HIGH-CONTRAST VISIBILITY PATCH
+   1. Box Text Contrast & Clarity (WCAG AA Compliant)
+   2. Full Mobile Responsiveness for Upload, Editor & Preview
+   3. Owner Print Queue Sequence Badges
+   ========================================================================== */
+
+/* 1. Queue Sequence Badges (Owner Dashboard) */
+.queue-seq-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 12px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.queue-seq-pill.seq-printing {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #93c5fd;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.12);
+}
+.queue-seq-pill.seq-queued {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+/* 2. Document Mode Selector (Customer Page) - Crystal Clear High Contrast */
+.doc-editor-mode-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  background: #f1f5f9;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+  box-sizing: border-box;
+}
+.doc-mode-toggle {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  padding: 10px 14px !important;
+  border-radius: 8px !important;
+  font-size: 13.5px !important;
+  font-weight: 700 !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+  text-align: center !important;
+  min-height: 42px !important;
+  box-sizing: border-box !important;
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #0f172a !important; /* Crisp dark slate */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+.doc-mode-toggle:hover {
+  background: #f8fafc !important;
+  border-color: #94a3b8 !important;
+}
+.doc-mode-toggle.is-active {
+  background: #2563eb !important;
+  border-color: #1d4ed8 !important;
+  color: #ffffff !important; /* Pure white text on vibrant blue */
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3) !important;
+}
+
+/* 3. High-Contrast Text on All Customer Page Boxes */
+.total-label-caps {
+  color: #0f172a !important;
+  font-weight: 800 !important;
+  letter-spacing: 1px !important;
+}
+.total-price-large {
+  color: #0f172a !important;
+  font-weight: 800 !important;
+}
+.total-price-sub {
+  color: #1e293b !important;
+  font-weight: 600 !important;
+}
+.summary-total-section {
+  background: #f8fafc !important;
+  border: 1.5px solid #cbd5e1 !important;
+}
+.summary-spec-row {
+  color: #1e293b !important;
+  font-weight: 500 !important;
+}
+.summary-spec-row strong {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+.paper-format-box {
+  background: #f8fafc !important;
+  border: 1.5px solid #cbd5e1 !important;
+}
+.paper-name {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+.paper-dims {
+  color: #334155 !important;
+  font-weight: 600 !important;
+}
+.option-card {
+  background: #ffffff !important;
+  border: 1.5px solid #cbd5e1 !important;
+}
+.option-title {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+.option-price {
+  color: #334155 !important;
+  font-weight: 600 !important;
+}
+.choice-card-active {
+  background: #eff6ff !important;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 1px #2563eb !important;
+}
+.choice-card-active .option-title {
+  color: #1d4ed8 !important;
+}
+.choice-card-active .option-price {
+  color: #2563eb !important;
+}
+.segment-btn {
+  color: #0f172a !important;
+  font-weight: 600 !important;
+}
+.segment-btn.is-active {
+  color: #1d4ed8 !important;
+  font-weight: 700 !important;
+  background: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+}
+.badge.badge-awaiting {
+  background: #fef3c7 !important;
+  color: #92400e !important;
+  border: 1px solid #fde68a !important;
+  font-weight: 700 !important;
+  padding: 3px 10px !important;
+  border-radius: 6px !important;
+}
+.summary-spec-row .badge {
+  color: #0f172a !important;
+  background: #f1f5f9 !important;
+  border: 1px solid #cbd5e1 !important;
+  font-weight: 700 !important;
+  padding: 3px 9px !important;
+  border-radius: 6px !important;
+}
+.summary-spec-row .badge.active,
+.summary-spec-row .badge.ready,
+.badge.active {
+  color: #065f46 !important;
+  background: #d1fae5 !important;
+  border: 1px solid #a7f3d0 !important;
+  font-weight: 700 !important;
+}
+.rate-badge.rate-bw {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+  border: 1.5px solid #cbd5e1 !important;
+  font-weight: 700 !important;
+}
+.rate-badge.rate-color {
+  background: #ecfdf5 !important;
+  color: #065f46 !important;
+  border: 1.5px solid #a7f3d0 !important;
+  font-weight: 700 !important;
+}
+.action-chip-btn {
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+}
+.action-chip-btn:hover {
+  background: #eff6ff !important;
+  border-color: #2563eb !important;
+  color: #1d4ed8 !important;
+}
+
+/* 4. Full Mobile Responsiveness for Customer Uploaded State */
+@media (max-width: 768px) {
+  .customer-order-layout {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    gap: 20px !important;
+  }
+  .customer-steps-column,
+  .customer-summary-column {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  .selected-files-display {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    padding: 14px !important;
+  }
+  .selected-file-item {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 12px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  .file-meta-wrap {
+    flex: 1 1 180px !important;
+    min-width: 0 !important;
+  }
+  .file-name-text {
+    overflow-wrap: break-word !important;
+    word-break: break-word !important;
+    white-space: normal !important;
+  }
+  .file-actions-wrap {
+    width: 100% !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+  .file-actions-wrap .btn-crop-doc,
+  .file-actions-wrap .btn-change-file {
+    flex: 1 1 auto !important;
+    justify-content: center !important;
+    text-align: center !important;
+    min-height: 42px !important;
+    box-sizing: border-box !important;
+  }
+  .document-editor-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    padding: 14px !important;
+    overflow: hidden !important;
+  }
+  .doc-editor-toolbar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+    box-sizing: border-box !important;
+  }
+  .doc-editor-toolbar .action-chip-btn {
+    flex: 0 1 auto !important;
+    min-height: 38px !important;
+    box-sizing: border-box !important;
+  }
+  .document-preview-pane {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+  }
+  .preview-box-header {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+  }
+  .preview-pill {
+    max-width: 160px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+  .preview-box-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    padding: 12px !important;
+    overflow: auto !important;
+  }
+  .document-preview-pane .paper-frame canvas,
+  .document-preview-pane .image-preview {
+    max-width: 100% !important;
+    height: auto !important;
+    object-fit: contain !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .doc-editor-mode-selector {
+    grid-template-columns: 1fr !important;
+    gap: 6px !important;
+  }
+  .customer-hero-header {
+    margin-bottom: 16px !important;
+  }
+  .panel.customer-card {
+    padding: 16px 12px !important;
+  }
+  .options-three-col-row {
+    grid-template-columns: 1fr !important;
+    gap: 14px !important;
+  }
+  .option-cards-two {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+  .segments-three {
+    grid-template-columns: 1fr !important;
+  }
+}
+
 

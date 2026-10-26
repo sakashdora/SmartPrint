@@ -27,12 +27,17 @@ export async function prepare(files, options) {
       if (!png && !jpg) throw new Error('Supported files are PDF, JPG and PNG.');
       let pipeline = sharp(bytes, { limitInputPixels: 40_000_000 }).rotate();
       if (options.smartCrop) pipeline = pipeline.trim({ threshold: 12 });
-      let normalized = await pipeline.png().toBuffer();
-      if (options.crop) { const meta = await sharp(normalized).metadata(); const x = Math.floor(meta.width * options.crop / 100), y = Math.floor(meta.height * options.crop / 100); normalized = await sharp(normalized).extract({ left: x, top: y, width: meta.width - 2 * x, height: meta.height - 2 * y }).png().toBuffer(); }
-      pipeline = sharp(normalized).rotate(options.rotate);
+      if (options.crop) {
+        const meta = await pipeline.metadata();
+        const x = Math.floor(meta.width * options.crop / 100);
+        const y = Math.floor(meta.height * options.crop / 100);
+        pipeline = pipeline.extract({ left: x, top: y, width: meta.width - 2 * x, height: meta.height - 2 * y });
+      }
+      if (options.rotate) pipeline = pipeline.rotate(options.rotate);
       if (options.enhance) pipeline = pipeline.normalize().sharpen();
       if (options.color === 'bw') pipeline = pipeline.greyscale();
-      const image = await source.embedPng(await pipeline.png().toBuffer());
+      const processed = await pipeline.jpeg({ quality: 92 }).toBuffer();
+      const image = await source.embedJpg(processed);
       const page = source.addPage([image.width, image.height]); page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
     }
   }

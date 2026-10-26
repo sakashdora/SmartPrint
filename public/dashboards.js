@@ -201,7 +201,26 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
           ['completed', 'Completed', orders.filter(o => o.status === 'completed').length]
         ], filter, 'data-queue-filter')}
 
-        ${visible.length ? `
+        ${(() => {
+          let queuePosition = 0;
+          const queueSequenceMap = new Map();
+          for (const o of orders) {
+            if (['printing', 'awaiting_confirmation'].includes(o.status)) {
+              queueSequenceMap.set(o.id, { label: 'Printing', pillClass: 'seq-printing' });
+            } else if (o.status === 'queued') {
+              queuePosition++;
+              queueSequenceMap.set(o.id, { label: `#${queuePosition} in queue`, pillClass: 'seq-queued' });
+            }
+          }
+
+          if (!visible.length) {
+            return empty(
+              orders.length ? 'No orders in this view.' : 'Your queue is all clear.',
+              orders.length ? 'Choose another filter to see more orders.' : 'Share your shop QR to receive your first print order.'
+            );
+          }
+
+          return `
           <div class="desktop-queue-table-wrap">
             <table class="premium-queue-table">
               <thead>
@@ -214,7 +233,9 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
                 </tr>
               </thead>
               <tbody>
-                ${visible.map(order => `
+                ${visible.map(order => {
+                  const seqInfo = queueSequenceMap.get(order.id);
+                  return `
                   <tr>
                     <td class="col-order-file">
                       <div class="order-id-row">
@@ -222,6 +243,7 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
                         <div>
                           <div class="order-code-badge">
                             <strong>#${escape(order.id.slice(0, 8).toUpperCase())}</strong>
+                            ${seqInfo ? `<span class="queue-seq-pill ${seqInfo.pillClass}">${seqInfo.label}</span>` : ''}
                             ${order.priority >= 10 ? '<span class="rush-badge">⚡ RUSH</span>' : ''}
                           </div>
                           <div class="order-filename-text" title="${escape(order.file_name || 'document.pdf')}">
@@ -248,17 +270,20 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
                       ${actions(order, money)}
                     </td>
                   </tr>
-                `).join('')}
+                `; }).join('')}
               </tbody>
             </table>
           </div>
 
           <div class="mobile-queue-cards-list">
-            ${visible.map(order => `
+            ${visible.map(order => {
+              const seqInfo = queueSequenceMap.get(order.id);
+              return `
               <div class="mobile-order-card">
                 <div class="mobile-card-header">
                   <div class="mobile-order-id-group">
                     <strong>#${escape(order.id.slice(0, 8).toUpperCase())}</strong>
+                    ${seqInfo ? `<span class="queue-seq-pill ${seqInfo.pillClass}">${seqInfo.label}</span>` : ''}
                     ${order.priority >= 10 ? '<span class="rush-badge">⚡ RUSH</span>' : ''}
                   </div>
                   <div class="mobile-card-amount">${money(order.amount)}</div>
@@ -280,17 +305,14 @@ export function ownerDashboard({ view, head, store, orders, summary, devices, qr
                   ${actions(order, money)}
                 </div>
               </div>
-            `).join('')}
+            `; }).join('')}
           </div>
 
           <div class="queue-panel-footer">
             <span class="showing-count-text">Showing ${visible.length} of ${filtered.length} orders</span>
             ${view === 'owner' ? `<a href="#queue" class="footer-view-full-link">View full queue →</a>` : ''}
-          </div>
-        ` : empty(
-          orders.length ? 'No orders in this view.' : 'Your queue is all clear.',
-          orders.length ? 'Choose another filter to see more orders.' : 'Share your shop QR to receive your first print order.'
-        )}
+          </div>`;
+        })()}
       </section>
 
       <aside class="shop-utility-aside">
