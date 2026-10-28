@@ -120,6 +120,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN file_name TEXT DEFAULT 'document.pdf';"); } catch {}
       try { sqlite.exec("ALTER TABLE orders ADD COLUMN priority INTEGER DEFAULT 0;"); } catch {}
       try { sqlite.exec("ALTER TABLE mfa ADD COLUMN recovery_codes TEXT DEFAULT '[]';"); } catch {}
+      try { sqlite.exec("ALTER TABLE mfa ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"); } catch {}
       try { sqlite.exec("ALTER TABLE shop_payments ADD COLUMN qr_image TEXT;"); } catch {}
     }),

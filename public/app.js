@@ -857,13 +857,24 @@ function auth(register = false) {
           await route();
         } catch (err) {
           if (err.details?.mfaRequired) {
+            if (err.details.hasPasskeys && !err.details.hasTotp) {
+              notify('Passkey verification required. Click "Sign in with Passkey" below.');
+              const passkeyBtn = document.querySelector('#passkey-login');
+              if (passkeyBtn) {
+                passkeyBtn.scrollIntoView({ behavior: 'smooth' });
+                passkeyBtn.focus();
+                passkeyBtn.classList.add('primary');
+                passkeyBtn.classList.remove('secondary');
+              }
+              return;
+            }
             const totpField = document.querySelector('#auth-totp-field');
             if (totpField) {
               totpField.hidden = false;
               const input = totpField.querySelector('input');
               input.required = true;
               input.focus();
-              notify('Enter the 6-digit code from your authenticator app to complete sign-in.');
+              notify(err.details.hasPasskeys ? 'Enter 6-digit code, or sign in with Passkey below.' : 'Enter the 6-digit code from your authenticator app to complete sign-in.');
               return;
             }
           }
@@ -876,6 +887,10 @@ function auth(register = false) {
   const passkeyBtn = document.querySelector('#passkey-login');
   if (passkeyBtn) {
     passkeyBtn.onclick = () => busy(passkeyBtn, async () => {
+      if (location.hostname === '127.0.0.1') {
+        location.href = location.href.replace('//127.0.0.1', '//localhost');
+        return;
+      }
       const email = document.querySelector('[name=email]').value.trim();
       if (!window.SimpleWebAuthnBrowser) {
         await new Promise((resolve, reject) => {
@@ -890,17 +905,25 @@ function auth(register = false) {
       if (!browser || !browser.browserSupportsWebAuthn()) {
         throw new Error('Passkeys/WebAuthn is not supported in this browser.');
       }
-      const options = await api('/api/auth/webauthn/auth-options', { method: 'POST', body: { email: email || undefined } });
-      const assertion = await browser.startAuthentication({ optionsJSON: options });
-      const user = await api('/api/auth/webauthn/auth-verify', {
-        method: 'POST',
-        body: { response: assertion, challengeKey: options.challengeKey }
-      });
-      me = user;
-      notify('Signed in with Passkey!');
-      const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
-      location.hash = target;
-      await route();
+      try {
+        const options = await api('/api/auth/webauthn/auth-options', { method: 'POST', body: { email: email || undefined } });
+        const assertion = await browser.startAuthentication({ optionsJSON: options });
+        const user = await api('/api/auth/webauthn/auth-verify', {
+          method: 'POST',
+          body: { response: assertion, challengeKey: options.challengeKey }
+        });
+        me = user;
+        notify('Signed in with Passkey!');
+        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+        location.hash = target;
+        await route();
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+          notify('Passkey prompt cancelled.');
+          return;
+        }
+        throw err;
+      }
     });
   }
 }

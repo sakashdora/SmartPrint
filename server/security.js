@@ -50,9 +50,10 @@ export function totp(secret, step = Math.floor(Date.now() / 30000), digits = 6) 
   return ((hash.readUInt32BE(hash[19] & 15) & 0x7fffffff) % 10 ** digits).toString().padStart(digits, '0');
 }
 export function totpStep(secret, code, lastStep = -1) {
-  if (!/^\d{6}$/.test(String(code))) return null;
+  const cleanCode = String(code ?? '').replace(/[\s-]/g, '').trim();
+  if (!/^\d{6}$/.test(cleanCode)) return null;
   const step = Math.floor(Date.now() / 30000);
-  for (const n of [step, step - 1, step + 1]) if (n > Number(lastStep) && timingSafeEqual(Buffer.from(totp(secret, n)), Buffer.from(String(code)))) return n;
+  for (const n of [step, step - 1, step + 1]) if (n > Number(lastStep) && timingSafeEqual(Buffer.from(totp(secret, n)), Buffer.from(cleanCode))) return n;
   return null;
 }
 export function base32(bytes) { let bits = 0, value = 0, result = ''; for (const byte of bytes) { value = (value << 8) | byte; bits += 8; while (bits >= 5) { result += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[(value >>> (bits -= 5)) & 31]; } } if (bits) result += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'[(value << (5 - bits)) & 31]; return result; }

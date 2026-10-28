@@ -400,6 +400,18 @@ export async function printersPage({ api, workspace, escape, notify }) {
   );
 }
 
+async function ensureWebAuthnBrowser() {
+  if (window.SimpleWebAuthnBrowser) return window.SimpleWebAuthnBrowser;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/simplewebauthn-browser.min.js';
+    s.onload = () => resolve(window.SimpleWebAuthnBrowser);
+    s.onerror = () => reject(new Error('Passkey module could not be loaded.'));
+    document.head.appendChild(s);
+  });
+  return window.SimpleWebAuthnBrowser;
+}
+
 export async function securityPage({ api, mount, escape, notify, onVerified }) {
   let status = { totp: false, passkeys: [] };
   try { status = await api('/api/auth/mfa/status'); } catch {}
@@ -414,19 +426,26 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
 
       <div class="mfa-methods" style="display: flex; flex-direction: column; gap: 14px; margin: 20px 0;">
         <div class="mfa-card" style="border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 16px; background: var(--surface, #fff);">
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
-            <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 200px;">
               <strong style="display: flex; align-items: center; gap: 6px;">🔑 Passkey / WebAuthn <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #e0f2fe; color: #0369a1; font-weight: 700;">RECOMMENDED</span></strong>
               <p class="muted" style="margin: 4px 0 0; font-size: 13px;">Face ID, fingerprint, or Windows Hello for instant sign-in.</p>
             </div>
-            <button class="primary" id="btn-register-passkey" type="button">Register</button>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              ${hasPasskey ? `
+                <button class="primary" id="btn-verify-passkey" type="button">🔑 Sign in with Passkey</button>
+                <button class="secondary" id="btn-register-passkey" type="button">+ Add another</button>
+              ` : `
+                <button class="primary" id="btn-register-passkey" type="button">Register Passkey</button>
+              `}
+            </div>
           </div>
           ${hasPasskey ? `<p style="color: #16a34a; font-size: 12px; margin: 8px 0 0;">✓ ${status.passkeys.length} passkey(s) registered</p>` : ''}
         </div>
 
         <div class="mfa-card" style="border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 16px; background: var(--surface, #fff);">
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
-            <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 200px;">
               <strong style="display: flex; align-items: center; gap: 6px;">📱 Authenticator App (TOTP) <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #f1f5f9; color: #475569;">SUPPORTED</span></strong>
               <p class="muted" style="margin: 4px 0 0; font-size: 13px;">Google Authenticator, Microsoft Authenticator, or 1Password.</p>
             </div>
@@ -436,25 +455,63 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
         </div>
       </div>
 
+      ${hasTotp ? `
+        <div class="mfa-card" style="border: 1px solid #bbf7d0; background: #f0fdf4; border-radius: 12px; padding: 16px; margin-bottom: 14px;">
+          <strong style="color: #15803d; font-size: 14px; display: block; margin-bottom: 4px;">Sign in with your Authenticator code:</strong>
+          <p style="margin: 0 0 10px; font-size: 12.5px; color: #166534;">Enter the 6-digit code from your authenticator app to complete sign-in.</p>
+          <form id="verify-totp-form" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" placeholder="000000" required autocomplete="one-time-code" style="max-width: 150px; padding: 8px 12px; font-family: monospace; font-size: 16px; letter-spacing: 2px;">
+            <button class="primary" type="submit" id="btn-verify-totp-submit">Verify Code →</button>
+          </form>
+        </div>
+      ` : ''}
+
       <div id="mfa-setup"></div>
     </main>
   `);
+
+  const verifyPasskeyBtn = document.querySelector('#btn-verify-passkey');
+  if (verifyPasskeyBtn) {
+    verifyPasskeyBtn.onclick = async () => {
+      verifyPasskeyBtn.disabled = true;
+      try {
+        if (location.hostname === '127.0.0.1') {
+          location.href = location.href.replace('//127.0.0.1', '//localhost');
+          return;
+        }
+        const browser = await ensureWebAuthnBrowser();
+        if (!browser || !browser.browserSupportsWebAuthn()) {
+          throw new Error('Passkeys/WebAuthn is not supported in this browser.');
+        }
+        const options = await api('/api/auth/webauthn/auth-options', { method: 'POST' });
+        const assertion = await browser.startAuthentication({ optionsJSON: options });
+        const user = await api('/api/auth/webauthn/auth-verify', {
+          method: 'POST',
+          body: { response: assertion, challengeKey: options.challengeKey }
+        });
+        notify('Passkey verified successfully!');
+        onVerified(user);
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+          notify('Passkey sign-in cancelled.');
+        } else {
+          notify(err.message || 'Passkey verification failed.');
+        }
+        verifyPasskeyBtn.disabled = false;
+      }
+    };
+  }
 
   const passkeyBtn = document.querySelector('#btn-register-passkey');
   if (passkeyBtn) {
     passkeyBtn.onclick = async () => {
       passkeyBtn.disabled = true;
       try {
-        if (!window.SimpleWebAuthnBrowser) {
-          await new Promise((resolve, reject) => {
-            const s = document.createElement('script');
-            s.src = '/simplewebauthn-browser.min.js';
-            s.onload = () => resolve(window.SimpleWebAuthnBrowser);
-            s.onerror = () => reject(new Error('Passkey module could not be loaded.'));
-            document.head.appendChild(s);
-          });
+        if (location.hostname === '127.0.0.1') {
+          location.href = location.href.replace('//127.0.0.1', '//localhost');
+          return;
         }
-        const browser = window.SimpleWebAuthnBrowser;
+        const browser = await ensureWebAuthnBrowser();
         if (!browser || !browser.browserSupportsWebAuthn()) {
           throw new Error('Passkeys/WebAuthn is not supported in this browser.');
         }
@@ -465,8 +522,30 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
         const updated = await api('/api/me');
         onVerified(updated);
       } catch (err) {
-        notify(err.message || 'Could not register passkey.');
+        if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+          notify('Passkey registration cancelled.');
+        } else {
+          notify(err.message || 'Could not register passkey.');
+        }
         passkeyBtn.disabled = false;
+      }
+    };
+  }
+
+  const verifyTotpForm = document.querySelector('#verify-totp-form');
+  if (verifyTotpForm) {
+    verifyTotpForm.onsubmit = async e => {
+      e.preventDefault();
+      const submitBtn = document.querySelector('#btn-verify-totp-submit');
+      submitBtn.disabled = true;
+      try {
+        const code = new FormData(e.target).get('code');
+        const res = await api('/api/auth/mfa/verify', { method: 'POST', body: { code } });
+        notify('Two-factor authentication verified!');
+        onVerified(res.user);
+      } catch (err) {
+        notify(err.message);
+        submitBtn.disabled = false;
       }
     };
   }
@@ -802,24 +881,25 @@ export async function trackingPage({ api, mount, money, escape, receipt, notify,
 }
 export async function accountPage({ api, workspace, notify, admin, onSignedOut, escape }) {
   const esc = escape || (v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])));
-  let status = { totp: false, enabledAt: null };
+  let status = { totp: false, enabledAt: null, passkeys: [] };
   try { status = await api('/api/auth/mfa/status'); } catch {}
   const hasTotp = Boolean(status.totp);
+  const passkeys = Array.isArray(status.passkeys) ? status.passkeys : [];
 
   const render = () => {
     const content = `
       <div class="workhead">
         <div>
           <h1>Account settings</h1>
-          <p class="muted">Manage your credentials, password, and two-factor authentication.</p>
+          <p class="muted">Manage your credentials, passkeys, and two-factor authentication.</p>
         </div>
       </div>
 
-      <div class="grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; align-items: start;">
+      <div class="grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; align-items: start;">
         <!-- Card 1: Password Management -->
         <section class="panel">
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-            <h2 style="margin: 0; font-size: 18px;">Password & Authentication</h2>
+            <h2 style="margin: 0; font-size: 18px;">Password &amp; Authentication</h2>
             <span class="badge active">Active</span>
           </div>
           <p class="muted" style="margin: 0 0 16px; font-size: 13px;">Changing your password will invalidate all existing active sessions.</p>
@@ -844,14 +924,51 @@ export async function accountPage({ api, workspace, notify, admin, onSignedOut, 
           </form>
         </section>
 
-        <!-- Card 2: Two-Factor Authentication (TOTP) -->
+        <!-- Card 2: Passkeys (WebAuthn) -->
+        <section class="panel" id="passkey-card">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <h2 style="margin: 0; font-size: 18px;">🔑 Passkeys (WebAuthn)</h2>
+            <span class="badge ${passkeys.length ? 'active' : 'suspended'}">${passkeys.length ? `${passkeys.length} Active` : 'Not Configured'}</span>
+          </div>
+          <p class="muted" style="margin: 0 0 16px; font-size: 13px;">
+            Sign in instantly using Touch ID, Face ID, Windows Hello, or hardware security keys without typing a password.
+          </p>
+
+          ${passkeys.length > 0 ? `
+            <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;">
+              ${passkeys.map(pk => `
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface-subtle, #f8fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; padding: 12px 14px;">
+                  <div style="min-width: 0;">
+                    <strong style="display: flex; align-items: center; gap: 6px; font-size: 13.5px;">
+                      🔑 Passkey <span style="font-size: 11px; font-weight: normal; color: var(--muted, #64748b);">${pk.device_type === 'singleDevice' ? '(Platform)' : '(Multi-device)'}</span>
+                    </strong>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap;">
+                      <span class="muted" style="font-size: 12px;">Registered: ${new Date(pk.created).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                      ${pk.backed_up ? '<span class="pill" style="font-size: 10px; padding: 1px 6px;">Cloud Synced</span>' : '<span class="pill" style="font-size: 10px; padding: 1px 6px;">Device Bound</span>'}
+                    </div>
+                  </div>
+                  <button type="button" class="secondary btn-delete-passkey" data-id="${esc(pk.id)}" style="color: #dc2626; border-color: #fecaca; padding: 5px 10px; font-size: 12px; white-space: nowrap;">Remove</button>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div style="background: var(--surface-subtle, #f8fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 14px; margin-bottom: 16px;">
+              <p class="muted" style="margin: 0; font-size: 13px;">No passkeys registered yet. Add a passkey to sign in seamlessly with biometric authentication.</p>
+            </div>
+          `}
+
+          <button type="button" class="primary wide" id="btn-account-add-passkey">+ Register New Passkey</button>
+          <div id="account-passkey-status" style="margin-top: 10px;"></div>
+        </section>
+
+        <!-- Card 3: Two-Factor Authentication (TOTP) -->
         <section class="panel" id="totp-card">
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-            <h2 style="margin: 0; font-size: 18px;">Two-Factor Authentication</h2>
+            <h2 style="margin: 0; font-size: 18px;">📱 Authenticator App (TOTP)</h2>
             <span class="badge ${hasTotp ? 'active' : 'suspended'}">${hasTotp ? 'Active (RFC 6238)' : 'Not Configured'}</span>
           </div>
           <p class="muted" style="margin: 0 0 16px; font-size: 13px;">
-            Protect your shop queue and payments with an Authenticator App (Google Authenticator, Microsoft Authenticator, 1Password, Authy).
+            Protect your shop queue and administrative controls with Google Authenticator, Microsoft Authenticator, or 1Password.
           </p>
 
           ${hasTotp ? `
@@ -866,7 +983,8 @@ export async function accountPage({ api, workspace, notify, admin, onSignedOut, 
             </div>
 
             <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-              <button type="button" class="secondary" id="btn-regen-recovery">🔄 Regenerate Recovery Codes</button>
+              <button type="button" class="secondary" id="btn-reconfig-mfa">🔄 Reconfigure App</button>
+              <button type="button" class="secondary" id="btn-regen-recovery">🔑 Regenerate Recovery Codes</button>
               <button type="button" class="secondary" id="btn-disable-2fa" style="color: #dc2626; border-color: #fecaca;">Disable 2FA</button>
             </div>
             
@@ -877,7 +995,7 @@ export async function accountPage({ api, workspace, notify, admin, onSignedOut, 
                 📱 Time-based One-Time Password (TOTP)
               </strong>
               <p class="muted" style="margin: 6px 0 0; font-size: 13px;">
-                Add an extra layer of defense against password theft. Generates offline verification codes that change every 30 seconds.
+                Generates offline verification codes that change every 30 seconds for secure multi-factor authentication.
               </p>
             </div>
             
@@ -917,102 +1035,159 @@ export async function accountPage({ api, workspace, notify, admin, onSignedOut, 
       };
     }
 
-    // Enable 2FA Click
-    const enableBtn = document.querySelector('#btn-enable-2fa');
-    if (enableBtn) {
-      enableBtn.onclick = async () => {
-        enableBtn.disabled = true;
-        const container = document.querySelector('#account-mfa-setup-area');
-        container.innerHTML = '<p class="muted">Generating secure authenticator setup key...</p>';
+    // Register Passkey
+    const addPasskeyBtn = document.querySelector('#btn-account-add-passkey');
+    if (addPasskeyBtn) {
+      addPasskeyBtn.onclick = async () => {
+        addPasskeyBtn.disabled = true;
+        const statusDiv = document.querySelector('#account-passkey-status');
+        if (statusDiv) statusDiv.innerHTML = '<p class="muted" style="font-size: 13px;">Initiating passkey registration prompt...</p>';
         try {
-          const result = await api('/api/auth/mfa/setup', { method: 'POST' });
-          container.innerHTML = `
-            <div style="background: var(--surface-hover, #f8fafc); border-radius: 12px; padding: 18px; border: 1px solid var(--border, #e2e8f0);">
-              <h3 style="margin: 0 0 8px; font-size: 15px;">1. Scan QR with Authenticator App</h3>
-              <p class="muted" style="margin: 0 0 12px; font-size: 13px;">Open Google Authenticator, Microsoft Authenticator, or 1Password and scan:</p>
-              
-              <div style="text-align: center; margin: 12px 0;">
-                <img src="${result.image}" alt="TOTP QR Code" style="max-width: 170px; border-radius: 8px; border: 1px solid var(--border, #cbd5e1); padding: 4px; background: #fff; display: inline-block;">
-              </div>
-              
-              <p class="muted" style="margin: 10px 0 4px; font-size: 12px; text-align: center;">Or manually enter this secret setup key:</p>
-              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 14px;">
-                <code style="font-family: monospace; font-size: 14px; font-weight: 700; background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; letter-spacing: 1.5px;">${esc(result.secret)}</code>
-                <button type="button" class="secondary" id="btn-copy-totp-key" style="padding: 6px 10px; font-size: 12px;">Copy</button>
-              </div>
-
-              <h3 style="margin: 16px 0 8px; font-size: 15px;">2. Enter 6-digit Code to Confirm</h3>
-              <form id="confirm-mfa-form">
-                <label class="field">6-digit Code
-                  <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" required placeholder="000000" autocomplete="one-time-code" autofocus>
-                </label>
-                <div style="display: flex; gap: 10px; margin-top: 10px;">
-                  <button class="primary" style="flex: 1;" id="btn-submit-mfa-confirm">Confirm & Enable 2FA</button>
-                  <button type="button" class="secondary" id="btn-cancel-mfa-setup">Cancel</button>
-                </div>
-              </form>
-            </div>
-          `;
-
-          document.querySelector('#btn-copy-totp-key')?.addEventListener('click', () => {
-            navigator.clipboard.writeText(result.secret).then(() => notify('Setup key copied to clipboard!'));
-          });
-
-          document.querySelector('#btn-cancel-mfa-setup')?.addEventListener('click', () => {
-            container.innerHTML = '';
-            enableBtn.disabled = false;
-          });
-
-          document.querySelector('#confirm-mfa-form').onsubmit = async e => {
-            e.preventDefault();
-            const submitBtn = document.querySelector('#btn-submit-mfa-confirm');
-            submitBtn.disabled = true;
-            try {
-              const res = await api('/api/auth/mfa/confirm', {
-                method: 'POST',
-                body: { code: new FormData(e.target).get('code') }
-              });
-              notify('✅ Two-Factor Authentication is now active!');
-              
-              if (res.recoveryCodes && res.recoveryCodes.length > 0) {
-                container.innerHTML = `
-                  <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 12px; padding: 20px; margin-top: 10px;">
-                    <strong style="color: #15803d; font-size: 15px; display: block; margin-bottom: 6px;">✓ 2FA Enabled & Single-Use Recovery Codes Generated</strong>
-                    <p style="font-size: 13px; color: #166534; margin: 0 0 12px;">
-                      Store these 8 single-use recovery codes in a secure password manager. If you ever lose access to your authenticator device, each code can be used once to sign in.
-                    </p>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; font-family: monospace; font-size: 13px; font-weight: 700; background: #fff; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; margin-bottom: 14px;">
-                      ${res.recoveryCodes.map(code => `<div style="padding: 4px; text-align: center; letter-spacing: 1px; color: #1e293b;">${esc(code)}</div>`).join('')}
-                    </div>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                      <button type="button" class="secondary" id="btn-copy-recovery-codes">📋 Copy all recovery codes</button>
-                      <button type="button" class="primary" id="btn-done-mfa-setup">Done</button>
-                    </div>
-                  </div>
-                `;
-
-                document.querySelector('#btn-copy-recovery-codes')?.addEventListener('click', () => {
-                  navigator.clipboard.writeText(res.recoveryCodes.join('\n')).then(() => notify('Recovery codes copied to clipboard!'));
-                });
-
-                document.querySelector('#btn-done-mfa-setup')?.addEventListener('click', async () => {
-                  await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
-                });
-              } else {
-                await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
-              }
-            } catch (err) {
-              notify(err.message);
-              submitBtn.disabled = false;
-            }
-          };
+          if (location.hostname === '127.0.0.1') {
+            location.href = location.href.replace('//127.0.0.1', '//localhost');
+            return;
+          }
+          const browser = await ensureWebAuthnBrowser();
+          if (!browser || !browser.browserSupportsWebAuthn()) {
+            throw new Error('Passkeys/WebAuthn is not supported in this browser.');
+          }
+          const options = await api('/api/auth/webauthn/register-options', { method: 'POST' });
+          const attestation = await browser.startRegistration({ optionsJSON: options });
+          const res = await api('/api/auth/webauthn/register-verify', { method: 'POST', body: attestation });
+          notify(res.message || 'Passkey registered successfully!');
+          await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
         } catch (err) {
-          notify(err.message);
-          container.innerHTML = '';
-          enableBtn.disabled = false;
+          if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+            notify('Passkey registration cancelled.');
+            if (statusDiv) statusDiv.innerHTML = '';
+            addPasskeyBtn.disabled = false;
+            return;
+          }
+          notify(err.message || 'Could not register passkey.');
+          if (statusDiv) statusDiv.innerHTML = `<p class="inline-error" style="color: #dc2626; font-size: 13px; margin-top: 6px;">${esc(err.message)}</p>`;
+          addPasskeyBtn.disabled = false;
         }
       };
     }
+
+    // Delete Passkey
+    document.querySelectorAll('.btn-delete-passkey').forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-id');
+        if (!confirm('Are you sure you want to remove this passkey? You will not be able to use it to sign in.')) return;
+        btn.disabled = true;
+        try {
+          await api(`/api/auth/webauthn/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          notify('Passkey removed successfully.');
+          await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+        } catch (err) {
+          notify(err.message || 'Could not remove passkey.');
+          btn.disabled = false;
+        }
+      };
+    });
+
+    // Start TOTP Setup Flow (for both Enable and Reconfigure)
+    const startTotpSetup = async (triggerBtn) => {
+      triggerBtn.disabled = true;
+      const container = document.querySelector('#account-mfa-setup-area') || document.querySelector('#account-mfa-action-area');
+      if (!container) return;
+      container.innerHTML = '<p class="muted" style="font-size: 13px;">Generating secure authenticator setup key...</p>';
+      try {
+        const result = await api('/api/auth/mfa/setup', { method: 'POST' });
+        container.innerHTML = `
+          <div style="background: var(--surface-hover, #f8fafc); border-radius: 12px; padding: 18px; border: 1px solid var(--border, #e2e8f0); margin-top: 10px;">
+            <h3 style="margin: 0 0 8px; font-size: 15px;">1. Scan QR with Authenticator App</h3>
+            <p class="muted" style="margin: 0 0 12px; font-size: 13px;">Open Google Authenticator, Microsoft Authenticator, or 1Password and scan:</p>
+            
+            <div style="text-align: center; margin: 12px 0;">
+              <img src="${result.image}" alt="TOTP QR Code" style="max-width: 170px; border-radius: 8px; border: 1px solid var(--border, #cbd5e1); padding: 4px; background: #fff; display: inline-block;">
+            </div>
+            
+            <p class="muted" style="margin: 10px 0 4px; font-size: 12px; text-align: center;">Or manually enter this secret setup key:</p>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 14px;">
+              <code style="font-family: monospace; font-size: 14px; font-weight: 700; background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; letter-spacing: 1.5px;">${esc(result.secret)}</code>
+              <button type="button" class="secondary" id="btn-copy-totp-key" style="padding: 6px 10px; font-size: 12px;">Copy</button>
+            </div>
+
+            <h3 style="margin: 16px 0 8px; font-size: 15px;">2. Enter 6-digit Code to Confirm</h3>
+            <form id="confirm-mfa-form">
+              <label class="field">6-digit Code
+                <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" required placeholder="000000" autocomplete="one-time-code" autofocus>
+              </label>
+              <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="primary" style="flex: 1;" id="btn-submit-mfa-confirm">Confirm &amp; Enable 2FA</button>
+                <button type="button" class="secondary" id="btn-cancel-mfa-setup">Cancel</button>
+              </div>
+            </form>
+          </div>
+        `;
+
+        document.querySelector('#btn-copy-totp-key')?.addEventListener('click', () => {
+          navigator.clipboard.writeText(result.secret).then(() => notify('Setup key copied to clipboard!'));
+        });
+
+        document.querySelector('#btn-cancel-mfa-setup')?.addEventListener('click', () => {
+          container.innerHTML = '';
+          triggerBtn.disabled = false;
+        });
+
+        document.querySelector('#confirm-mfa-form').onsubmit = async e => {
+          e.preventDefault();
+          const submitBtn = document.querySelector('#btn-submit-mfa-confirm');
+          submitBtn.disabled = true;
+          try {
+            const res = await api('/api/auth/mfa/confirm', {
+              method: 'POST',
+              body: { code: new FormData(e.target).get('code') }
+            });
+            notify('✅ Two-Factor Authentication is active!');
+            
+            if (res.recoveryCodes && res.recoveryCodes.length > 0) {
+              container.innerHTML = `
+                <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 12px; padding: 20px; margin-top: 10px;">
+                  <strong style="color: #15803d; font-size: 15px; display: block; margin-bottom: 6px;">✓ 2FA Enabled &amp; Single-Use Recovery Codes Generated</strong>
+                  <p style="font-size: 13px; color: #166534; margin: 0 0 12px;">
+                    Store these 8 single-use recovery codes in a secure password manager. If you ever lose access to your authenticator device, each code can be used once to sign in.
+                  </p>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; font-family: monospace; font-size: 13px; font-weight: 700; background: #fff; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; margin-bottom: 14px;">
+                    ${res.recoveryCodes.map(code => `<div style="padding: 4px; text-align: center; letter-spacing: 1px; color: #1e293b;">${esc(code)}</div>`).join('')}
+                  </div>
+                  <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button type="button" class="secondary" id="btn-copy-recovery-codes">📋 Copy all recovery codes</button>
+                    <button type="button" class="primary" id="btn-done-mfa-setup">Done</button>
+                  </div>
+                </div>
+              `;
+
+              document.querySelector('#btn-copy-recovery-codes')?.addEventListener('click', () => {
+                navigator.clipboard.writeText(res.recoveryCodes.join('\n')).then(() => notify('Recovery codes copied to clipboard!'));
+              });
+
+              document.querySelector('#btn-done-mfa-setup')?.addEventListener('click', async () => {
+                await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+              });
+            } else {
+              await accountPage({ api, workspace, notify, admin, onSignedOut, escape });
+            }
+          } catch (err) {
+            notify(err.message);
+            submitBtn.disabled = false;
+          }
+        };
+      } catch (err) {
+        notify(err.message);
+        container.innerHTML = '';
+        triggerBtn.disabled = false;
+      }
+    };
+
+    // Enable / Reconfigure 2FA
+    const enableBtn = document.querySelector('#btn-enable-2fa');
+    if (enableBtn) enableBtn.onclick = () => startTotpSetup(enableBtn);
+
+    const reconfigBtn = document.querySelector('#btn-reconfig-mfa');
+    if (reconfigBtn) reconfigBtn.onclick = () => startTotpSetup(reconfigBtn);
 
     // Regenerate Recovery Codes Click
     const regenBtn = document.querySelector('#btn-regen-recovery');

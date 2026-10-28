@@ -28,8 +28,21 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     if (config.publicUrl) {
       try { return new URL(config.publicUrl).hostname; } catch {}
     }
-    const host = req.headers.host || 'localhost';
-    return host.split(':')[0];
+    if (config.origin) {
+      try {
+        const h = new URL(config.origin).hostname;
+        if (h && h !== '127.0.0.1' && h !== '::1') return h;
+      } catch {}
+    }
+    if (process.env.PUBLIC_BASE_URL) {
+      try {
+        const h = new URL(process.env.PUBLIC_BASE_URL).hostname;
+        if (h && h !== '127.0.0.1' && h !== '::1') return h;
+      } catch {}
+    }
+    const host = (req.headers.host || 'localhost').split(':')[0];
+    if (host === '127.0.0.1' || host === '::1') return 'localhost';
+    return host;
   };
 
   const getOrigin = (req) => {
@@ -37,6 +50,32 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     const proto = req.headers['x-forwarded-proto'] || (config.production ? 'https' : 'http');
     const host = req.headers.host || 'localhost:3000';
     return `${proto}://${host}`;
+  };
+
+  const getExpectedOrigins = (req) => {
+    const origins = new Set();
+    const reqOrigin = getOrigin(req);
+    if (reqOrigin) origins.add(reqOrigin);
+    if (config.origin) origins.add(config.origin);
+    if (process.env.PUBLIC_BASE_URL) {
+      try { origins.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
+    }
+    origins.add('http://localhost:3000');
+    origins.add('http://127.0.0.1:3000');
+    if (req.headers.host) {
+      const proto = req.headers['x-forwarded-proto'] || (config.production ? 'https' : 'http');
+      origins.add(`${proto}://${req.headers.host}`);
+    }
+    return Array.from(origins);
+  };
+
+  const getExpectedRPIDs = (req) => {
+    const rpID = getRpID(req);
+    const set = new Set([rpID, 'localhost']);
+    if (config.origin) {
+      try { set.add(new URL(config.origin).hostname); } catch {}
+    }
+    return Array.from(set).filter(h => h && h !== '127.0.0.1' && h !== '::1');
   };
 
   async function session(res, user, mfa) {
@@ -60,19 +99,31 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     if (user.status === 'suspended' || user.status === 'disabled') throw fail(403, 'This account has been suspended or disabled. Please contact support.');
     if (!user.password.startsWith('$argon2')) await db.query('UPDATE users SET password=$1 WHERE id=$2', [await hashPassword(password), user.id]);
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [user.id]);
+    const passkeys = await db.query('SELECT id FROM passkeys WHERE user_id=$1', [user.id]);
+    const hasPasskeys = passkeys.length > 0;
+    const hasTotp = Boolean(mfa);
+    const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
+    const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+
     let mfaSatisfied = false;
-    if (mfa) {
+    if (hasTotp) {
       const rawCode = String(req.body.code || req.body.recovery_code || '').trim();
       if (!rawCode) {
-        return res.status(401).json({ error: 'Two-factor authentication code required.', mfaRequired: true });
+        return res.status(401).json({
+          error: 'Two-factor authentication code required.',
+          mfaRequired: true,
+          hasTotp: true,
+          hasPasskeys
+        });
       }
-      const step = totpStep(decrypt(mfa, key), rawCode, mfa.last_step);
+      const cleanCode = rawCode.replace(/[\s-]/g, '');
+      const step = totpStep(decrypt(mfa, key), cleanCode, mfa.last_step);
       if (step !== null) {
         const changed = await db.query('UPDATE mfa SET last_step=$1 WHERE user_id=$2 AND last_step<$1 RETURNING user_id', [step, user.id]);
         if (!changed.length) throw fail(401, 'This verification code was already used.');
         mfaSatisfied = true;
       } else {
-        const normalized = rawCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        const normalized = cleanCode.toUpperCase();
         if (normalized.length >= 8) {
           let recoveryCodes = [];
           try { recoveryCodes = JSON.parse(mfa.recovery_codes || '[]'); } catch {}
@@ -87,6 +138,14 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
         }
       }
       if (!mfaSatisfied) throw fail(401, 'Enter a fresh 6-digit authenticator code or valid single-use recovery code.');
+    } else if (hasPasskeys && enforceMfa) {
+      // User enrolled a passkey and MFA policy applies
+      return res.status(401).json({
+        error: 'Passkey verification required. Click "Sign in with Passkey" to complete sign-in.',
+        mfaRequired: true,
+        hasTotp: false,
+        hasPasskeys: true
+      });
     }
     if (req.sessionId) {
       await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]);
@@ -142,13 +201,14 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     await limitRate(db, 'webauthn-reg', req.user.id, 10, 900);
     const expectedChallenge = getChallenge(`reg:${req.user.id}`);
     if (!expectedChallenge) throw fail(400, 'Passkey registration timed out. Please try again.');
-    const rpID = getRpID(req);
-    const expectedOrigin = getOrigin(req);
+    const expectedRPID = getExpectedRPIDs(req);
+    const expectedOrigin = getExpectedOrigins(req);
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge,
       expectedOrigin,
-      expectedRPID: rpID
+      expectedRPID,
+      requireUserVerification: false
     });
     if (!verification.verified || !verification.registrationInfo) {
       throw fail(400, 'Passkey registration could not be verified.');
@@ -197,17 +257,19 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
   app.post('/api/auth/webauthn/auth-verify', async (req, res) => {
     const { response, challengeKey } = req.body;
     if (!response?.id) throw fail(400, 'Invalid passkey assertion.');
-    const [passkey] = await db.query('SELECT p.*, u.id as user_id, u.email, u.role FROM passkeys p JOIN users u ON u.id=p.user_id WHERE p.id=$1', [response.id]);
+    const [passkey] = await db.query('SELECT p.*, u.id as user_id, u.email, u.role, u.status FROM passkeys p JOIN users u ON u.id=p.user_id WHERE p.id=$1', [response.id]);
     if (!passkey) throw fail(401, 'Passkey credential not recognized.');
+    if (passkey.status === 'suspended' || passkey.status === 'disabled') throw fail(403, 'This account has been suspended or disabled. Please contact support.');
     const expectedChallenge = getChallenge(challengeKey || `auth:${passkey.user_id}`);
     if (!expectedChallenge) throw fail(400, 'Authentication timed out. Please try again.');
-    const rpID = getRpID(req);
-    const expectedOrigin = getOrigin(req);
+    const expectedRPID = getExpectedRPIDs(req);
+    const expectedOrigin = getExpectedOrigins(req);
     const verification = await verifyAuthenticationResponse({
       response,
       expectedChallenge,
       expectedOrigin,
-      expectedRPID: rpID,
+      expectedRPID,
+      requireUserVerification: false,
       credential: {
         id: passkey.id,
         publicKey: new Uint8Array(Buffer.from(passkey.public_key)),
@@ -217,10 +279,10 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     if (!verification.verified) throw fail(401, 'Passkey verification failed.');
     await db.query('UPDATE passkeys SET counter=$1 WHERE id=$2', [verification.authenticationInfo.newCounter, passkey.id]);
     if (req.sessionId) {
-      await db.query('UPDATE sessions SET mfa=1 WHERE id=$1', [req.sessionId]);
+      await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]);
       onSessionInvalidate?.(req.sessionId, passkey.user_id);
     }
-    const [user] = await db.query('SELECT id, email, role FROM users WHERE id=$1', [passkey.user_id]);
+    const [user] = await db.query('SELECT id, email, role, status FROM users WHERE id=$1', [passkey.user_id]);
     const s = await session(res, user, true);
     await db.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), user.id, 'passkey.authenticated', passkey.id, new Date().toISOString()]);
     res.json({ ok: true, ...s });
@@ -239,14 +301,17 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     await limitRate(db, 'mfa-setup', req.user.id, 10, 900);
     const secret = randomBytes(20), sealed = encrypt(secret, key);
     const created = new Date().toISOString();
-    const changed = await db.query('INSERT INTO mfa (user_id,payload,iv,tag,created) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET payload=$2,iv=$3,tag=$4,created=$5 WHERE mfa.enabled=0 RETURNING user_id', [req.user.id, sealed.payload, sealed.iv, sealed.tag, created]);
-    if (!changed.length) throw fail(409, 'Authenticator already enabled.');
+    await db.query(
+      'INSERT INTO mfa (user_id,payload,iv,tag,created,enabled) VALUES ($1,$2,$3,$4,$5,0) ON CONFLICT(user_id) DO UPDATE SET payload=$2,iv=$3,tag=$4,created=$5,enabled=0 RETURNING user_id',
+      [req.user.id, sealed.payload, sealed.iv, sealed.tag, created]
+    );
     const uri = `otpauth://totp/SmartPrint:${encodeURIComponent(req.user.email)}?secret=${base32(secret)}&issuer=SmartPrint&algorithm=SHA1&digits=6&period=30`;
     res.json({ image: await QRCode.toDataURL(uri), secret: base32(secret) });
   });
 
   app.post('/api/auth/mfa/confirm', requireSession, async (req, res) => {
     await limitRate(db, 'mfa', req.user.id, 10, 900);
+    const cleanCode = String(req.body.code ?? '').replace(/[\s-]/g, '').trim();
     const plainRecoveryCodes = Array.from({ length: 8 }, () => {
       const b = randomBytes(4).toString('hex').toUpperCase();
       return `${b.slice(0, 4)}-${b.slice(4, 8)}`;
@@ -262,7 +327,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
         await tx.query('DELETE FROM mfa WHERE user_id=$1 AND enabled=0', [req.user.id]);
         throw fail(400, 'Enrollment session expired. Please start authenticator setup again.');
       }
-      const step = row && totpStep(decrypt(row, key), req.body.code);
+      const step = row && totpStep(decrypt(row, key), cleanCode);
       if (step == null) throw fail(400, 'Enter the current code from your authenticator app.');
       const nowIso = new Date().toISOString();
       const changed = await tx.query('UPDATE mfa SET enabled=1,last_step=$1,recovery_codes=$2,created=$3 WHERE user_id=$4 AND enabled=0 RETURNING user_id', [step, JSON.stringify(hashedCodes), nowIso, req.user.id]);
@@ -275,6 +340,44 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     res.json({ ...s, recoveryCodes: plainRecoveryCodes });
   });
 
+  app.post('/api/auth/mfa/verify', requireSession, async (req, res) => {
+    await limitRate(db, 'mfa-ver', req.user.id, 10, 900);
+    const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [req.user.id]);
+    if (!mfa) throw fail(409, 'Two-factor authentication is not active.');
+    const rawCode = String(req.body.code || req.body.recovery_code || '').trim();
+    if (!rawCode) throw fail(400, 'Enter the 6-digit verification code from your authenticator app.');
+    const cleanCode = rawCode.replace(/[\s-]/g, '');
+    const step = totpStep(decrypt(mfa, key), cleanCode, mfa.last_step);
+    let mfaSatisfied = false;
+    if (step !== null) {
+      const changed = await db.query('UPDATE mfa SET last_step=$1 WHERE user_id=$2 AND last_step<$1 RETURNING user_id', [step, req.user.id]);
+      if (!changed.length) throw fail(401, 'This verification code was already used.');
+      mfaSatisfied = true;
+    } else {
+      const normalized = cleanCode.toUpperCase();
+      if (normalized.length >= 8) {
+        let recoveryCodes = [];
+        try { recoveryCodes = JSON.parse(mfa.recovery_codes || '[]'); } catch {}
+        const codeHash = digest(normalized);
+        const matchedIndex = recoveryCodes.findIndex(rc => rc.hash === codeHash && !rc.used);
+        if (matchedIndex !== -1) {
+          recoveryCodes[matchedIndex].used = 1;
+          recoveryCodes[matchedIndex].used_at = new Date().toISOString();
+          await db.query('UPDATE mfa SET recovery_codes=$1 WHERE user_id=$2', [JSON.stringify(recoveryCodes), req.user.id]);
+          mfaSatisfied = true;
+        }
+      }
+    }
+    if (!mfaSatisfied) throw fail(401, 'Invalid verification code or recovery code.');
+    if (req.sessionId) {
+      await db.query('UPDATE sessions SET mfa=1 WHERE id=$1', [req.sessionId]);
+      onSessionInvalidate?.(req.sessionId, req.user.id);
+    }
+    await db.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), req.user.id, 'mfa.verified', req.user.id, new Date().toISOString()]);
+    const updated = await db.query('SELECT id, email, role, status FROM users WHERE id=$1', [req.user.id]);
+    res.json({ ok: true, user: { ...updated[0], mfa: true, mfaRequired: false } });
+  });
+
   app.post('/api/auth/mfa/recovery-codes/regenerate', requireSession, async (req, res) => {
     await limitRate(db, 'mfa-regen', req.user.id, 5, 900);
     const [user] = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
@@ -284,7 +387,8 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     }
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [req.user.id]);
     if (!mfa) throw fail(409, 'Two-factor authentication is not active.');
-    const step = totpStep(decrypt(mfa, key), req.body.code, mfa.last_step);
+    const cleanCode = String(req.body.code ?? '').replace(/[\s-]/g, '').trim();
+    const step = totpStep(decrypt(mfa, key), cleanCode, mfa.last_step);
     if (step === null) {
       throw fail(401, 'Enter the current 6-digit code from your authenticator app.');
     }
@@ -310,10 +414,11 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     }
     const [mfa] = await db.query('SELECT * FROM mfa WHERE user_id=$1 AND enabled=1', [req.user.id]);
     if (!mfa) throw fail(409, 'Authenticator is not active.');
-    const step = totpStep(decrypt(mfa, key), req.body.code);
+    const cleanCode = String(req.body.code || req.body.recovery_code || '').replace(/[\s-]/g, '').trim();
+    const step = totpStep(decrypt(mfa, key), cleanCode);
     let codeValid = step !== null;
     if (!codeValid) {
-      const rawCode = String(req.body.code || req.body.recovery_code || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      const rawCode = cleanCode.toUpperCase();
       let recoveryCodes = [];
       try { recoveryCodes = JSON.parse(mfa.recovery_codes || '[]'); } catch {}
       const codeHash = digest(rawCode);
