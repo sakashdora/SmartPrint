@@ -815,8 +815,10 @@ function auth(register = false) {
           <input name="password" id="auth-password-input" type="password" required minlength="${register ? 12 : 1}" maxlength="128" autocomplete="${register ? 'new-password' : 'current-password'}">
           <button type="button" class="btn-toggle-password" id="auth-toggle-pass" aria-label="Show password" title="Show password">${icon('eye')}</button>
         </div>
+        ${register ? '<small class="muted" style="display:block;margin-top:4px;font-size:12px;">Minimum 12 characters</small>' : ''}
       </label>
       ${!register ? '<div id="auth-totp-field" hidden><label class="field">6-digit Authenticator code<input name="code" inputmode="numeric" maxlength="19" placeholder="Enter 6-digit code or recovery code" autocomplete="one-time-code"></label></div>' : ''}
+      <div id="auth-error-banner" class="inline-error" style="display:none; color:#dc2626; background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; font-size:13px; margin: 12px 0;" role="alert"></div>
       <button class="primary wide" id="auth-submit-btn">${register ? 'Register shop →' : 'Sign in →'}</button>
       ${!register ? '<button type="button" class="secondary wide" id="passkey-login" style="margin-top: 10px;">🔑 Sign in with Passkey</button>' : ''}
     </form>
@@ -838,48 +840,71 @@ function auth(register = false) {
 
   document.querySelector('#auth-form').onsubmit = event => {
     event.preventDefault();
+    const errBanner = document.querySelector('#auth-error-banner');
+    if (errBanner) {
+      errBanner.style.display = 'none';
+      errBanner.textContent = '';
+    }
     busy(event.submitter, async () => {
-      const data = Object.fromEntries(new FormData(event.target));
-      if (register) {
-        const result = await api('/api/auth/register', { method: 'POST', body: data });
-        notify(result.message);
-        location.hash = 'login';
-        await route();
-      } else {
-        try {
-          const user = await api('/api/auth/login', {
-            method: 'POST',
-            body: { email: data.email, password: data.password, code: data.code || undefined }
-          });
-          me = user;
-          const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
-          location.hash = target;
+      try {
+        const data = Object.fromEntries(new FormData(event.target));
+        if (register) {
+          const result = await api('/api/auth/register', { method: 'POST', body: data });
+          notify(result.message);
+          location.hash = 'login';
           await route();
-        } catch (err) {
-          if (err.details?.mfaRequired) {
-            if (err.details.hasPasskeys && !err.details.hasTotp) {
-              notify('Passkey verification required. Click "Sign in with Passkey" below.');
-              const passkeyBtn = document.querySelector('#passkey-login');
-              if (passkeyBtn) {
-                passkeyBtn.scrollIntoView({ behavior: 'smooth' });
-                passkeyBtn.focus();
-                passkeyBtn.classList.add('primary');
-                passkeyBtn.classList.remove('secondary');
+        } else {
+          try {
+            const user = await api('/api/auth/login', {
+              method: 'POST',
+              body: { email: data.email, password: data.password, code: data.code || undefined }
+            });
+            me = user;
+            const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+            location.hash = target;
+            await route();
+          } catch (err) {
+            if (err.details?.mfaRequired) {
+              if (err.details.hasPasskeys && !err.details.hasTotp) {
+                const passkeyNotice = 'Passkey verification required. Click "Sign in with Passkey" below.';
+                notify(passkeyNotice);
+                if (errBanner) {
+                  errBanner.textContent = passkeyNotice;
+                  errBanner.style.display = 'block';
+                }
+                const passkeyBtn = document.querySelector('#passkey-login');
+                if (passkeyBtn) {
+                  passkeyBtn.scrollIntoView({ behavior: 'smooth' });
+                  passkeyBtn.focus();
+                  passkeyBtn.classList.add('primary');
+                  passkeyBtn.classList.remove('secondary');
+                }
+                return;
               }
-              return;
+              const totpField = document.querySelector('#auth-totp-field');
+              if (totpField) {
+                totpField.hidden = false;
+                const input = totpField.querySelector('input');
+                input.required = true;
+                input.focus();
+                const mfaNotice = err.details.hasPasskeys ? 'Enter 6-digit code, or sign in with Passkey below.' : 'Enter the 6-digit code from your authenticator app to complete sign-in.';
+                notify(mfaNotice);
+                if (errBanner) {
+                  errBanner.textContent = mfaNotice;
+                  errBanner.style.display = 'block';
+                }
+                return;
+              }
             }
-            const totpField = document.querySelector('#auth-totp-field');
-            if (totpField) {
-              totpField.hidden = false;
-              const input = totpField.querySelector('input');
-              input.required = true;
-              input.focus();
-              notify(err.details.hasPasskeys ? 'Enter 6-digit code, or sign in with Passkey below.' : 'Enter the 6-digit code from your authenticator app to complete sign-in.');
-              return;
-            }
+            throw err;
           }
-          throw err;
         }
+      } catch (err) {
+        if (errBanner) {
+          errBanner.textContent = err.message || 'An error occurred during authentication.';
+          errBanner.style.display = 'block';
+        }
+        throw err;
       }
     });
   };
@@ -887,6 +912,11 @@ function auth(register = false) {
   const passkeyBtn = document.querySelector('#passkey-login');
   if (passkeyBtn) {
     passkeyBtn.onclick = () => busy(passkeyBtn, async () => {
+      const errBanner = document.querySelector('#auth-error-banner');
+      if (errBanner) {
+        errBanner.style.display = 'none';
+        errBanner.textContent = '';
+      }
       if (location.hostname === '127.0.0.1') {
         location.href = location.href.replace('//127.0.0.1', '//localhost');
         return;
@@ -922,6 +952,10 @@ function auth(register = false) {
           notify('Passkey prompt cancelled.');
           return;
         }
+        if (errBanner) {
+          errBanner.textContent = err.message || 'Passkey verification failed.';
+          errBanner.style.display = 'block';
+        }
         throw err;
       }
     });
@@ -946,9 +980,9 @@ async function route() {
       }
     }
     if (view === 'workspace' || view === 'login' || view === 'admin-login') {
-      if (me) {
+      if (me && !me.mfaRequired) {
         startNotificationStream();
-        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+        const target = me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner');
         location.hash = target;
         await route();
         return;
@@ -960,7 +994,12 @@ async function route() {
       auth(true);
       return;
     }
-    if (me?.mfaRequired || view === 'security') {
+    if (view === 'security') {
+      if (!me) {
+        location.hash = 'login';
+        await route();
+        return;
+      }
       const { securityPage } = await import('./workspaces.js');
       return securityPage({
         api,
@@ -972,8 +1011,20 @@ async function route() {
           const target = user.role === 'admin' ? 'admin' : (user.role === 'customer' ? 'track' : 'owner');
           location.hash = target;
           await route();
+        },
+        onSignedOut: async () => {
+          me = null;
+          location.hash = 'login';
+          await route();
         }
       });
+    }
+    if (me?.mfaRequired) {
+      if (!['print', 'how-it-works', 'for-shop-owners', 'support', 'login', 'register'].includes(view)) {
+        location.hash = 'security';
+        await route();
+        return;
+      }
     }
     if (view === 'account') {
       if (!me) { location.hash = 'login'; await route(); return; }

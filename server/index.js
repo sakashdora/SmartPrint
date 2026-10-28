@@ -673,6 +673,16 @@ export async function createApp({ database, seed = true } = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { app } = await createApp();
   const port = Number(process.env.PORT || 3000);
-  const host = process.env.HOST || (process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
-  app.listen(port, host, () => console.log(`SmartPrint listening on ${host}:${port}`));
+  const host = process.env.HOST || '0.0.0.0';
+  const server = app.listen(port, host, () => {
+    console.log(`SmartPrint listening on http://${host === '0.0.0.0' ? 'localhost' : host}:${port} (${host}:${port})`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`FATAL: Port ${port} is already in use by another process. Please stop the conflicting process or set PORT=<other_port>.`);
+      process.exit(1);
+    } else {
+      console.error('Server error:', err);
+    }
+  });
 }

@@ -412,9 +412,16 @@ async function ensureWebAuthnBrowser() {
   return window.SimpleWebAuthnBrowser;
 }
 
-export async function securityPage({ api, mount, escape, notify, onVerified }) {
+export async function securityPage({ api, mount, escape, notify, onVerified, onSignedOut }) {
   let status = { totp: false, passkeys: [] };
-  try { status = await api('/api/auth/mfa/status'); } catch {}
+  try {
+    status = await api('/api/auth/mfa/status');
+  } catch (err) {
+    if (err.status === 401 && typeof onSignedOut === 'function') {
+      await onSignedOut();
+      return;
+    }
+  }
   const hasPasskey = status.passkeys && status.passkeys.length > 0;
   const hasTotp = Boolean(status.totp);
 
@@ -463,12 +470,29 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
             <input name="code" type="text" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" placeholder="000000" required autocomplete="one-time-code" style="max-width: 150px; padding: 8px 12px; font-family: monospace; font-size: 16px; letter-spacing: 2px;">
             <button class="primary" type="submit" id="btn-verify-totp-submit">Verify Code →</button>
           </form>
+          <div id="totp-verify-error" class="inline-error" style="display:none; color: #dc2626; font-size: 13px; margin-top: 8px;"></div>
         </div>
       ` : ''}
 
       <div id="mfa-setup"></div>
+
+      <div style="text-align: center; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border, #e2e8f0);">
+        <button type="button" id="btn-security-logout" class="secondary small" style="background: transparent; border: none; color: var(--muted, #64748b); cursor: pointer; text-decoration: underline; font-size: 13px;">
+          ← Sign out and switch account
+        </button>
+      </div>
     </main>
   `);
+
+  document.querySelector('#btn-security-logout')?.addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
+    if (typeof onSignedOut === 'function') {
+      await onSignedOut();
+    } else {
+      location.hash = 'login';
+      location.reload();
+    }
+  });
 
   const verifyPasskeyBtn = document.querySelector('#btn-verify-passkey');
   if (verifyPasskeyBtn) {
@@ -536,6 +560,8 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
   if (verifyTotpForm) {
     verifyTotpForm.onsubmit = async e => {
       e.preventDefault();
+      const errEl = document.querySelector('#totp-verify-error');
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
       const submitBtn = document.querySelector('#btn-verify-totp-submit');
       submitBtn.disabled = true;
       try {
@@ -545,6 +571,10 @@ export async function securityPage({ api, mount, escape, notify, onVerified }) {
         onVerified(res.user);
       } catch (err) {
         notify(err.message);
+        if (errEl) {
+          errEl.textContent = err.message || 'Invalid verification code.';
+          errEl.style.display = 'block';
+        }
         submitBtn.disabled = false;
       }
     };
