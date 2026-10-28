@@ -73,6 +73,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
             ['mfa', 'created', "TEXT"],
             ['users', 'status', "TEXT NOT NULL DEFAULT 'active'"],
             ['shop_payments', 'qr_image', 'TEXT'],
+            ['sessions', 'mfa', 'INTEGER NOT NULL DEFAULT 0']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -123,6 +124,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       try { sqlite.exec("ALTER TABLE mfa ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"); } catch {}
       try { sqlite.exec("ALTER TABLE shop_payments ADD COLUMN qr_image TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE sessions ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {
