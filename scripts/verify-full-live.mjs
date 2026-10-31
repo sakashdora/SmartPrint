@@ -1,6 +1,12 @@
 import { strict as assert } from 'node:assert';
 
 const BASE = 'http://localhost:3000';
+// Credentials come from the environment; never commit them to this public repository.
+const OWNER_EMAIL = process.env.SMARTPRINT_VERIFY_EMAIL, OWNER_PASSWORD = process.env.SMARTPRINT_VERIFY_PASSWORD;
+if (!OWNER_EMAIL || !OWNER_PASSWORD) {
+  console.error('Set SMARTPRINT_VERIFY_EMAIL and SMARTPRINT_VERIFY_PASSWORD for a local shop-owner test account.');
+  process.exit(1);
+}
 
 async function request(path, { method = 'GET', body, token, headers = {} } = {}) {
   const res = await fetch(`${BASE}${path}`, {
@@ -30,7 +36,7 @@ assert.equal(health.mode, 'development');
 console.log('>>> Logging in as shop owner...');
 const loginRes = await request('/api/auth/login', {
   method: 'POST',
-  body: { email: 'genz.azure@gmail.com', password: 'SmartPrintSecure!2026' }
+  body: { email: OWNER_EMAIL, password: OWNER_PASSWORD }
 });
 const ownerToken = loginRes.data.token || (loginRes.headers.get('set-cookie') ? null : null);
 // Note: server uses cookies for session. Let's capture the cookie:

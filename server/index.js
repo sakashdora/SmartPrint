@@ -260,7 +260,9 @@ export async function createApp({ database, seed = true } = {}) {
       const [document] = await tx.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [previous.document_id, now()]);
       if (!shop || !document) throw fail(409, 'Shop or print file is unavailable.');
       let options;
-      try { options = validateOptions({ ...JSON.parse(previous.options), copies: req.body.copies, duplex: req.body.duplex }); }
+      // Only override the fields the client sent; an omitted field keeps the quoted value.
+      const changes = Object.fromEntries(['copies', 'duplex'].filter(k => req.body[k] !== undefined).map(k => [k, req.body[k]]));
+      try { options = validateOptions({ ...JSON.parse(previous.options), ...changes }); }
       catch (error) { throw fail(400, error.message); }
       const changed = await tx.query('UPDATE quotes SET used=1 WHERE id=$1 AND used=0 RETURNING id', [previous.id]);
       if (!changed.length) throw fail(409, 'Quote already ordered or updated.');

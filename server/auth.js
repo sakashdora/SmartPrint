@@ -10,19 +10,27 @@ import { token, digest, hashPassword, checkPassword, encrypt, decrypt, totpStep,
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const webauthnChallenges = new Map();
-const saveChallenge = (key, challenge) => {
-  webauthnChallenges.set(key, { challenge, expires: Date.now() + 300000 });
+export const CHALLENGE_TTL_MS = 300000;
+const saveChallenge = (key, challenge, userId = null) => {
+  // Drop expired, never-used challenges so unauthenticated option requests cannot grow memory forever.
+  if (webauthnChallenges.size > 1000) for (const [k, v] of webauthnChallenges) if (Date.now() > v.expires) webauthnChallenges.delete(k);
+  webauthnChallenges.set(key, { challenge, userId, expires: Date.now() + CHALLENGE_TTL_MS });
 };
-const getChallenge = (key) => {
+// Single use: a challenge is removed on first lookup, whether or not verification then succeeds.
+const takeChallenge = (key) => {
+  if (typeof key !== 'string') return null;
   const item = webauthnChallenges.get(key);
   if (!item) return null;
   webauthnChallenges.delete(key);
   if (Date.now() > item.expires) return null;
-  return item.challenge;
+  return item;
 };
 
 export function authRoutes(app, db, key, config, onSessionInvalidate) {
   const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: config.production, path: '/', maxAge: 8 * 3600000 };
+  // A real Argon2id hash so unknown emails cost the same verification time as known ones.
+  let dummyHash;
+  const getDummyHash = () => (dummyHash ??= hashPassword(randomBytes(32).toString('hex')));
 
   const getRpID = (req) => {
     if (config.publicUrl) {
@@ -45,36 +53,36 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     return host;
   };
 
-  const getOrigin = (req) => {
-    if (req.headers.origin) return req.headers.origin;
-    const proto = req.headers['x-forwarded-proto'] || (config.production ? 'https' : 'http');
-    const host = req.headers.host || 'localhost:3000';
-    return `${proto}://${host}`;
-  };
-
+  // The origin inside the signed clientDataJSON must be one of the site's own configured origins. It is
+  // never taken from the request's Origin/Host headers, which the client controls. Development also
+  // accepts the local server's own address.
   const getExpectedOrigins = (req) => {
     const origins = new Set();
-    const reqOrigin = getOrigin(req);
-    if (reqOrigin) origins.add(reqOrigin);
     if (config.origin) origins.add(config.origin);
     if (process.env.PUBLIC_BASE_URL) {
       try { origins.add(new URL(process.env.PUBLIC_BASE_URL).origin); } catch {}
     }
-    origins.add('http://localhost:3000');
-    origins.add('http://127.0.0.1:3000');
-    if (req.headers.host) {
-      const proto = req.headers['x-forwarded-proto'] || (config.production ? 'https' : 'http');
-      origins.add(`${proto}://${req.headers.host}`);
+    for (const hostVar of ['RENDER_EXTERNAL_HOSTNAME', 'KOYEB_PUBLIC_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL', 'VERCEL_URL']) {
+      if (process.env[hostVar]) origins.add(`https://${process.env[hostVar]}`);
+    }
+    if (!config.production) {
+      const port = process.env.PORT || 3000;
+      for (const host of [`localhost:${port}`, `127.0.0.1:${port}`, 'localhost:3000', '127.0.0.1:3000']) origins.add(`http://${host}`);
+      // Any port on a loopback address (local dev servers and tests), never an arbitrary Host header.
+      try {
+        const local = new URL(`http://${req.headers.host}`);
+        if (['localhost', '127.0.0.1', '[::1]'].includes(local.hostname)) origins.add(local.origin);
+      } catch {}
     }
     return Array.from(origins);
   };
 
   const getExpectedRPIDs = (req) => {
-    const rpID = getRpID(req);
-    const set = new Set([rpID, 'localhost']);
+    const set = new Set([getRpID(req)]);
     if (config.origin) {
       try { set.add(new URL(config.origin).hostname); } catch {}
     }
+    if (!config.production) set.add('localhost');
     return Array.from(set).filter(h => h && h !== '127.0.0.1' && h !== '::1');
   };
 
@@ -93,8 +101,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     const email = String(req.body.email ?? '').trim().toLowerCase(), password = req.body.password;
     await limitRate(db, 'login-account', email, 10, 900);
     const [user] = await db.query('SELECT * FROM users WHERE email=$1', [email]);
-    const dummy = '$argon2id$v=19$m=65536,t=3,p=4$0000000000000000000000$0000000000000000000000000000000000000000000';
-    const valid = typeof password === 'string' && password.length <= 128 && await checkPassword(password, user?.password ?? dummy);
+    const valid = typeof password === 'string' && password.length <= 128 && await checkPassword(password, user?.password ?? await getDummyHash());
     if (!user || !valid || (req.body.role && req.body.role !== user.role)) throw fail(401, 'Email, password or verification code is incorrect.');
     if (user.status === 'suspended' || user.status === 'disabled') throw fail(403, 'This account has been suspended or disabled. Please contact support.');
     if (!user.password.startsWith('$argon2')) await db.query('UPDATE users SET password=$1 WHERE id=$2', [await hashPassword(password), user.id]);
@@ -199,17 +206,22 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
 
   app.post('/api/auth/webauthn/register-verify', requireSession, async (req, res) => {
     await limitRate(db, 'webauthn-reg', req.user.id, 10, 900);
-    const expectedChallenge = getChallenge(`reg:${req.user.id}`);
+    const expectedChallenge = takeChallenge(`reg:${req.user.id}`)?.challenge;
     if (!expectedChallenge) throw fail(400, 'Passkey registration timed out. Please try again.');
     const expectedRPID = getExpectedRPIDs(req);
     const expectedOrigin = getExpectedOrigins(req);
-    const verification = await verifyRegistrationResponse({
-      response: req.body,
-      expectedChallenge,
-      expectedOrigin,
-      expectedRPID,
-      requireUserVerification: false
-    });
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: req.body,
+        expectedChallenge,
+        expectedOrigin,
+        expectedRPID,
+        requireUserVerification: false
+      });
+    } catch {
+      throw fail(400, 'Passkey registration could not be verified.');
+    }
     if (!verification.verified || !verification.registrationInfo) {
       throw fail(400, 'Passkey registration could not be verified.');
     }
@@ -249,33 +261,41 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
       allowCredentials,
       userVerification: 'preferred'
     });
-    const challengeKey = userId ? `auth:${userId}` : `auth:${options.challenge.slice(0, 16)}`;
-    saveChallenge(challengeKey, options.challenge);
+    // An unguessable key per request: clients cannot overwrite or consume another user's challenge.
+    const challengeKey = `auth:${token()}`;
+    saveChallenge(challengeKey, options.challenge, userId || null);
     res.json({ ...options, challengeKey });
   });
 
   app.post('/api/auth/webauthn/auth-verify', async (req, res) => {
     const { response, challengeKey } = req.body;
-    if (!response?.id) throw fail(400, 'Invalid passkey assertion.');
-    const [passkey] = await db.query('SELECT p.*, u.id as user_id, u.email, u.role, u.status FROM passkeys p JOIN users u ON u.id=p.user_id WHERE p.id=$1', [response.id]);
+    if (!response?.id || typeof challengeKey !== 'string' || !challengeKey.startsWith('auth:')) throw fail(400, 'Invalid passkey assertion.');
+    // Consumed before any other check, so a challenge can never be tried twice.
+    const issued = takeChallenge(challengeKey);
+    if (!issued) throw fail(400, 'Authentication timed out. Please try again.');
+    const [passkey] = await db.query('SELECT p.*, u.id as user_id, u.email, u.role, u.status FROM passkeys p JOIN users u ON u.id=p.user_id WHERE p.id=$1', [String(response.id)]);
     if (!passkey) throw fail(401, 'Passkey credential not recognized.');
+    if (issued.userId && issued.userId !== passkey.user_id) throw fail(401, 'Passkey verification failed.');
     if (passkey.status === 'suspended' || passkey.status === 'disabled') throw fail(403, 'This account has been suspended or disabled. Please contact support.');
-    const expectedChallenge = getChallenge(challengeKey || `auth:${passkey.user_id}`);
-    if (!expectedChallenge) throw fail(400, 'Authentication timed out. Please try again.');
     const expectedRPID = getExpectedRPIDs(req);
     const expectedOrigin = getExpectedOrigins(req);
-    const verification = await verifyAuthenticationResponse({
-      response,
-      expectedChallenge,
-      expectedOrigin,
-      expectedRPID,
-      requireUserVerification: false,
-      credential: {
-        id: passkey.id,
-        publicKey: new Uint8Array(Buffer.from(passkey.public_key)),
-        counter: Number(passkey.counter)
-      }
-    });
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response,
+        expectedChallenge: issued.challenge,
+        expectedOrigin,
+        expectedRPID,
+        requireUserVerification: false,
+        credential: {
+          id: passkey.id,
+          publicKey: new Uint8Array(Buffer.from(passkey.public_key)),
+          counter: Number(passkey.counter)
+        }
+      });
+    } catch {
+      throw fail(401, 'Passkey verification failed.');
+    }
     if (!verification.verified) throw fail(401, 'Passkey verification failed.');
     await db.query('UPDATE passkeys SET counter=$1 WHERE id=$2', [verification.authenticationInfo.newCounter, passkey.id]);
     if (req.sessionId) {

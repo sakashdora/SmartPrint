@@ -10,6 +10,8 @@ import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
+import { probePrinterCapabilities } from './printer-capabilities.js';
+import { createNotification } from './notifications.js';
 
 const runExec = promisify(execFile);
 const now = () => new Date().toISOString();
@@ -43,6 +45,25 @@ export async function queuePreparation(req, db, shop) {
 }
 
 export const shopScannedPrinters = new Map();
+const MAX_SCANNED_PRINTERS = 50;
+// Scanned printer reports are client-supplied and kept in memory, so keep only bounded primitive fields.
+export function cleanPrinterList(list) {
+  const result = [];
+  for (const p of Array.isArray(list) ? list : []) {
+    if (!p || typeof p.name !== 'string' || !p.name.trim()) continue;
+    const item = {};
+    for (const [k, v] of Object.entries(p).slice(0, 20)) {
+      if (typeof v === 'string') item[k] = v.slice(0, 200);
+      else if (typeof v === 'number' || typeof v === 'boolean') item[k] = v;
+    }
+    item.name = p.name.trim().slice(0, 200);
+    // The printers page renders these flags unescaped inside attributes, so they must be real booleans.
+    for (const flag of ['isWifi', 'isWired', 'isDefault', 'color', 'duplex']) if (flag in item) item[flag] = item[flag] === true;
+    result.push(item);
+    if (result.length >= MAX_SCANNED_PRINTERS) break;
+  }
+  return result;
+}
 
 export function formatPrinterList(rawList) {
   return rawList
@@ -104,54 +125,78 @@ export function formatPrinterList(rawList) {
     });
 }
 
+// A colour job needs a colour-capable printer and a two-sided job a duplex printer. Black & white and
+// one-sided jobs run on any printer. Unknown capability is stored as 0, so it never qualifies.
+export function printerSupports(device, options) {
+  return (options.color !== 'color' || Number(device?.color) === 1) && (!options.duplex || Number(device?.duplex) === 1);
+}
+
+const alertedOrders = new Set();
+// Tells the owner once per order when no online printer can take a queued job, instead of the job
+// silently waiting (or being printed on the wrong printer).
+export async function alertUnroutableJobs(db, shopId, skipped) {
+  for (const { id, options } of skipped.slice(0, 10)) {
+    if (alertedOrders.has(id)) continue;
+    const [capable] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 AND (color=1 OR $3=0) AND (duplex=1 OR $4=0) LIMIT 1', [shopId, new Date(Date.now() - 180000).toISOString(), options.color === 'color' ? 1 : 0, options.duplex ? 1 : 0]);
+    if (capable) continue;
+    const [already] = await db.query("SELECT id FROM notifications WHERE order_id=$1 AND event_type='print.no_compatible_printer' LIMIT 1", [id]);
+    if (alertedOrders.size > 5000) alertedOrders.clear();
+    alertedOrders.add(id);
+    if (already) continue;
+    const needs = [options.color === 'color' && 'colour', options.duplex && 'two-sided'].filter(Boolean).join(' and ');
+    await createNotification(db, {
+      shopId,
+      orderId: id,
+      eventType: 'print.no_compatible_printer',
+      title: 'Job waiting for a compatible printer',
+      body: `Order #${id.slice(0, 8).toUpperCase()} needs ${needs} printing, but no connected printer supports it. It stays queued: connect a compatible printer, or print it manually.`,
+      data: { orderId: id, color: options.color, duplex: Boolean(options.duplex) }
+    });
+  }
+}
+
 export async function scanWindowsPrinters() {
   if (process.platform !== 'win32') return [];
   try {
-    let defPrinter = '';
-    try {
-      const { stdout: defOut } = await runExec('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
-      const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
-      if (defMatch) defPrinter = defMatch[1].trim();
-    } catch {}
-
-    const { stdout } = await runExec('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
+    // Registry reads are independent, so run them concurrently; sequential reg.exe calls exceeded
+    // the printers page's 1.2 s local-scan timeout once a PC had several printers installed.
+    const readValue = async (path, value, timeout) => {
+      try {
+        const { stdout } = await runExec('reg.exe', ['query', path, '/v', value], { timeout, windowsHide: true });
+        return stdout.match(new RegExp(`${value}\\s+REG_SZ\\s+(.*)`, 'i'))?.[1].trim() || '';
+      } catch { return ''; }
+    };
+    const [defDevice, { stdout }] = await Promise.all([
+      readValue('HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', 'Device', 3000),
+      runExec('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true })
+    ]);
+    const defPrinter = defDevice.split(',')[0].trim();
     if (!stdout || !stdout.trim()) return [];
 
     const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('HKEY_'));
-    const rawList = [];
-
+    const entries = [];
     for (const line of lines) {
       const parts = line.split(/\s{2,}REG_SZ\s{2,}/);
       if (!parts || !parts[0]) continue;
       const name = parts[0].trim();
       if (!name || /OneNote|Fax|Microsoft XPS/i.test(name)) continue;
+      entries.push({ name, parts });
+    }
 
-      let port = '';
-      try {
-        const { stdout: portOut } = await runExec('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Port'], { timeout: 1500, windowsHide: true });
-        const portMatch = portOut.match(/Port\s+REG_SZ\s+(.*)/i);
-        if (portMatch) port = portMatch[1].trim();
-      } catch {}
-
+    const rawList = await Promise.all(entries.map(async ({ name, parts }) => {
+      const key = `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`;
+      let [port, driver] = await Promise.all([readValue(key, 'Port', 1500), readValue(key, 'Printer Driver', 1500)]);
       if (!port && parts[1]) {
         port = (parts[1].split(',')[1] || '').trim();
       }
-
-      let driver = '';
-      try {
-        const { stdout: drvOut } = await runExec('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Printer Driver'], { timeout: 1500, windowsHide: true });
-        const drvMatch = drvOut.match(/Printer Driver\s+REG_SZ\s+(.*)/i);
-        if (drvMatch) driver = drvMatch[1].trim();
-      } catch {}
-
-      rawList.push({
+      return {
         Name: name,
         PortName: port,
         DriverName: driver || name,
         PrinterStatus: 'Ready',
         IsDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase()))
-      });
-    }
+      };
+    }));
 
     return formatPrinterList(rawList);
   } catch (err) {
@@ -182,14 +227,15 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.post('/api/owner/printers/scanned-report', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const list = Array.isArray(req.body.printers) ? req.body.printers : [];
+    const list = cleanPrinterList(req.body.printers);
     if (list.length) {
       const existing = shopScannedPrinters.get(shop.id) || [];
       const map = new Map();
-      for (const p of [...existing, ...list]) {
-        if (p && p.name) map.set(p.name, p);
+      for (const p of [...list, ...existing]) {
+        if (!map.has(p.name)) map.set(p.name, p);
       }
-      shopScannedPrinters.set(shop.id, Array.from(map.values()));
+      // Newest report first so the bound drops stale names, not fresh ones.
+      shopScannedPrinters.set(shop.id, Array.from(map.values()).slice(0, MAX_SCANNED_PRINTERS));
     }
     res.json({ ok: true, count: list.length });
   });
@@ -217,26 +263,32 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!printerName) throw fail(400, 'Choose a printer.');
 
     let [device] = await db.query(
-      'SELECT id, name, active FROM devices WHERE shop_id=$1 AND (LOWER(name) = LOWER($2) OR LOWER(name) LIKE LOWER($3) OR LOWER($2) LIKE LOWER(name)) ORDER BY active DESC LIMIT 1',
+      'SELECT id, name, active, color, duplex FROM devices WHERE shop_id=$1 AND (LOWER(name) = LOWER($2) OR LOWER(name) LIKE LOWER($3) OR LOWER($2) LIKE LOWER(name)) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName, `%${printerName}%`]
     );
+    // Capabilities come from the request or the Windows driver; unknown means no colour and no duplex,
+    // so a colour or two-sided job is never routed to a printer that may not support it.
+    const probed = typeof req.body.color === 'boolean' && typeof req.body.duplex === 'boolean' ? null : (await probePrinterCapabilities([printerName])).get(printerName);
+    const capability = flag => typeof req.body[flag] === 'boolean' ? req.body[flag] : probed?.[flag];
     let secret = null;
     if (!device) {
       const id = randomUUID();
       secret = token();
       await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
-        id, shop.id, printerName, digest(secret), req.body.color !== false ? 1 : 0, req.body.duplex !== false ? 1 : 0, now()
+        id, shop.id, printerName, digest(secret), capability('color') ? 1 : 0, capability('duplex') ? 1 : 0, now()
       ]);
-      device = { id, name: printerName, active: 1 };
+      device = { id, name: printerName, active: 1, color: capability('color') ? 1 : 0, duplex: capability('duplex') ? 1 : 0 };
     } else {
+      // Reconnecting keeps the stored capabilities unless better information is available.
+      const color = capability('color') === undefined ? device.color : (capability('color') ? 1 : 0);
+      const duplex = capability('duplex') === undefined ? device.duplex : (capability('duplex') ? 1 : 0);
       if (req.body.regenerateToken) {
         secret = token();
-        await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3 WHERE id=$4', [printerName, digest(secret), now(), device.id]);
+        await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3, color=$4, duplex=$5 WHERE id=$6', [printerName, digest(secret), now(), color, duplex, device.id]);
       } else {
-        await db.query('UPDATE devices SET name=$1, active=1, heartbeat=$2 WHERE id=$3', [printerName, now(), device.id]);
+        await db.query('UPDATE devices SET name=$1, active=1, heartbeat=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, now(), color, duplex, device.id]);
       }
-      device.name = printerName;
-      device.active = 1;
+      Object.assign(device, { name: printerName, active: 1, color, duplex });
     }
     deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
 
@@ -294,7 +346,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
           env: {
             ...process.env,
             SMARTPRINT_URL: serverUrl,
-            SMARTPRINT_DEVICE_TOKEN: secret,
+            // spawn() turns null into the string "null"; reconnecting keeps the saved token instead.
+            SMARTPRINT_DEVICE_TOKEN: secret || existingToken || undefined,
             SMARTPRINT_PRINTER: printerName
           }
         });
@@ -315,7 +368,9 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       token: secret,
       url: serverUrl,
       printer: printerName,
-      message: `${printerName} connected successfully!`
+      color: Boolean(device.color),
+      duplex: Boolean(device.duplex),
+      message: `${printerName} connected successfully! ${device.color ? 'Colour' : 'Black & white only'} · ${device.duplex ? 'two-sided' : 'one-sided'} jobs.`
     });
   });
 
@@ -469,23 +524,29 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       if (!order.doc_valid) throw fail(409, 'The document file has expired. Ask the customer to re-upload.');
 
       const [lease] = await tx.query("SELECT * FROM print_leases WHERE order_id=$1", [order.id]);
+      // Re-queueing a printing, printed or uncertain job could print it twice. A review order is
+      // retryable only when the connector explicitly reported the print as failed.
+      const deviceReportedFailure = order.status === 'needs_review' && lease?.state === 'failed';
+      if (order.status !== 'failed' && !deviceReportedFailure) throw fail(409, 'Only a failed print can be retried. Confirm the output or mark the print as failed first.');
       const isLeaseActive = lease && (lease.state === 'claimed' || lease.state === 'submitted') && new Date(lease.expires).getTime() > Date.now();
 
       if (isLeaseActive && req.body.force !== true) {
         throw fail(409, 'A print attempt is currently in progress. If it is stuck, please wait or check your printer.');
       }
 
-      await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
-
       const opts = typeof order.options === 'string' ? JSON.parse(order.options) : (order.options || {});
       opts.priority = Math.max((opts.priority || 0), 5);
       const nextAttempt = (opts.attempt || 1) + 1;
       opts.attempt = nextAttempt;
 
-      await tx.query(
-        "UPDATE orders SET status='queued', options=$1 WHERE id=$2",
-        [JSON.stringify(opts), order.id]
+      // Conditional on the status read above, and taking the order row before the lease row (the same
+      // order as device events and cancellation), so a concurrent cancel cannot be re-queued.
+      const requeued = await tx.query(
+        "UPDATE orders SET status='queued', options=$1 WHERE id=$2 AND status=$3 AND payment='paid' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$4) RETURNING id",
+        [JSON.stringify(opts), order.id, order.status, now()]
       );
+      if (!requeued.length) throw fail(409, 'This order changed while retrying. Refresh and check its status.');
+      await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
 
       try {
         await tx.query("SAVEPOINT retry_hist_sp");
@@ -530,9 +591,15 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     }).catch(() => {});
   });
   app.post('/api/device/printers/scanned', async (req, res) => {
-    const list = Array.isArray(req.body.printers) ? req.body.printers : [];
+    const list = cleanPrinterList(req.body.printers);
     if (list.length) {
       shopScannedPrinters.set(req.device.shop_id, list);
+    }
+    // The connector reports the driver-verified capabilities of the printer it prints to. Only this
+    // device's own row is updated, and only from explicit booleans.
+    const capabilities = req.body.capabilities;
+    if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
+      await db.query('UPDATE devices SET color=$1, duplex=$2 WHERE id=$3', [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
     }
     res.json({ ok: true, count: list.length });
   });
@@ -585,46 +652,39 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   app.post('/api/device/preparations/:id/fail', async (req, res) => { const prep = await ownPrep(req); await db.transaction(async tx => { await tx.query("UPDATE preparations SET state='failed',error=$1 WHERE id=$2", [String(req.body.error || 'Unable to prepare this file. Export it as PDF and retry.').slice(0, 200), prep.id]); for (const id of [...JSON.parse(prep.files), `result-${prep.id}`]) await tx.query('DELETE FROM uploads WHERE id=$1', [id]); }); res.json({ ok: true }); });
   app.post('/api/device/claim', async (req, res) => {
     const leaseToken = token();
+    const skipped = [];
     const result = await db.transaction(async tx => {
-      // Serialize claims from duplicated connector processes using the same credential.
-      await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id', [now(), req.device.id]);
+      // Serialize claims from duplicated connector processes using the same credential, and read the
+      // device's capabilities under that lock so a capability report mid-request is respected.
+      const [device] = await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id, color, duplex', [now(), req.device.id]);
       if (deviceMetadata.get(req.device.id)?.is_paused) return null;
       const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]);
       if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
-      candidates.sort((a, b) => {
-        try {
-          const pA = (typeof a.options === 'string' ? JSON.parse(a.options) : a.options).priority || 0;
-          const pB = (typeof b.options === 'string' ? JSON.parse(b.options) : b.options).priority || 0;
-          return (pB - pA) || (a.created.localeCompare(b.created));
-        } catch {
-          return a.created.localeCompare(b.created);
-        }
-      });
-      const order = candidates.find(o => {
-        try {
-          const options = typeof o.options === 'string' ? JSON.parse(o.options) : o.options;
-          const colorMatch = options.color !== 'color' || req.device.color || candidates.length === 1;
-          const duplexMatch = !options.duplex || req.device.duplex || candidates.length === 1;
-          return colorMatch && duplexMatch;
-        } catch {
-          return false;
-        }
-      });
-      if (!order) return null;
-      const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
-      if (!changed.length) return null;
-      await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
-      await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires,state) VALUES ($1,$2,$3,$4,'claimed')", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);
-      const parsedOptions = typeof order.options === 'string' ? JSON.parse(order.options) : (order.options || {});
-      return {
-        id: order.id,
-        token: leaseToken,
-        attempt: parsedOptions.attempt || 1,
-        options: parsedOptions
-      };
+      const parsed = candidates.map(o => {
+        try { return { order: o, options: typeof o.options === 'string' ? JSON.parse(o.options) : (o.options || {}) }; }
+        catch { return { order: o, options: null }; }
+      }).filter(c => c.options);
+      parsed.sort((a, b) => ((b.options.priority || 0) - (a.options.priority || 0)) || a.order.created.localeCompare(b.order.created));
+      for (const { order, options } of parsed) {
+        // An incompatible job stays queued for a capable printer; it is never "only job, print anyway".
+        if (!printerSupports(device, options)) { skipped.push({ id: order.id, options }); continue; }
+        const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
+        if (!changed.length) continue; // taken by another printer or expired; try the next compatible job
+        await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
+        await tx.query("INSERT INTO print_leases (order_id,device_id,token,expires,state) VALUES ($1,$2,$3,$4,'claimed')", [order.id, req.device.id, digest(leaseToken), new Date(Date.now() + 180000).toISOString()]);
+        return {
+          id: order.id,
+          token: leaseToken,
+          attempt: options.attempt || 1,
+          options
+        };
+      }
+      return null;
     });
     res.json(result);
+    // Diagnostics run after the response and outside the claim transaction.
+    alertUnroutableJobs(db, req.device.shop_id, skipped).catch(() => {});
   });
   const ownLease = async req => { const [row] = await db.query('SELECT o.*,l.state AS lease_state FROM print_leases l JOIN orders o ON o.id=l.order_id WHERE l.order_id=$1 AND l.device_id=$2 AND l.token=$3 AND l.expires>$4', [req.params.id, req.device.id, digest(req.headers['x-lease-token'] || ''), now()]); if (!row) throw fail(404, 'Print lease expired or does not belong to this device.'); return row; };
   app.get('/api/device/jobs/:id/document', async (req, res) => { const order = await ownLease(req); if (order.lease_state !== 'claimed') throw fail(409, 'Document already submitted.'); const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]); if (!doc) throw fail(404, 'Document expired.'); sendPdf(req, res, decrypt(doc, key)); });
@@ -672,11 +732,29 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   });
   app.post('/api/owner/orders/:id/cancel', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    await db.transaction(async tx => {
-      const [order] = await tx.query("UPDATE orders SET status='cancelled',deleted_at=$1 WHERE id=$2 AND shop_id=$3 AND status IN ('awaiting_payment','queued','failed','expired','payment_review') RETURNING *", [now(), req.params.id, shop.id]);
-      if (!order) throw fail(409, 'This order cannot be cancelled while a print may be running.');
+    const result = await db.transaction(async tx => {
+      const [current] = await tx.query('SELECT o.*, l.state AS lease_state FROM orders o LEFT JOIN print_leases l ON l.order_id=o.id WHERE o.id=$1 AND o.shop_id=$2', [req.params.id, shop.id]);
+      if (!current) throw fail(404, 'Order not found.');
+      if (current.status === 'cancelled') return { ok: true, alreadyCancelled: true };
+      const refusal = cancelRefusal(current);
+      if (refusal) throw fail(409, refusal);
+      // The order row is locked first (as in device events), so this races cleanly with a connector
+      // reporting "submitted": exactly one of the two wins.
+      const [order] = await tx.query("UPDATE orders SET status='cancelled',deleted_at=$1 WHERE id=$2 AND shop_id=$3 AND status=$4 RETURNING *", [now(), current.id, shop.id, current.status]);
+      if (!order) {
+        const [latest] = await tx.query('SELECT status FROM orders WHERE id=$1', [current.id]);
+        if (latest?.status === 'cancelled') return { ok: true, alreadyCancelled: true };
+        throw fail(409, 'This order changed while cancelling. Refresh and check its status.');
+      }
+      if (current.status === 'printing') {
+        // Claimed but not yet sent to Windows: the connector only prints after the server accepts its
+        // "submitted" event, which requires this lease. Removing it stops the job before printing.
+        const released = await tx.query("DELETE FROM print_leases WHERE order_id=$1 AND state='claimed' RETURNING order_id", [order.id]);
+        if (!released.length) throw fail(409, CANCEL_SENT_TO_PRINTER);
+      } else {
+        await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
+      }
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
-      await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       try {
         await tx.query('SAVEPOINT cancel_hist_sp');
         await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
@@ -686,18 +764,37 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed in cancel:', histErr.message);
       }
       await audit(tx, req.user.id, 'order.cancelled', order.id);
-    }); res.json({ ok: true });
+      return { ok: true };
+    });
+    res.json(result);
   });
+}
+const CANCEL_SENT_TO_PRINTER = 'This job was already sent to the printer, so it cannot be cancelled. Check the printer: confirm the output, or choose “Print failed / stop” and then cancel.';
+// Returns why an order cannot be cancelled safely, or null when it can.
+export function cancelRefusal(order) {
+  if (['awaiting_payment', 'queued', 'failed', 'expired', 'payment_review'].includes(order.status)) return null;
+  if (order.status === 'printing') {
+    if (order.lease_state === 'claimed') return null;
+    if (order.lease_state) return CANCEL_SENT_TO_PRINTER;
+    return 'This order is being printed manually. If it did not print, choose “Print failed / stop” first, then cancel.';
+  }
+  if (order.status === 'awaiting_confirmation') return CANCEL_SENT_TO_PRINTER;
+  if (order.status === 'needs_review') return 'The print outcome is uncertain. Check the printer, then confirm the output or choose “Print failed / stop” before cancelling.';
+  if (order.status === 'completed') return 'This order was printed and completed, so it cannot be cancelled. Record a refund instead if needed.';
+  return 'This order cannot be cancelled in its current state.';
 }
 export async function sweepLeases(db) {
   await db.transaction(async tx => {
     const leases = await tx.query("SELECT * FROM print_leases WHERE expires<$1 AND state IN ('claimed','submitted')", [now()]);
     for (const lease of leases) {
+      // Lock the order row before the lease row, the same order used by device events and cancellation.
+      await tx.query('UPDATE orders SET status=status WHERE id=$1', [lease.order_id]);
       const changed = await tx.query("UPDATE print_leases SET state='uncertain' WHERE order_id=$1 AND state=$2 RETURNING order_id", [lease.order_id, lease.state]);
       if (changed.length) await tx.query("UPDATE orders SET status='needs_review' WHERE id=$1 AND status='printing'", [lease.order_id]);
     }
     const staleAwaiting = await tx.query("SELECT * FROM print_leases WHERE expires<$1 AND state='awaiting_confirmation'", [now()]);
     for (const lease of staleAwaiting) {
+      await tx.query('UPDATE orders SET status=status WHERE id=$1', [lease.order_id]);
       await tx.query("UPDATE print_leases SET state='uncertain' WHERE order_id=$1 AND state='awaiting_confirmation'", [lease.order_id]);
       await tx.query("UPDATE orders SET status='needs_review' WHERE id=$1 AND status='awaiting_confirmation'", [lease.order_id]);
     }

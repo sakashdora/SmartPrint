@@ -5,6 +5,7 @@ import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, resolveActivePrinter, checkPrinterStatus } from './sumatra-helper.js';
+import { probePrinterCapabilities } from '../server/printer-capabilities.js';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -243,8 +244,13 @@ async function scanAndReportLocalPrinters() {
       }
     }
 
-    if (printers.length) {
-      await request('/api/device/printers/scanned', { method: 'POST', body: { printers } }).catch(() => {});
+    // Driver-reported capabilities replace the name-based guesses. Only driver data for the printer this
+    // connector prints to is sent as its capabilities; the server routes colour/two-sided jobs on it.
+    const capabilities = await probePrinterCapabilities([printer, ...printers.map(p => p.name)]);
+    for (const p of printers) Object.assign(p, capabilities.get(p.name) || {});
+    const own = capabilities.get(printer);
+    if (printers.length || own) {
+      await request('/api/device/printers/scanned', { method: 'POST', body: { printers, ...(own ? { capabilities: own } : {}) } }).catch(() => {});
     }
   } catch {}
 }
