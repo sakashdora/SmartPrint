@@ -6,6 +6,7 @@ node_modules/
 .data/
 *.log
 test-output/
+scratch/
 public/vendor/
 .vercel/
 connector/*.xml
