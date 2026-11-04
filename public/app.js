@@ -112,6 +112,23 @@ async function tracking() {
   const { trackingPage } = await import('./workspaces.js');
   return trackingPage({ api, mount, money, escape, receipt, notify, refresh: route });
 }
+// Page scroll plus scrolled tables/lists and open <details>, matched by position in the re-rendered
+// markup (a refresh renders the same structure with fresher data).
+function keepPosition(slot) {
+  const nodes = slot.querySelectorAll('*'), inner = [], open = [];
+  nodes.forEach((el, i) => {
+    if (el.scrollTop || el.scrollLeft) inner.push([i, el.tagName, el.scrollTop, el.scrollLeft]);
+    if (el.tagName === 'DETAILS' && el.open) open.push(i);
+  });
+  return { x: window.scrollX, y: window.scrollY, inner, open };
+}
+function restorePosition(slot, kept) {
+  const nodes = slot.querySelectorAll('*');
+  for (const i of kept.open) if (nodes[i]?.tagName === 'DETAILS') nodes[i].open = true;
+  for (const [i, tag, top, left] of kept.inner) if (nodes[i]?.tagName === tag) { nodes[i].scrollTop = top; nodes[i].scrollLeft = left; }
+  window.scrollTo(kept.x, kept.y);
+}
+
 function workspace(content, active, admin = false) {
   const links = admin ? [
     ['admin', 'Overview', 'home'],
@@ -150,8 +167,13 @@ function workspace(content, active, admin = false) {
     const contentSlot = document.querySelector('.workspace-content');
     if (contentSlot) {
       stopUpdates();
+      // A live refresh of the page the owner is on keeps where they are reading; only moving to
+      // another page starts at the top.
+      const kept = contentSlot.dataset.view === active ? keepPosition(contentSlot) : null;
       contentSlot.innerHTML = content;
-      window.scrollTo(0, 0);
+      contentSlot.dataset.view = active;
+      if (kept) restorePosition(contentSlot, kept);
+      else window.scrollTo(0, 0);
       return;
     }
   }
@@ -200,7 +222,7 @@ function workspace(content, active, admin = false) {
         </div>
       </div>
       `}
-      <div class="workspace-content">${content}</div></main>
+      <div class="workspace-content" data-view="${active}">${content}</div></main>
     ${!admin ? `
     <nav class="mobile-bottom-nav" aria-label="Mobile Navigation">
       <a href="#owner" class="mobile-nav-item ${active === 'owner' ? 'is-active' : ''}">
@@ -590,8 +612,8 @@ async function owner(view) {
     }
   };
   document.querySelector('#copy-shop-url')?.addEventListener('click', handleCopyShopUrl);
-  document.querySelector('#previous-transactions')?.addEventListener('click', () => { transactionOffset = Math.max(0, transactionOffset - 100); owner(view); });
-  document.querySelector('#next-transactions')?.addEventListener('click', () => { transactionOffset += 100; owner(view); });
+  document.querySelector('#previous-transactions')?.addEventListener('click', () => { transactionOffset = Math.max(0, transactionOffset - 100); owner(view).then(() => window.scrollTo(0, 0)); });
+  document.querySelector('#next-transactions')?.addEventListener('click', () => { transactionOffset += 100; owner(view).then(() => window.scrollTo(0, 0)); });
   if (['owner','queue','transactions'].includes(view)) {
     watchUpdates(load, snapshot, (nextSnapshot) => {
       if (nextSnapshot && Array.isArray(nextSnapshot[1])) {

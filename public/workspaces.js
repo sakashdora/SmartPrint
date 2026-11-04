@@ -237,7 +237,6 @@ export async function printersPage({ api, workspace, escape, notify }) {
     </div>
     ${devices.length ? `<div class="printer-cards-grid">${devices.map(d => {
       const isOnline = d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000;
-      const secondsAgo = d.heartbeat ? Math.round((Date.now() - Date.parse(d.heartbeat)) / 1000) : null;
       return `<div class="printer-card ${isOnline ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
         <div class="printer-card-top">
           <div class="printer-title">
@@ -248,7 +247,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
             ${!d.active ? 'Revoked' : d.is_paused ? 'Paused' : isOnline ? 'Online & Ready' : 'Offline'}
           </span>
         </div>
-        <p class="muted small">${isOnline ? `Last seen ${secondsAgo}s ago · ${escape(d.status_note || 'Ready')}` : d.active ? (d.heartbeat ? `Offline · last seen ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on the shop PC.` : 'Waiting for the SmartPrint connector on the shop PC to check in.') : 'Disconnected'}</p>
+        <p class="muted small">${isOnline ? `Connector checking in · ${escape(d.status_note || 'Ready')}` : d.active ? (d.heartbeat ? `Offline · last seen ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on the shop PC.` : 'Waiting for the SmartPrint connector on the shop PC to check in.') : 'Disconnected'}</p>
         <div class="capability-tags">
           <span class="chip">A4 Standard</span>
           <span class="chip">${d.color ? 'Full Colour' : 'Black & White'}</span>
