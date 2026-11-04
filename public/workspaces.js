@@ -33,8 +33,8 @@ function thisPcSection(pc, devices, reported, escape) {
       </div></div>
       <ol class="muted">
         <li>Install the printer's Windows driver and print a Windows test page.</li>
-        <li>In the SmartPrint folder, double-click <strong>start-connector.bat</strong>. To start it with Windows every day, run <strong>scripts\\install-connector-task.bat</strong> once.</li>
-        <li>Click <strong>Check again</strong>. If the browser asks to access devices on your local network, choose <strong>Allow</strong>.</li>
+        <li>In the SmartPrint folder, run <strong>scripts\\install-connector-task.bat</strong> once. It starts the connector now, at every sign-in, and again within 2 minutes whenever it stops (for example after the laptop sleeps).</li>
+        <li>This page updates by itself when the connector is running. If the browser asks to access devices on your local network, choose <strong>Allow</strong>.</li>
       </ol>
       <div class="actions"><button class="primary small" id="check-connector">🔄 Check again</button></div>
       ${reported.length ? `<p class="muted small" style="margin-top:16px">Printers reported by your shop PC: ${reported.map(p => escape(p.name)).join(', ')}. Open this page on that PC to connect one.</p>` : ''}
@@ -202,9 +202,13 @@ export async function printersPage({ api, workspace, escape, notify }) {
     }
   });
 
+  // Also watch the connector on this PC, so the page updates by itself when it starts again (after the
+  // laptop wakes, or when the owner runs start-connector.bat) or when its link state changes.
+  const connectorState = () => connectorCall('/status?printers=0').then(s => ({ linked: s.linked, needsRelink: s.needsRelink, linkedHere: s.linkedHere, printer: s.printer })).catch(() => null);
+  const pcState = pc ? { linked: pc.linked, needsRelink: pc.needsRelink, linkedHere: pc.linkedHere, printer: pc.printer } : null;
   watchUpdates(
-    () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => [])]),
-    [devices, reported],
+    () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => []), connectorState()]),
+    [devices, reported, pcState],
     rerender,
     5000
   );

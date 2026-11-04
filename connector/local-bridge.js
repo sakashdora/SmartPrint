@@ -65,7 +65,8 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
           server: originOf(s.base),
           linkedHere: s.linked && originOf(s.base) === origin,
           printer: s.printer || '',
-          printers: await connector.printers({ fresh: url.searchParams.has('fresh') })
+          // ?printers=0 is the cheap "is the connector running" check the Printers page polls.
+          printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh') })
         });
       }
       if (req.method === 'POST' && path === '/pair') {

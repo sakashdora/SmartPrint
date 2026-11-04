@@ -64,11 +64,27 @@ test('connecting a printer issues a fresh key and never shows it online before i
   assert.equal(device.status_note, 'Ready');
   assert.equal((await request(`/api/owner/devices/${device.id}/test-print`, { method: 'POST', cookie: owner })).status, 200);
 
-  // Connecting again (from the shop PC) replaces the key: the newly linked connector wins.
+  // Connecting again: the running connector keeps its key until a connector uses the new one.
   const again = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP LaserJet 1020' } });
   assert.equal(again.body.id, added.body.id);
-  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 401);
+  assert.notEqual(again.body.token, added.body.token);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 200, 'a Connect alone never locks out the running connector');
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: again.body.token })).status, 200, 'the connector that received the new key is accepted');
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 401, 'then the old key stops working');
   assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: again.body.token })).status, 200);
+});
+
+test('a Connect whose key never reaches the connector does not break printing', async t => {
+  const { request, owner } = await start(t);
+  const first = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP LaserJet 1020' } });
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: first.body.token })).status, 200);
+  // Owner clicks Connect twice more, but the connector is asleep / the browser blocked the hand-over.
+  const lost1 = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP LaserJet 1020' } });
+  const lost2 = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP LaserJet 1020' } });
+  assert.equal((await request('/api/device/claim', { method: 'POST', token: first.body.token })).status, 200, 'the running connector still claims jobs');
+  // The newest key wins once it arrives; an older unused one does not override it afterwards.
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: lost2.body.token })).status, 200);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: lost1.body.token })).status, 401);
 });
 
 test("a remote shop never sees or reports the server PC's printers", async t => {

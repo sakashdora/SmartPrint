@@ -171,6 +171,21 @@ export async function scanWindowsPrinters() {
 
 export const deviceMetadata = new Map();
 
+// Keys issued by Connect for an existing printer, waiting for their connector's first check-in.
+// Kept in memory: pairing completes within seconds, and an unused key simply expires.
+export const pendingKeys = new Map();
+const PENDING_KEY_MS = 30 * 60000;
+async function activatePendingKey(db, keyDigest) {
+  const pending = pendingKeys.get(keyDigest);
+  if (!pending) return null;
+  pendingKeys.delete(keyDigest);
+  if (pending.expires < Date.now()) return null;
+  for (const [k, v] of pendingKeys) if (v.deviceId === pending.deviceId || v.expires < Date.now()) pendingKeys.delete(k);
+  // The connector that received this key is the one printing from now on; the old key stops working.
+  const [device] = await db.query('UPDATE devices SET token=$1, active=1 WHERE id=$2 RETURNING *', [keyDigest, pending.deviceId]);
+  return device || null;
+}
+
 const BACKLOG_AGE_MS = 10 * 60000, STALE_TEST_MS = 5 * 60000;
 // A printer that checks in after being offline (connector restarted, cable or key fixed) would otherwise
 // print every order queued in the meantime, nonstop. Old diagnostic test pages are cancelled; if paid
@@ -289,8 +304,11 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0 };
     } else {
       const color = capability('color') ?? device.color, duplex = capability('duplex') ?? device.duplex;
-      await db.query('UPDATE devices SET name=$1, active=1, token=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, digest(secret), color, duplex, device.id]);
-      Object.assign(device, { name: printerName, active: 1, color, duplex });
+      // The current key keeps working until a connector actually checks in with the new one. A Connect
+      // whose key never reaches the connector (blocked, closed, asleep) therefore cannot lock it out.
+      await db.query('UPDATE devices SET name=$1, color=$2, duplex=$3 WHERE id=$4', [printerName, color, duplex, device.id]);
+      pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
+      Object.assign(device, { name: printerName, color, duplex });
     }
     deviceMetadata.set(device.id, { is_paused: 0 });
     await audit(db, req.user.id, 'device.autoconnected', device.id);
@@ -509,7 +527,9 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json({ pending: prep.state !== 'failed', state: prep.state, error: prep.error });
   });
   app.use('/api/device', async (req, res, next) => {
-    const [device] = await db.query('SELECT * FROM devices WHERE token=$1 AND active=1', [digest(req.headers.authorization?.replace(/^Bearer /, '') || '')]);
+    const presented = digest(req.headers.authorization?.replace(/^Bearer /, '') || '');
+    let [device] = await db.query('SELECT * FROM devices WHERE token=$1 AND active=1', [presented]);
+    if (!device) device = await activatePendingKey(db, presented);
     if (!device) throw fail(401, 'Device credential is invalid or revoked.'); req.device = device;
     const wasOffline = !device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000;
     await db.query('UPDATE devices SET heartbeat=$1 WHERE id=$2', [now(), device.id]);

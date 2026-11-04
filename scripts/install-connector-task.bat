@@ -1,7 +1,7 @@
 @echo off
-title SmartPrint Windows Connector - Persistent Background Service Setup
+title SmartPrint Windows Connector - Keep Running Setup
 echo ============================================================
-echo   SmartPrint Windows Connector - Background Service Setup   
+echo   SmartPrint Windows Connector - Keep Running Setup
 echo ============================================================
 echo.
 
@@ -13,28 +13,12 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-set SCRIPT_DIR=%~dp0..
-set NODE_EXE=node.exe
-for /f "tokens=*" %%i in ('where node') do (
-    set NODE_EXE=%%i
-    goto :found_node
+rem Starts the connector at sign-in and checks every 2 minutes, so it comes back by itself after the
+rem laptop sleeps or the connector is closed. Current user only; no administrator rights needed.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-connector-task.ps1"
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [Warning] Could not create the scheduled task. You can still use start-connector.bat directly.
 )
-:found_node
-
-echo Registering SmartPrintConnector Scheduled Task for current user (completely silent background execution)...
-schtasks /create /tn "SmartPrintConnector" /tr "wscript.exe \"%SCRIPT_DIR%\connector\silent-launcher.vbs\"" /sc onlogon /rl limited /f
-
-if %ERRORLEVEL% EQU 0 (
-    echo.
-    echo [Success] SmartPrintConnector is registered to start automatically on Windows logon.
-    echo Starting the task now...
-    schtasks /run /tn "SmartPrintConnector"
-    echo.
-    echo The SmartPrint connector is now running in the background.
-    echo You can check logs anytime at: %%LOCALAPPDATA%%\SmartPrintConnector\connector.log
-) else (
-    echo.
-    echo [Warning] Could not create scheduled task. You can still use start-connector.bat directly.
-)
-
+echo.
 pause
