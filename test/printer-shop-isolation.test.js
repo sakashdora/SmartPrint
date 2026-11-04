@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,7 +12,7 @@ process.env.LOCALAPPDATA = sandbox;
 const { openDatabase } = await import('../server/db.js');
 const { createApp } = await import('../server/index.js');
 const { isLocalRequest, formatPrinterList } = await import('../server/devices.js');
-const { digest } = await import('../server/security.js');
+const { createBridgeHandler } = await import('../connector/local-bridge.js');
 const { pickPrinter, checkPrinterStatus } = await import('../connector/sumatra-helper.js');
 const { guessCapabilities, classifyConnection, isVirtualPrinter } = await import('../server/printer-capabilities.js');
 
@@ -41,29 +42,33 @@ async function start(t) {
   return { db, request, owner: login.headers.get('set-cookie')?.split(';')[0] };
 }
 
-test('adding a printer never shows it online before its own connector checks in', async t => {
-  const { request, owner } = await start(t);
-  const added = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP Printer' } });
+test('connecting a printer issues a fresh key and never shows it online before its connector checks in', async t => {
+  const { db, request, owner } = await start(t);
+  const added = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, local: true, body: { name: 'HP LaserJet 1020', color: false, duplex: false } });
   assert.equal(added.status, 200);
-  assert.equal(added.body.launched, false, 'a remote owner never starts a connector on the server PC');
-  assert.ok(added.body.setup?.token, 'a remote owner receives the one-time connector key');
-  assert.match(added.body.setup.command, /SMARTPRINT_DEVICE_TOKEN=/);
-  assert.ok(!existsSync(join(sandbox, 'SmartPrintConnector', 'settings.json')), 'no connector settings are written for a remote owner');
+  assert.match(added.body.token, /^[a-f0-9]{64}$/);
+  assert.equal('setup' in added.body, false, 'no copy-paste command is offered any more');
+  assert.ok(!existsSync(join(sandbox, 'SmartPrintConnector')), 'the server never writes connector settings or starts a connector');
 
   let [device] = (await request('/api/owner/devices', { cookie: owner })).body;
   assert.equal(device.heartbeat, null);
   assert.match(device.status_note, /Offline/);
+  const before = (await db.query('SELECT COUNT(*) AS n FROM orders'))[0].n;
+  const offline = await request(`/api/owner/devices/${device.id}/test-print`, { method: 'POST', cookie: owner });
+  assert.equal(offline.status, 409, 'a test page is never queued for an offline printer');
+  assert.match(offline.body.error, /offline/);
+  assert.equal((await db.query('SELECT COUNT(*) AS n FROM orders'))[0].n, before);
 
-  // The real connector brings it online.
-  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.setup.token })).status, 200);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 200);
   [device] = (await request('/api/owner/devices', { cookie: owner })).body;
-  assert.ok(device.heartbeat);
   assert.equal(device.status_note, 'Ready');
+  assert.equal((await request(`/api/owner/devices/${device.id}/test-print`, { method: 'POST', cookie: owner })).status, 200);
 
-  // Reconnecting an online printer keeps its key, so the running connector is not cut off.
-  const again = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP Printer' } });
-  assert.equal(again.body.token, null);
-  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.setup.token })).status, 200);
+  // Connecting again (from the shop PC) replaces the key: the newly linked connector wins.
+  const again = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, body: { name: 'HP LaserJet 1020' } });
+  assert.equal(again.body.id, added.body.id);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: added.body.token })).status, 401);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: again.body.token })).status, 200);
 });
 
 test("a remote shop never sees or reports the server PC's printers", async t => {
@@ -74,22 +79,6 @@ test("a remote shop never sees or reports the server PC's printers", async t => 
   assert.deepEqual(scan.body, [], 'only printers reported by this shop’s own connector are listed');
   const local = await request('/api/local/printers', { cookie: owner });
   assert.deepEqual(local.body.printers, []);
-});
-
-test("the server PC's connector is never taken over by another shop", { skip: process.platform !== 'win32' && 'local connector launch is Windows-only' }, async t => {
-  const { db, request, owner } = await start(t);
-  await db.query("INSERT INTO users (id,email,password,role) VALUES ('owner-other','other@shop.test','x','owner')");
-  await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ('shop-other','owner-other','other-shop','Other Shop','Elsewhere','active')");
-  await db.query("INSERT INTO devices (id,shop_id,name,token,active) VALUES ('dev-other','shop-other','Brother DCP-T820DW Printer',$1,1)", [digest('other-shop-key')]);
-  const root = join(sandbox, 'SmartPrintConnector');
-  mkdirSync(root, { recursive: true });
-  const settings = JSON.stringify({ Url: 'https://example.test', Token: 'other-shop-key', Printer: 'Brother DCP-T820DW Printer' });
-  writeFileSync(join(root, 'settings.json'), settings);
-
-  const taken = await request('/api/owner/printers/autoconnect', { method: 'POST', cookie: owner, local: true, body: { name: 'Brother DCP-T820DW Printer', color: true, duplex: true } });
-  assert.equal(taken.status, 409);
-  assert.match(taken.body.error, /another shop/);
-  assert.equal(readFileSync(join(root, 'settings.json'), 'utf8'), settings, 'the other shop’s connector settings are untouched');
 });
 
 test('isLocalRequest accepts only a direct browser on the server PC', () => {
@@ -162,4 +151,66 @@ test('HP, Brother, Canon and Epson ports are classified', () => {
   assert.equal(classifyConnection({ name: 'Microsoft Print to PDF', port: 'PORTPROMPT:' }).connectionType, 'Virtual / PDF');
   assert.equal(isVirtualPrinter({ name: 'PaperPort Image Printer', port: 'Kofax Image Printer Writer Port' }), true);
   assert.equal(isVirtualPrinter({ name: 'HP LaserJet 1020', port: 'USB001', driver: 'HP LaserJet 1020' }), false);
+});
+
+// The connector's local link, exercised over real HTTP with a fake connector behind it.
+async function bridge(t, initial = {}) {
+  let state = { base: 'https://smartprint-ieks.onrender.com', linked: true, needsRelink: false, printer: 'HP LaserJet 1020', ...initial };
+  const paired = [];
+  const server = createServer(createBridgeHandler({
+    state: () => state,
+    printers: async () => [{ name: 'HP LaserJet 1020', portName: 'USB001', isWired: true, color: false, duplex: false, verified: true }],
+    pair: async args => { paired.push(args); state = { ...state, base: args.url, linked: true, needsRelink: false, printer: args.printer }; return { printer: args.printer }; }
+  }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const call = async (path, { origin, method = 'GET', body } = {}) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { method, headers: { ...(origin ? { Origin: origin } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, cors: response.headers.get('access-control-allow-origin'), pna: response.headers.get('access-control-allow-private-network'), body: await response.json().catch(() => null) };
+  };
+  return { call, paired };
+}
+const KEY = 'a'.repeat(64);
+const DASHBOARD = 'https://smartprint-ieks.onrender.com';
+
+test('connector link lists printers only to the SmartPrint dashboard', async t => {
+  const { call } = await bridge(t);
+  const ok = await call('/status', { origin: DASHBOARD });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.cors, DASHBOARD);
+  assert.equal(ok.body.linkedHere, true);
+  assert.equal(ok.body.printers[0].name, 'HP LaserJet 1020');
+  assert.equal((await call('/status', { origin: 'http://localhost:3000' })).status, 200, 'a dashboard served from this PC');
+  const evil = await call('/status', { origin: 'https://evil.example' });
+  assert.equal(evil.status, 403);
+  assert.equal(evil.cors, null, 'the browser blocks other websites from reading the response');
+  assert.equal((await call('/status')).status, 403, 'requests without an Origin get nothing');
+  const preflight = await call('/pair', { origin: DASHBOARD, method: 'OPTIONS' });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.pna, 'true', 'Chrome private-network preflight is answered');
+});
+
+test('connector link pairs only with the page server and asks before moving shops', async t => {
+  const { call, paired } = await bridge(t);
+  assert.equal((await call('/pair', { origin: 'https://evil.example', method: 'POST', body: { url: 'https://evil.example', token: KEY } })).status, 403);
+  assert.equal((await call('/pair', { origin: DASHBOARD, method: 'POST', body: { url: 'https://other.example', token: KEY } })).status, 400, 'a page cannot point the connector at another server');
+  assert.equal((await call('/pair', { origin: DASHBOARD, method: 'POST', body: { url: DASHBOARD, token: 'short' } })).status, 400);
+
+  const moved = await call('/pair', { origin: 'http://localhost:3000', method: 'POST', body: { url: 'http://localhost:3000', token: KEY, printer: 'HP LaserJet 1020' } });
+  assert.equal(moved.status, 409, 'a connector printing for another server is not moved silently');
+  assert.equal(moved.body.server, DASHBOARD);
+  assert.equal(paired.length, 0);
+
+  const ok = await call('/pair', { origin: DASHBOARD, method: 'POST', body: { url: DASHBOARD, token: KEY, printer: 'HP LaserJet 1020' } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(paired, [{ url: DASHBOARD, token: KEY, printer: 'HP LaserJet 1020' }]);
+  assert.equal((await call('/pair', { origin: 'http://localhost:3000', method: 'POST', body: { url: 'http://localhost:3000', token: KEY, replace: true } })).status, 200, 'moving is allowed once the owner confirms');
+});
+
+test('a connector whose key was rejected accepts a new link from its dashboard', async t => {
+  const { call } = await bridge(t, { linked: false, needsRelink: true });
+  const status = await call('/status', { origin: DASHBOARD });
+  assert.equal(status.body.needsRelink, true);
+  assert.equal(status.body.linkedHere, false);
+  assert.equal((await call('/pair', { origin: 'http://localhost:3000', method: 'POST', body: { url: 'http://localhost:3000', token: KEY } })).status, 200, 'an unlinked connector needs no confirmation');
 });

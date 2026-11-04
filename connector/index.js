@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus } from './sumatra-helper.js';
 import { probePrinterCapabilities, classifyConnection, guessCapabilities } from '../server/printer-capabilities.js';
+import { startBridge, BRIDGE_PORT } from './local-bridge.js';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -57,7 +58,7 @@ export function loadConfig() {
 }
 
 let savedConfig = loadConfig();
-const base = (process.env.SMARTPRINT_URL || savedConfig.Url || 'http://localhost:3000').replace(/\/+$/, '');
+let base = (process.env.SMARTPRINT_URL || savedConfig.Url || 'http://localhost:3000').replace(/\/+$/, '');
 let secret = process.env.SMARTPRINT_DEVICE_TOKEN || savedConfig.Token;
 let printer = process.env.SMARTPRINT_PRINTER || savedConfig.Printer;
 const processorSecret = process.env.PROCESSOR_SECRET || savedConfig.ProcessorSecret;
@@ -69,11 +70,9 @@ try {
 } catch {}
 const cleanupPid = () => { try { unlink(pidPath).catch(() => {}); } catch {} };
 
-if (!secret) {
-  console.error('\n[Error] Missing device token. Please provide SMARTPRINT_DEVICE_TOKEN in .env or pair directly in dashboard.\n');
-  cleanupPid();
-  process.exit(1);
-}
+// Without a key the connector waits to be linked from the Printers page opened on this PC.
+let authFailed = false;
+if (!secret) log('[Connector] Not linked yet. Open SmartPrint > Printers on this PC and click Connect.');
 
 // Auto-detect printer if not specified or if configured printer doesn't exist
 async function checkPrinterExists(name) {
@@ -129,11 +128,7 @@ if (process.platform === 'win32') {
   }
 }
 
-if (!printer) {
-  console.error('\n[Error] No Windows printer detected. Please connect or install a printer first.\n');
-  cleanupPid();
-  process.exit(1);
-}
+if (!printer) log('[Printer] WARNING: No Windows printer detected. Install the printer driver and print a Windows test page.');
 
 // Ensure SumatraPDF is ready or fallback to native
 let sumatra = process.env.SUMATRA_PATH || savedConfig.Sumatra;
@@ -155,8 +150,29 @@ try {
   }
 } catch {}
 
+// This PC's real printers with driver-verified capabilities, for the Printers page. Software printers
+// (PDF, OneNote, PaperPort ...) are left out. Cached briefly because the page polls it.
+let lastScan = { at: 0, list: [] };
+async function collectLocalPrinters({ maxAge = 15000 } = {}) {
+  if (process.platform !== 'win32') return [];
+  if (Date.now() - lastScan.at < maxAge) return lastScan.list;
+  const rawWindows = await getWindowsPrinters();
+  const printers = [];
+  for (const p of rawWindows) {
+    if (!p || !p.Name) continue;
+    const port = String(p.PortName || '').trim(), name = String(p.Name).trim(), driver = String(p.DriverName || name).trim();
+    const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
+    if (connType === 'Virtual / PDF') continue;
+    printers.push({ name, portName: port, driverName: driver, connectionType: connType, isWifi, isWired, isDefault: Boolean(p.Default), status: checkPrinterStatus(p.PrinterStatus).status, ...guessCapabilities(name, driver), verified: false });
+  }
+  const capabilities = await probePrinterCapabilities(printers.map(p => p.name));
+  for (const p of printers) if (capabilities.has(p.name)) Object.assign(p, capabilities.get(p.name), { verified: true });
+  lastScan = { at: Date.now(), list: printers };
+  return printers;
+}
+
 async function scanAndReportLocalPrinters() {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32' || !secret || authFailed) return;
   try {
     const rawWindows = await getWindowsPrinters();
     const printers = [];
@@ -247,7 +263,22 @@ log(`  Server URL  : ${base}`);
 log(`  Printer     : ${printer}`);
 log(`  Connection  : ${connectionType}`);
 log(`  Print Engine: ${sumatra ? 'SumatraPDF Portable (' + sumatra + ')' : 'Native Windows Print Spooler'}`);
-log(`  Status      : ONLINE · Listening for shop print jobs...`);
+log(`  Status      : ${secret ? 'ONLINE · Listening for shop print jobs...' : 'Waiting to be linked from the SmartPrint Printers page'}`);
+try {
+  await startBridge({
+    state: () => ({ base, linked: Boolean(secret) && !authFailed, needsRelink: Boolean(secret) && authFailed, printer }),
+    printers: ({ fresh } = {}) => collectLocalPrinters({ maxAge: fresh ? 0 : 15000 }),
+    pair
+  }, { extraOrigins: String(process.env.SMARTPRINT_TRUSTED_ORIGINS || '').split(',').filter(Boolean), log });
+} catch (err) {
+  if (err.code === 'EADDRINUSE') {
+    // One connector per PC: a second copy would compete for the same jobs.
+    log(`[Connector] Another SmartPrint connector is already running on this PC (port ${BRIDGE_PORT}). Exiting.`);
+    cleanupPid();
+    process.exit(0);
+  }
+  log(`[Connector] Dashboard link unavailable: ${err.message}`);
+}
 log('============================================================');
 
 // Clean up stale files older than 10 minutes
@@ -275,19 +306,44 @@ async function request(path, { method = 'GET', body, lease, binary, range } = {}
   });
   if (!response.ok) {
     if (response.status === 401) {
-      log(`[Auth] 401 Unauthorized for ${path}. Reloading settings.json...`);
       const refreshed = loadConfig();
       if (refreshed.Token && refreshed.Token !== secret) {
         secret = refreshed.Token;
+        if (refreshed.Url) base = refreshed.Url.replace(/\/+$/, '');
         if (refreshed.Printer) printer = refreshed.Printer;
+        authFailed = false;
         log('[Connector] Detected new token in settings.json. Reconnected.');
+      } else if (!authFailed) {
+        // Logged once, not on every poll: the old behaviour wrote thousands of identical lines.
+        authFailed = true;
+        log("[Auth] The server rejected this connector's device key (401): the printer was disconnected or linked again elsewhere. Open SmartPrint > Printers on this PC and click Connect to link it again.");
       }
     }
     const err = new Error(`SmartPrint request failed (${response.status} on ${path}).`);
     err.status = response.status;
     throw err;
   }
+  if (authFailed) { authFailed = false; log('[Auth] Device key accepted again.'); }
   return binary ? { bytes: Buffer.from(await response.arrayBuffer()), range: response.headers.get('Content-Range') } : response.json();
+}
+
+// Called by the local bridge when the owner clicks Connect on the Printers page of this PC. The key is
+// checked with the server before anything is saved.
+async function pair({ url, token, printer: chosen }) {
+  const target = url.replace(/\/+$/, '');
+  const check = await fetch(new URL('/api/device/heartbeat', target), { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) }).catch(err => ({ ok: false, status: err.message }));
+  if (!check.ok) throw Object.assign(new Error(`The SmartPrint server did not accept this device key (${check.status}).`), { status: 400 });
+  let name = chosen || printer || '';
+  if (process.platform === 'win32') {
+    const res = pickPrinter(name, await getWindowsPrinters());
+    if (res.name) name = res.name;
+  }
+  const cfg = loadConfig();
+  await writeFile(settingsPath, JSON.stringify({ ...cfg, Url: target, Token: token, Printer: name, LastUpdated: new Date().toISOString() }, null, 2), 'utf8');
+  base = target; secret = token; printer = name; authFailed = false; lastScan.at = 0;
+  log(`[Connector] Linked from the dashboard to ${target}. Printer: "${name}".`);
+  scanAndReportLocalPrinters().catch(() => {});
+  return { printer: name };
 }
 
 async function prepareJob(job) {
@@ -400,7 +456,9 @@ process.on('SIGTERM', () => { running = false; cleanupPid(); console.log('\nStop
 process.on('exit', cleanupPid);
 
 // Send device heartbeat every 10 seconds to ensure the printer never drops offline
+// While the key is rejected this is the only request, so it also notices a re-link.
 const heartbeat = setInterval(() => {
+  if (!secret) return;
   request('/api/device/heartbeat', { method: 'POST' })
     .catch(err => {
       if (err.status !== 401) {
@@ -415,6 +473,7 @@ const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
 // Conversion can take minutes. Keep it out of the paid-print dispatch loop.
 async function preparationLoop() {
   while (running && processorSecret) {
+    if (!secret || authFailed) { await new Promise(resolve => setTimeout(resolve, 5000)); continue; }
     try {
       const preparation = await request('/api/device/preparations/claim', { method: 'POST' });
       if (preparation) {
@@ -436,6 +495,8 @@ const preparing = preparationLoop();
 let claimRetryDelay = 1000;
 let lastClaimErrorLog = 0;
 while (running) {
+  // Unlinked or rejected: wait for the dashboard to link this PC instead of polling with a bad key.
+  if (!secret || authFailed) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
   try {
     // Claim print jobs
     const print = await request('/api/device/claim', { method: 'POST' });

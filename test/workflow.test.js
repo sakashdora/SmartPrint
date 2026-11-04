@@ -69,7 +69,11 @@ test('complete end-to-end workflow: multi-user simultaneous orders, printer conn
   assert.equal(resumeRes.status, 200);
   assert.equal(resumeRes.body.is_paused, 0);
 
-  // 4. Test Print Generation
+  // 4. Test Print Generation: refused while no connector has checked in, accepted once online.
+  const offlineTest = await request(`/api/owner/devices/${deviceId}/test-print`, { method: 'POST', cookie: ownerCookie });
+  assert.equal(offlineTest.status, 409);
+  assert.match(offlineTest.body.error, /offline/);
+  assert.equal((await request('/api/device/heartbeat', { method: 'POST', token: deviceToken })).status, 200);
   const testPrintRes = await request(`/api/owner/devices/${deviceId}/test-print`, { method: 'POST', cookie: ownerCookie });
   assert.equal(testPrintRes.status, 200);
   assert.ok(testPrintRes.body.orderId);

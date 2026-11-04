@@ -5,395 +5,174 @@ export async function paymentsPage({ api, workspace, escape, notify }) {
   workspace(`<div class="workhead"><div><h1>Your shop’s UPI payments</h1><p class="muted">Receive payments directly through your PhonePe, Google Pay, Paytm or bank UPI ID.</p></div></div><section class="panel"><p class="notice-inline">${saved ? 'UPI is configured for your shop. Customers can pay your account using their preferred UPI app.' : 'Add your shop’s UPI ID to enable QR payments at customer checkout.'}</p><form id="upi-settings"><label class="field">Shop UPI ID<input name="upi_id" placeholder="yourname@bank" autocapitalize="none" spellcheck="false" value="${escape(saved?.upi_id || '')}" required maxlength="264"></label><label class="field">Account holder’s name<input name="payee" value="${escape(saved?.payee || '')}" required maxlength="100"></label><p class="muted">Copy the UPI ID linked to your shop’s receiving account from your payment app. Enter the account name customers should check before paying. Never enter a UPI PIN, OTP or password here.</p><button class="primary">Save UPI details</button></form><p class="muted">SmartPrint generates an order-specific QR with your UPI ID and the exact amount. No payment gateway account is required. Check the credit in your own bank or UPI app before confirming payment. A customer’s reference or screenshot is not payment verification.</p></section>`, 'payments');
   document.querySelector('#upi-settings').onsubmit = async event => { event.preventDefault(); const button = event.submitter; button.disabled = true; try { await api('/api/owner/payments', { method: 'PUT', body: Object.fromEntries(new FormData(event.target)) }); notify('UPI details saved. Existing orders keep their original payment account.'); await paymentsPage({ api, workspace, escape, notify }); } catch (error) { notify(error.message); } finally { button.disabled = false; } };
 }
-// The one-time connector key for a printer added from a browser that is not on the shop PC. Kept
-// across re-renders until dismissed, because the key cannot be shown again.
-let pendingSetup = null;
-function setupPanel(escape) {
-  if (!pendingSetup) return '';
-  const s = pendingSetup;
-  return `<section class="panel notice-inline" id="connector-setup">
-    <h2>Finish connecting “${escape(s.printer)}” on your shop PC</h2>
-    <p class="muted">This printer stays <strong>offline</strong> until the SmartPrint connector runs on the Windows PC the printer is plugged into (USB) or shares a network with (WiFi). Copy this key now: it is shown only once.</p>
-    <ol class="muted small">
-      <li>On the shop PC, install the printer's Windows driver and print a Windows test page.</li>
-      <li>Install Node.js 24 and copy the SmartPrint folder to the PC.</li>
-      <li>Open Command Prompt in the SmartPrint folder and run:</li>
-    </ol>
-    <pre style="white-space: pre-wrap; word-break: break-all; user-select: all;">${escape(s.command)}</pre>
-    <p class="muted small">Server: ${escape(s.url)} · Printer name: ${escape(s.printer)} · Device key: <code style="user-select: all;">${escape(s.token)}</code></p>
-    <p class="muted small">The connector saves these settings and picks the matching Windows printer (for example “HP LaserJet 1020”) automatically. Next time, just run <code>start-connector.bat</code>.</p>
-    <div class="actions">
-      <button class="secondary small" id="copy-connector-command">Copy command</button>
-      <button class="secondary small" id="dismiss-connector-setup">I've saved it</button>
+// The SmartPrint connector on the shop PC answers on this local address (this PC only). The Printers
+// page, opened on that PC, reads the real Windows printers from it and links it with one click.
+const CONNECTOR = 'http://127.0.0.1:17631';
+async function connectorCall(path, { method = 'GET', body } = {}) {
+  const response = await fetch(CONNECTOR + path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(method === 'GET' ? 25000 : 40000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(data.error || `Connector error (${response.status}).`), { status: response.status, data });
+  return data;
+}
+const isOnline = d => Boolean(d?.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let freshScan = false;
+
+function thisPcSection(pc, devices, reported, escape) {
+  if (!pc) {
+    return `<section class="panel scanner-panel" id="this-pc">
+      <div class="panel-heading"><div>
+        <div class="hero-badge">THIS COMPUTER</div>
+        <h2>SmartPrint connector is not running on this computer</h2>
+        <p class="muted">Open this page on the Windows PC your printer is plugged into (USB cable) or on the same WiFi as the printer.</p>
+      </div></div>
+      <ol class="muted">
+        <li>Install the printer's Windows driver and print a Windows test page.</li>
+        <li>In the SmartPrint folder, double-click <strong>start-connector.bat</strong>. To start it with Windows every day, run <strong>scripts\\install-connector-task.bat</strong> once.</li>
+        <li>Click <strong>Check again</strong>. If the browser asks to access devices on your local network, choose <strong>Allow</strong>.</li>
+      </ol>
+      <div class="actions"><button class="primary small" id="check-connector">🔄 Check again</button></div>
+      ${reported.length ? `<p class="muted small" style="margin-top:16px">Printers reported by your shop PC: ${reported.map(p => escape(p.name)).join(', ')}. Open this page on that PC to connect one.</p>` : ''}
+    </section>`;
+  }
+  const notice = pc.needsRelink
+    ? '<p class="notice-inline">This PC\'s connector was disconnected from SmartPrint (its device key is no longer valid). Click <strong>Connect</strong> on your printer to link it again.</p>'
+    : pc.linked && !pc.linkedHere
+      ? `<p class="notice-inline">This PC's connector currently prints for <strong>${escape(pc.server)}</strong>. Connecting a printer here moves it to this shop.</p>`
+      : '';
+  const cards = pc.printers.map(p => {
+    const device = devices.find(d => d.active && d.name.toLowerCase() === p.name.toLowerCase());
+    const here = pc.linkedHere && pc.printer.toLowerCase() === p.name.toLowerCase();
+    const ready = here && isOnline(device);
+    const label = p.isWired ? '🔌 USB cable' : p.isWifi ? '📶 WiFi / network' : '🖨️ Local port';
+    return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}">
+      <div class="scanned-card-header">
+        <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">${p.isWifi ? '📶' : p.isWired ? '🔌' : '🖨️'}</div>
+        <div class="scanned-title-box">
+          <div class="scanned-title-row"><strong>${escape(p.name)}</strong>${p.isDefault ? '<span class="chip chip-gold">Windows default</span>' : ''}</div>
+          <span class="connection-label ${p.isWifi ? 'label-wifi' : p.isWired ? 'label-wired' : 'label-virtual'}">${label} · Port ${escape(p.portName || '?')}</span>
+        </div>
+      </div>
+      <div class="scanned-meta">
+        <span class="chip">${escape(p.driverName || 'Windows driver')}</span>
+        <span class="chip">${p.color ? 'Colour' : 'Black & white'}</span>
+        <span class="chip">${p.duplex ? 'Two-sided' : 'One-sided'}</span>
+        <span class="chip">${p.status === 'Offline' ? '⚠ Offline in Windows' : escape(p.status || 'Ready')}</span>
+      </div>
+      ${p.status === 'Offline' ? '<p class="muted small">Windows reports this printer offline. Check the cable and power, or use the copy of this printer that is Ready.</p>' : ''}
+      ${p.verified ? '' : '<p class="muted small">Colour and two-sided support could not be read from the driver; it is assumed unsupported.</p>'}
+      <div class="scanned-actions">
+        ${ready ? `<span class="badge active"><span class="live-dot dot-online"></span> Connected &amp; online</span>
+          <button class="secondary small" data-test-print="${device.id}">Test print</button>`
+          : here && device ? '<span class="badge pending">Connecting… waiting for the connector</span>'
+          : `<button class="primary small" data-connect-local="${escape(p.name)}">⚡ Connect this printer</button>`}
+      </div>
+    </div>`;
+  }).join('');
+  return `<section class="panel scanner-panel" id="this-pc">
+    <div class="panel-heading"><div>
+      <div class="hero-badge">THIS COMPUTER</div>
+      <h2>Printers on this PC</h2>
+      <p class="muted">Read directly from Windows by the SmartPrint connector. Connect the printer you use for customer jobs.</p>
     </div>
+    <div class="actions"><button class="secondary small" id="rescan-printers">🔄 Scan again</button></div></div>
+    ${notice}
+    ${pc.printers.length ? `<div class="scanned-printers-grid">${cards}</div>` : '<p class="notice-inline">No printer is installed in Windows on this PC. Plug in the printer, install its driver, print a Windows test page, then click Scan again.</p>'}
   </section>`;
 }
 
 export async function printersPage({ api, workspace, escape, notify }) {
-  // Proactively check local Windows PC bridge (auto-syncs local printers if local service is present)
-  try {
-    const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
-    if (isLocal) {
-      const local = await fetch('/api/local/printers', { signal: AbortSignal.timeout(1200) })
-        .then(r => r.json()).catch(() => null);
-      if (local && Array.isArray(local.printers) && local.printers.length > 0) {
-        await api('/api/owner/printers/scanned-report', { method: 'POST', body: { printers: local.printers } }).catch(() => {});
-      }
-    }
-  } catch {}
-
-  const [devices, scanned] = await Promise.all([
+  const [devices, reported, pc] = await Promise.all([
     api('/api/owner/devices'),
-    api('/api/owner/printers/scan').catch(() => [])
+    api('/api/owner/printers/scan').catch(() => []),
+    connectorCall(freshScan ? '/status?fresh=1' : '/status').catch(() => null)
   ]);
-  const activeCount = devices.filter(d => d.active).length;
-  const onlineCount = devices.filter(d => d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000).length;
-
-  // Browser client heartbeat for active printers to keep them online in real-time
-  if (devices.length > 0) {
-    api('/api/owner/devices/heartbeat', { method: 'POST' }).catch(() => {});
-  }
+  freshScan = false;
+  const active = devices.filter(d => d.active);
+  const onlineCount = active.filter(isOnline).length;
 
   workspace(`<div class="workhead">
     <div>
       <h1>Connect your printer</h1>
-      <p class="muted">Live hardware detection and 1-click connector for Brother, HP, Canon, Epson &amp; Windows spoolers.</p>
+      <p class="muted">USB and WiFi printers installed in Windows on your shop PC: Brother, HP, Canon, Epson and others.</p>
     </div>
-    <div class="actions">
-      <button class="secondary small" id="rescan-printers"><span class="icon-spin">🔄</span> Scan Printers Now</button>
-      <span class="badge ${onlineCount > 0 ? 'active' : 'pending'}">${onlineCount} of ${activeCount} Online</span>
-    </div>
+    <div class="actions"><span class="badge ${onlineCount ? 'active' : 'pending'}">${onlineCount} of ${active.length} online</span></div>
   </div>
 
-  ${setupPanel(escape)}
-
-  <section class="panel scanner-panel">
-    <div class="panel-heading">
-      <div>
-        <div class="hero-badge">BUILT-IN HARDWARE SCANNER</div>
-        <h2>Auto-Discovered Printers (WiFi &amp; Wired)</h2>
-        <p class="muted">Direct hardware detection of USB cable connections, WiFi wireless network, and Windows spooler printers.</p>
-      </div>
-    </div>
-
-    <div class="scan-tools-bar">
-      <strong>Scanner Tools:</strong>
-      <button class="secondary small" id="scan-pc-printers"><span class="icon-spin">🔄</span> Scan This PC</button>
-      <button class="secondary small" id="scan-usb-direct">🔌 Scan USB Ports (WebUSB)</button>
-      <button class="secondary small" id="scan-wifi-direct">📶 Scan WiFi Printer (IP)</button>
-    </div>
-
-    ${scanned.length ? `<div class="scanned-printers-grid">${scanned.map(p => {
-      const connectedDevice = devices.find(d => {
-        if (!d) return false;
-        const dn = String(d.name || '').toLowerCase().trim();
-        const pn = String(p.name || '').toLowerCase().trim();
-        return dn === pn || dn.includes(pn) || pn.includes(dn);
-      });
-      const isOnline = connectedDevice && connectedDevice.active && connectedDevice.heartbeat && (Date.now() - Date.parse(connectedDevice.heartbeat) < 180000);
-      return `<div class="scanned-card ${p.isDefault ? 'is-default' : ''}">
-        <div class="scanned-card-header">
-          <div class="scanned-icon ${p.isWifi ? 'icon-wifi' : p.isWired ? 'icon-wired' : 'icon-printer'}">
-            ${p.isWifi ? '📶' : p.isWired ? '🔌' : '📄'}
-          </div>
-          <div class="scanned-title-box">
-            <div class="scanned-title-row">
-              <strong>${escape(p.name)}</strong>
-              ${p.isDefault ? '<span class="chip chip-gold">Default</span>' : ''}
-            </div>
-            <span class="connection-label ${p.isWifi ? 'label-wifi' : p.isWired ? 'label-wired' : 'label-virtual'}">
-              ${p.isWifi ? '📶 WiFi / Wireless Network' : p.isWired ? '🔌 Wired / USB Cable' : '📄 Virtual Spooler'} · Port: ${escape(p.portName)}
-            </span>
-          </div>
-        </div>
-        <div class="scanned-meta">
-          <span class="chip">${escape(p.driverName || 'Standard Driver')}</span>
-          <span class="chip">${p.color ? 'Colour' : 'B&W'}</span>
-          <span class="chip">${p.duplex ? 'Auto-Duplex' : 'One-Sided'}</span>
-          <span class="chip">${escape(p.status)}</span>
-        </div>
-        <div class="scanned-actions">
-          ${isOnline ? `
-            <span class="badge active"><span class="live-dot dot-online"></span> Connected & Online</span>
-            <button class="secondary small" data-test-print="${connectedDevice.id}">${icon('printer')} Test Print</button>
-          ` : connectedDevice ? `
-            <button class="primary small" data-autoconnect="${escape(p.name)}" data-wifi="${p.isWifi}" data-wired="${p.isWired}">⚡ Reconnect Printer</button>
-          ` : `
-            <button class="primary small" data-autoconnect="${escape(p.name)}" data-wifi="${p.isWifi}" data-wired="${p.isWired}">⚡ 1-Click Connect (WiFi / Wired)</button>
-          `}
-        </div>
-      </div>`;
-    }).join('')}</div>` : `
-      <div class="cloud-detect-banner">
-        <div class="cloud-detect-icon">🔍</div>
-        <div class="cloud-detect-body">
-          <div class="cloud-detect-title">
-            <strong>Direct Hardware Scanner Active</strong>
-            <span class="chip chip-gold">Zero-Install · Pure Web &amp; Hardware</span>
-          </div>
-          <p class="muted small" style="margin: 6px 0 14px 0;">
-            Use the 1-click printer presets below to connect your printer instantly, scan USB cable ports directly, or scan your local PC spooler.
-          </p>
-          <div class="cloud-detect-actions">
-            <button class="primary small" id="scan-trigger-usb">🔌 Scan USB Ports (WebUSB)</button>
-            <button class="secondary small" id="scan-trigger-wifi">📶 Connect WiFi Printer (IP)</button>
-            <button class="secondary small" id="scan-trigger-pc"><span class="icon-spin">🔄</span> Scan Local PC Spooler</button>
-          </div>
-        </div>
-      </div>
-    `}
-
-    <div class="quick-presets-section">
-      <div class="quick-presets-title">
-        <h3>⚡ 1-Click Quick Connect Printer Presets</h3>
-        <span class="muted small">Click any printer to link it instantly to your shop</span>
-      </div>
-      <div class="quick-presets-grid">
-        <div class="preset-card">
-          <div>
-            <div class="preset-header">
-              <span class="preset-icon">🖨️</span>
-              <div>
-                <div class="preset-name">Brother DCP / HL / MFC</div>
-                <span class="chip">Brother Series</span>
-              </div>
-            </div>
-            <p class="muted small">Ink tank and laser printers via USB cable or WiFi network.</p>
-            <div class="preset-tags">
-              <span class="chip">USB / WiFi</span>
-              <span class="chip">B&amp;W / Colour</span>
-              <span class="chip">A4 Standard</span>
-            </div>
-          </div>
-          <button class="primary small" data-autoconnect="Brother Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Brother</button>
-        </div>
-
-        <div class="preset-card">
-          <div>
-            <div class="preset-header">
-              <span class="preset-icon">📄</span>
-              <div>
-                <div class="preset-name">HP LaserJet / DeskJet</div>
-                <span class="chip">HP Series</span>
-              </div>
-            </div>
-            <p class="muted small">LaserJet (1020, P1108, M1005 …), DeskJet, Ink Tank &amp; Smart Tank via USB cable or WiFi network.</p>
-            <div class="preset-tags">
-              <span class="chip">USB / WiFi</span>
-              <span class="chip">B&amp;W / Colour</span>
-              <span class="chip">A4 Standard</span>
-            </div>
-          </div>
-          <button class="primary small" data-autoconnect="HP Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect HP</button>
-        </div>
-
-        <div class="preset-card">
-          <div>
-            <div class="preset-header">
-              <span class="preset-icon">🎨</span>
-              <div>
-                <div class="preset-name">Canon PIXMA / MegaTank</div>
-                <span class="chip">Canon Series</span>
-              </div>
-            </div>
-            <p class="muted small">Vibrant colour document and photo printing on standard and glossy paper.</p>
-            <div class="preset-tags">
-              <span class="chip">USB / WiFi</span>
-              <span class="chip">Full Colour</span>
-              <span class="chip">A4 &amp; Cards</span>
-            </div>
-          </div>
-          <button class="primary small" data-autoconnect="Canon Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Canon</button>
-        </div>
-
-        <div class="preset-card">
-          <div>
-            <div class="preset-header">
-              <span class="preset-icon">💧</span>
-              <div>
-                <div class="preset-name">Epson EcoTank / L-Series</div>
-                <span class="chip">Epson Series</span>
-              </div>
-            </div>
-            <p class="muted small">Continuous ink tank printer for high-volume student and office documents.</p>
-            <div class="preset-tags">
-              <span class="chip">USB / WiFi</span>
-              <span class="chip">Full Colour</span>
-              <span class="chip">Eco Tank</span>
-            </div>
-          </div>
-          <button class="primary small" data-autoconnect="Epson Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Epson</button>
-        </div>
-      </div>
-    </div>
-  </section>
+  ${thisPcSection(pc, devices, reported, escape)}
 
   <section class="panel">
-    <div class="panel-heading">
-      <div>
-        <h2>Your printers (${activeCount})</h2>
-        <p class="muted">Manage printer statuses, pause queues, and verify hardware with test prints.</p>
-      </div>
-    </div>
+    <div class="panel-heading"><div>
+      <h2>Your printers (${active.length})</h2>
+      <p class="muted">A printer is online only while the SmartPrint connector on its PC is running.</p>
+    </div></div>
     ${devices.length ? `<div class="printer-cards-grid">${devices.map(d => {
-      const isOnline = d.active && d.heartbeat && Date.now() - Date.parse(d.heartbeat) < 180000;
-      return `<div class="printer-card ${isOnline ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
+      const online = isOnline(d);
+      return `<div class="printer-card ${online ? 'is-online' : 'is-offline'} ${d.is_paused ? 'is-paused' : ''}">
         <div class="printer-card-top">
           <div class="printer-title">
-            <span class="live-dot ${isOnline ? (d.is_paused ? 'dot-paused' : 'dot-online') : 'dot-offline'}"></span>
+            <span class="live-dot ${online ? (d.is_paused ? 'dot-paused' : 'dot-online') : 'dot-offline'}"></span>
             <strong>${escape(d.name)}</strong>
           </div>
-          <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : isOnline ? 'active' : 'pending'}">
-            ${!d.active ? 'Revoked' : d.is_paused ? 'Paused' : isOnline ? 'Online & Ready' : 'Offline'}
-          </span>
+          <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : online ? 'active' : 'pending'}">${!d.active ? 'Disconnected' : d.is_paused ? 'Paused' : online ? 'Online & ready' : 'Offline'}</span>
         </div>
-        <p class="muted small">${isOnline ? `Connector checking in · ${escape(d.status_note || 'Ready')}` : d.active ? (d.heartbeat ? `Offline · last seen ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on the shop PC.` : 'Waiting for the SmartPrint connector on the shop PC to check in.') : 'Disconnected'}</p>
+        <p class="muted small">${online ? escape(d.status_note || 'Ready') : d.active ? (d.heartbeat ? `Offline since ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on its PC, or click Connect above.` : 'Waiting for the connector to check in.') : 'Disconnected'}</p>
         <div class="capability-tags">
-          <span class="chip">A4 Standard</span>
-          <span class="chip">${d.color ? 'Full Colour' : 'Black & White'}</span>
-          <span class="chip">${d.duplex ? 'Auto-Duplex' : 'One-Sided'}</span>
+          <span class="chip">${d.color ? 'Colour' : 'Black & white'}</span>
+          <span class="chip">${d.duplex ? 'Two-sided' : 'One-sided'}</span>
         </div>
         ${d.active ? `<div class="printer-actions">
-          <button class="secondary small" data-test-print="${d.id}" title="Send diagnostic test sheet to verify physical printing">${icon('printer')} Test Print</button>
-          <button class="secondary small" data-pause="${d.id}" title="Pause or resume print queue">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
+          <button class="secondary small" data-test-print="${d.id}" ${online ? '' : 'disabled title="The printer must be online"'}>Test print</button>
+          <button class="secondary small" data-pause="${d.id}">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
           <button class="danger small" data-revoke="${d.id}">Disconnect</button>
         </div>` : ''}
       </div>`;
-    }).join('')}</div>` : '<p class="muted">No printers connected yet. Discovered printers above can be connected in 1 click.</p>'}
-  </section>
-
-  <section class="panel">
-    <h2>Pair a new printer manually</h2>
-    <p class="muted">Generate a device credential for a custom or network printer attached to your Windows PC.</p>
-    <form id="device-form">
-      <label class="field">Printer name
-        <input name="name" placeholder="Exact Windows printer name, e.g. HP LaserJet 1020" maxlength="100" required>
-      </label>
-      <div class="fields-row">
-        <label class="check"><input type="checkbox" name="color"> Supports Colour</label>
-        <label class="check"><input type="checkbox" name="duplex"> Supports Automatic Double-Sided</label>
-      </div>
-      <button class="primary">Generate device token & pair →</button>
-    </form>
-    <div id="device-secret"></div>
+    }).join('')}</div>` : '<p class="muted">No printers connected yet.</p>'}
   </section>`, 'printers');
 
-  document.querySelector('#copy-connector-command')?.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(pendingSetup?.command || ''); notify('Connector command copied.'); }
-    catch { notify('Select the command and copy it manually.'); }
+  const rerender = () => printersPage({ api, workspace, escape, notify });
+  document.querySelector('#check-connector')?.addEventListener('click', event => { event.currentTarget.disabled = true; rerender(); });
+  document.querySelector('#rescan-printers')?.addEventListener('click', event => {
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = 'Scanning…';
+    freshScan = true;
+    rerender();
   });
-  document.querySelector('#dismiss-connector-setup')?.addEventListener('click', () => {
-    pendingSetup = null;
-    document.querySelector('#connector-setup')?.remove();
-  });
-  const afterConnect = res => { if (res?.setup) pendingSetup = res.setup; };
 
-  document.querySelectorAll('[data-autoconnect]').forEach(button => button.onclick = async () => {
+  document.querySelectorAll('[data-connect-local]').forEach(button => button.onclick = async () => {
+    const printer = pc.printers.find(p => p.name === button.dataset.connectLocal);
+    const replace = pc.linked && !pc.linkedHere;
+    if (replace && !confirm(`This PC's connector prints for ${pc.server}. Move it to this shop and print here instead?`)) return;
     button.disabled = true;
-    button.textContent = 'Connecting...';
+    button.textContent = 'Connecting…';
     try {
-      const name = button.dataset.autoconnect;
-      const res = await api('/api/owner/printers/autoconnect', {
+      const linked = await api('/api/owner/printers/autoconnect', {
         method: 'POST',
-        body: { name, isWifi: button.dataset.wifi === 'true', isWired: button.dataset.wired === 'true' }
+        body: { name: printer.name, ...(printer.verified ? { color: printer.color, duplex: printer.duplex } : {}) }
       });
-      afterConnect(res);
-      notify(res.message || `${name} added.`);
-      await printersPage({ api, workspace, escape, notify });
+      await connectorCall('/pair', { method: 'POST', body: { url: location.origin, token: linked.token, printer: printer.name, replace } });
+      let device;
+      for (let i = 0; i < 20 && !isOnline(device); i++) {
+        await sleep(1000);
+        device = (await api('/api/owner/devices')).find(d => d.id === linked.id);
+      }
+      notify(isOnline(device) ? `${printer.name} is connected and online. Click Test print to check the paper output.` : `${printer.name} is linked. It shows online as soon as the connector checks in.`);
     } catch (error) {
       notify(error.message);
-      button.disabled = false;
-      button.textContent = '⚡ 1-Click Connect';
     }
+    await rerender();
   });
-
-  const triggerRescan = async (btn) => {
-    if (btn) {
-      btn.disabled = true;
-      btn.innerHTML = '<span class="icon-spin">⏳</span> Scanning...';
-    }
-    notify('Scanning local USB, WiFi, and Windows spooler printers...');
-    try {
-      await printersPage({ api, workspace, escape, notify });
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  };
-
-  document.querySelector('#rescan-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
-  document.querySelector('#scan-pc-printers')?.addEventListener('click', e => triggerRescan(e.currentTarget));
-
-  const scanUsb = async () => {
-    if (!navigator.usb) {
-      return notify('WebUSB is not supported in this browser. Please use Google Chrome or Microsoft Edge.');
-    }
-    try {
-      const dev = await navigator.usb.requestDevice({ filters: [] });
-      if (dev) {
-        const name = dev.productName || (dev.manufacturerName ? `${dev.manufacturerName} USB Printer` : 'USB Connected Printer');
-        notify(`Found USB Device: ${name}. Connecting...`);
-        const res = await api('/api/owner/printers/autoconnect', {
-          method: 'POST',
-          body: { name, isWired: true, isWifi: false }
-        });
-        afterConnect(res);
-        notify(res.message || `${name} added.`);
-        await printersPage({ api, workspace, escape, notify });
-      }
-    } catch (err) {
-      if (err.name !== 'NotFoundError') notify(err.message);
-    }
-  };
-
-  document.querySelector('#scan-usb-direct')?.addEventListener('click', scanUsb);
-  document.querySelector('#scan-trigger-usb')?.addEventListener('click', scanUsb);
-
-  const scanWifi = async () => {
-    const input = window.prompt('Enter your printer name as shown in Windows "Printers & scanners" (e.g. HP LaserJet 1020 or Canon G3010):', '');
-    if (input && input.trim()) {
-      const name = input.trim();
-      try {
-        const res = await api('/api/owner/printers/autoconnect', {
-          method: 'POST',
-          body: { name, isWifi: true, isWired: false }
-        });
-        afterConnect(res);
-        notify(res.message || `${name} added.`);
-        await printersPage({ api, workspace, escape, notify });
-      } catch (err) {
-        notify(err.message);
-      }
-    }
-  };
-
-  document.querySelector('#scan-wifi-direct')?.addEventListener('click', scanWifi);
-  document.querySelector('#scan-trigger-wifi')?.addEventListener('click', scanWifi);
-  document.querySelector('#scan-trigger-pc')?.addEventListener('click', e => triggerRescan(e.currentTarget));
-
-  document.querySelector('#device-form').onsubmit = async event => {
-    event.preventDefault();
-    const data = new FormData(event.target);
-    event.submitter.disabled = true;
-    try {
-      const device = await api('/api/owner/devices', {
-        method: 'POST',
-        body: { name: data.get('name'), color: data.has('color'), duplex: data.has('duplex') }
-      });
-      afterConnect(device);
-      notify(`${data.get('name')} added. Run the connector on your shop PC to bring it online.`);
-      await printersPage({ api, workspace, escape, notify });
-    } catch (error) {
-      notify(error.message);
-    } finally {
-      event.submitter.disabled = false;
-    }
-  };
 
   document.querySelectorAll('[data-test-print]').forEach(button => button.onclick = async () => {
     button.disabled = true;
     try {
       const res = await api(`/api/owner/devices/${button.dataset.testPrint}/test-print`, { method: 'POST' });
-      notify(res.message || 'Diagnostic test page queued! Check your printer.');
+      notify(res.message || 'Test page sent. Check the printer.');
     } catch (error) {
       notify(error.message);
     } finally {
@@ -406,19 +185,18 @@ export async function printersPage({ api, workspace, escape, notify }) {
     try {
       const res = await api(`/api/owner/devices/${button.dataset.pause}/pause`, { method: 'POST' });
       notify(res.is_paused ? 'Printer paused. Jobs will wait in queue.' : 'Printer resumed.');
-      await printersPage({ api, workspace, escape, notify });
+      await rerender();
     } catch (error) {
       notify(error.message);
-    } finally {
       button.disabled = false;
     }
   });
 
   document.querySelectorAll('[data-revoke]').forEach(button => button.onclick = async () => {
-    if (!confirm('Disconnect this device? It will lose access to shop files and jobs.')) return;
+    if (!confirm('Disconnect this printer? Its connector stops receiving jobs until you connect it again.')) return;
     try {
       await api(`/api/owner/devices/${button.dataset.revoke}`, { method: 'DELETE' });
-      await printersPage({ api, workspace, escape, notify });
+      await rerender();
     } catch (error) {
       notify(error.message);
     }
@@ -426,11 +204,12 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   watchUpdates(
     () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => [])]),
-    [devices, scanned],
-    () => printersPage({ api, workspace, escape, notify }),
+    [devices, reported],
+    rerender,
     5000
   );
 }
+
 
 async function ensureWebAuthnBrowser() {
   if (window.SimpleWebAuthnBrowser) return window.SimpleWebAuthnBrowser;

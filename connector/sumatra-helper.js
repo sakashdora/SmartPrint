@@ -219,11 +219,7 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
   if (!existsSync(pdfPath)) {
     throw new Error(`Print file not found at ${pdfPath}`);
   }
-  if (!printerName) {
-    throw new Error('Printer name is required for Windows printing.');
-  }
-
-  let targetPrinter = printerName;
+  let targetPrinter = printerName || '';
   if (process.platform === 'win32') {
     const installed = await getWindowsPrinters();
     if (installed.length) {
@@ -239,6 +235,8 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
       }
     }
   }
+
+  if (!targetPrinter) throw new Error('No printer is installed in Windows. Install the printer driver and print a Windows test page first.');
 
   const cleanSettings = [
     options.color === 'color' ? 'color' : 'monochrome',

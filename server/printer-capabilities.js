@@ -6,11 +6,18 @@ const run = promisify(execFile);
 // Asks each Windows printer driver whether it can print colour and duplex (DeviceCapabilities via
 // System.Drawing.Printing.PrinterSettings). Names travel through an environment variable, never the
 // command text. Printers the driver cannot describe are left out: callers must treat them as unknown.
+// Colour comes from the driver's PrintCapabilities (System.Printing) where available: the older
+// DeviceCapabilities answer claims colour for mono drivers such as the HP LaserJet 1020.
 const script = [
   'Add-Type -AssemblyName System.Drawing',
+  'try { Add-Type -AssemblyName System.Printing; $srv = New-Object System.Printing.LocalPrintServer } catch { $srv = $null }',
   '$names = $env:SMARTPRINT_PRINTER_NAMES | ConvertFrom-Json',
   '$out = @(foreach ($n in $names) { $s = New-Object System.Drawing.Printing.PrinterSettings; $s.PrinterName = [string]$n;',
-  'if ($s.IsValid) { [pscustomobject]@{ name = [string]$n; color = [bool]$s.SupportsColor; duplex = [bool]$s.CanDuplex } } })',
+  'if ($s.IsValid) { $color = [bool]$s.SupportsColor; $duplex = [bool]$s.CanDuplex;',
+  'if ($srv) { try { $c = $srv.GetPrintQueue([string]$n).GetPrintCapabilities(); $color = @($c.OutputColorCapability | Where-Object { "$_" -eq "Color" }).Count -gt 0;',
+  '$duplex = $duplex -and (@($c.DuplexingCapability | Where-Object { "$_" -like "TwoSided*" }).Count -gt 0) } catch {} }',
+  '$driver = [string](Get-Printer -Name ([string]$n) -ErrorAction SilentlyContinue).DriverName;',
+  '[pscustomobject]@{ name = [string]$n; driver = $driver; color = $color; duplex = $duplex } } })',
   'ConvertTo-Json -Compress -InputObject $out'
 ].join('\n');
 
@@ -56,7 +63,10 @@ export async function probePrinterCapabilities(names) {
     const parsed = JSON.parse(stdout.trim() || '[]');
     for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
       if (item && typeof item.name === 'string' && typeof item.color === 'boolean' && typeof item.duplex === 'boolean') {
-        result.set(item.name, { color: item.color, duplex: item.duplex });
+        // Drivers of simplex lasers (HP LaserJet 1020, P1108, M1005 ...) advertise *manual* duplex, which
+        // needs someone to turn the paper over. Only an automatic-duplex model counts as two-sided.
+        const automaticDuplex = guessCapabilities(item.name).duplex || guessCapabilities(String(item.driver || '')).duplex;
+        result.set(item.name, { color: item.color, duplex: item.duplex && automaticDuplex });
       }
     }
   } catch {}

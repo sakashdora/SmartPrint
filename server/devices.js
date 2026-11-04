@@ -1,16 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { token, digest, decrypt, encrypt } from './security.js';
 import { sendPdf, resolveUploads } from './uploads.js';
 import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
-import { probePrinterCapabilities, classifyConnection, guessCapabilities } from './printer-capabilities.js';
+import { classifyConnection, guessCapabilities } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
 
 const runExec = promisify(execFile);
@@ -186,29 +183,6 @@ export function isLocalRequest(req) {
   return ['localhost', '127.0.0.1', '::1'].includes(host);
 }
 
-const connectorRootPath = () => join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
-
-function readConnectorSettings() {
-  try {
-    const settingsPath = join(connectorRootPath(), 'settings.json');
-    if (!existsSync(settingsPath)) return {};
-    const raw = readFileSync(settingsPath, 'utf8').replace(/^﻿/, '').trim();
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
-}
-
-const serverUrlFor = (req, local) => process.env.PUBLIC_BASE_URL || (req.headers.host ? `${local ? 'http' : 'https'}://${req.headers.host}` : `http://localhost:${process.env.PORT || 3000}`);
-
-// What a shop PC needs to run its own connector. Shown once to the owner, like any device key.
-export function connectorSetup(serverUrl, secret, printerName) {
-  return {
-    url: serverUrl,
-    token: secret,
-    printer: printerName,
-    command: `set "SMARTPRINT_URL=${serverUrl}" && set "SMARTPRINT_DEVICE_TOKEN=${secret}" && set "SMARTPRINT_PRINTER=${printerName}" && node connector\\index.js`
-  };
-}
-
 export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance }) {
   const owner = requireRole('owner');
 
@@ -262,137 +236,44 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     res.json({ ok: true });
   });
 
+  // Links a printer of the shop PC. The Printers page, opened on that PC, gets a fresh device key here
+  // and hands it straight to the connector through its local link, so the owner never copies a key.
+  // A fresh key is issued every time: whichever connector received it is the one printing.
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
     const shop = await ownerShop(req);
     const printerName = String(req.body.name || '').trim().slice(0, 100);
     if (!printerName) throw fail(400, 'Choose a printer.');
-    const local = process.platform === 'win32' && isLocalRequest(req);
-    const serverUrl = serverUrlFor(req, local);
-
-    // The connector on this PC serves exactly one shop. Never repoint or stop it for another shop.
-    if (local) {
-      const linkedToken = readConnectorSettings().Token;
-      if (linkedToken) {
-        const [linked] = await db.query('SELECT shop_id FROM devices WHERE token=$1 AND active=1', [digest(String(linkedToken))]);
-        if (linked && linked.shop_id !== shop.id) {
-          throw fail(409, "The print connector on this computer is already linked to another shop. Connect this shop's printer from its own shop PC.");
-        }
-      }
-    }
 
     let [device] = await db.query(
-      'SELECT id, name, active, color, duplex, heartbeat FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
+      'SELECT id, name, active, color, duplex FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName]
     );
-    // Capabilities come from the request or the Windows driver; unknown means no colour and no duplex,
-    // so a colour or two-sided job is never routed to a printer that may not support it. The driver can
-    // only be asked on this PC; a remote shop's connector reports the real values when it starts.
-    const explicit = typeof req.body.color === 'boolean' && typeof req.body.duplex === 'boolean';
-    const probed = explicit || !local ? null : (await probePrinterCapabilities([printerName])).get(printerName);
-    const capability = flag => typeof req.body[flag] === 'boolean' ? req.body[flag] : probed?.[flag];
-    const isOnline = d => Boolean(d?.active && d.heartbeat && Date.now() - new Date(d.heartbeat).getTime() < 180000);
-    let secret = null;
+    // Capabilities come from the connector's driver probe on the shop PC (sent by the page) or stay
+    // unknown, which means no colour and no duplex, so such jobs are never routed to this printer.
+    // The connector reports the driver values again once it checks in.
+    const capability = flag => typeof req.body[flag] === 'boolean' ? (req.body[flag] ? 1 : 0) : undefined;
+    const secret = token();
     if (!device) {
       const id = randomUUID();
-      secret = token();
-      // No heartbeat: the printer shows online only once a real connector checks in with this key.
+      // No heartbeat: the printer shows online only once its connector checks in with this key.
       await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
-        id, shop.id, printerName, digest(secret), capability('color') ? 1 : 0, capability('duplex') ? 1 : 0
+        id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0
       ]);
-      device = { id, name: printerName, active: 1, color: capability('color') ? 1 : 0, duplex: capability('duplex') ? 1 : 0, heartbeat: null };
+      device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0 };
     } else {
-      // Reconnecting keeps the stored capabilities unless better information is available.
-      const color = capability('color') === undefined ? device.color : (capability('color') ? 1 : 0);
-      const duplex = capability('duplex') === undefined ? device.duplex : (capability('duplex') ? 1 : 0);
-      // Keys are stored hashed, so a remote owner reconnecting an offline printer gets a fresh one for
-      // the shop PC. An online printer keeps its key, so a running connector is never cut off.
-      if (req.body.regenerateToken || (!local && !isOnline(device))) {
-        secret = token();
-        await db.query('UPDATE devices SET name=$1, active=1, token=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, digest(secret), color, duplex, device.id]);
-      } else {
-        await db.query('UPDATE devices SET name=$1, active=1, color=$2, duplex=$3 WHERE id=$4', [printerName, color, duplex, device.id]);
-      }
+      const color = capability('color') ?? device.color, duplex = capability('duplex') ?? device.duplex;
+      await db.query('UPDATE devices SET name=$1, active=1, token=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, digest(secret), color, duplex, device.id]);
       Object.assign(device, { name: printerName, active: 1, color, duplex });
     }
     deviceMetadata.set(device.id, { is_paused: 0 });
-
-    // When the owner is on the server PC itself, configure and start its connector directly.
-    let launched = false;
-    if (local) {
-      try {
-        const connectorRoot = connectorRootPath();
-        mkdirSync(connectorRoot, { recursive: true });
-        const settingsPath = join(connectorRoot, 'settings.json');
-        const existing = readConnectorSettings();
-        const existingToken = existing.Token || '';
-
-        writeFileSync(settingsPath, JSON.stringify({
-          Url: serverUrl,
-          Token: secret || existingToken,
-          Printer: printerName,
-          Sumatra: existing.Sumatra || '',
-          LastUpdated: new Date().toISOString()
-        }, null, 2), 'utf8');
-
-        // Terminate any previous connector process to prevent token or device conflict
-        const pidFile = join(connectorRoot, 'connector.pid');
-        try {
-          if (existsSync(pidFile)) {
-            const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-            if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
-              try { process.kill(oldPid, 'SIGTERM'); } catch {}
-              try { spawn('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true }); } catch {}
-            }
-          }
-        } catch {}
-
-        const connectorScript = fileURLToPath(new URL('../connector/index.js', import.meta.url));
-        const logPath = join(connectorRoot, 'connector.log');
-        let outFd = 'ignore';
-        try {
-          const { openSync } = await import('node:fs');
-          outFd = openSync(logPath, 'a');
-        } catch {}
-        const child = spawn(process.execPath, [connectorScript], {
-          cwd: resolve(fileURLToPath(new URL('../', import.meta.url))),
-          detached: true,
-          stdio: ['ignore', outFd, outFd],
-          env: {
-            ...process.env,
-            SMARTPRINT_URL: serverUrl,
-            // spawn() turns null into the string "null"; reconnecting keeps the saved token instead.
-            SMARTPRINT_DEVICE_TOKEN: secret || existingToken || undefined,
-            SMARTPRINT_PRINTER: printerName
-          }
-        });
-        if (child.pid) {
-          writeFileSync(pidFile, String(child.pid), 'utf8');
-          launched = true;
-        }
-        child.unref();
-      } catch (err) {
-        console.error('[Autoconnect] Could not spawn local connector process:', err.message);
-      }
-    }
-
     await audit(db, req.user.id, 'device.autoconnected', device.id);
-    const caps = `${device.color ? 'Colour' : 'Black & white only'} · ${device.duplex ? 'two-sided' : 'one-sided'} jobs`;
     res.json({
       ok: true,
       id: device.id,
       name: device.name,
       token: secret,
-      url: serverUrl,
-      printer: printerName,
       color: Boolean(device.color),
-      duplex: Boolean(device.duplex),
-      launched,
-      setup: !launched && secret ? connectorSetup(serverUrl, secret, printerName) : null,
-      message: launched
-        ? `${printerName} linked. The connector is starting on this PC; the printer shows online once it checks in. ${caps}.`
-        : secret
-          ? `${printerName} added. Run the SmartPrint connector on your shop PC with the key shown below. The printer shows online once it checks in.`
-          : `${printerName} is already linked and online.`
+      duplex: Boolean(device.duplex)
     });
   });
 
@@ -420,7 +301,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     ]);
     deviceMetadata.set(id, { is_paused: 0 });
     await audit(db, req.user.id, 'device.paired', id);
-    res.status(201).json({ id, token: secret, setup: connectorSetup(serverUrlFor(req, isLocalRequest(req)), secret, name) });
+    res.status(201).json({ id, token: secret });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
@@ -440,6 +321,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const shop = await ownerShop(req);
     const [device] = await db.query('SELECT * FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Active device not found.');
+    // A test page for an offline printer would sit in the queue and print by surprise later.
+    if (!device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000) throw fail(409, `${device.name} is offline: its SmartPrint connector is not running or not linked. Connect it from this page on the shop PC, then try again.`);
     const testBytes = await generateTestPage(shop.name, device.name);
     const docId = randomUUID(), orderId = randomUUID(), receipt = token();
     const sealed = encrypt(testBytes, key);
