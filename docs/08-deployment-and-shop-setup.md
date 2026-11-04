@@ -67,6 +67,10 @@ Then connect printers directly from the browser or run the lightweight Node conn
 node connector/index.js
 ```
 
+When the owner adds a printer from a browser that is not on the server PC (every shop on the hosted Render server), the Printers page shows a one-time device key and a command. Run it once in the SmartPrint folder on the shop PC; the connector saves the settings to `%LOCALAPPDATA%\SmartPrintConnector\settings.json`, so later starts need only `start-connector.bat`. A printer is shown online only after its own connector checks in. The server reads or launches printers on its own PC only for a browser on that same PC, and refuses to repoint a connector that belongs to another shop.
+
+The connector matches the configured name to the installed Windows printer (exact name, an online "(Copy n)", the same model or brand, then the Windows default) and never falls back to a software printer such as Microsoft Print to PDF or PaperPort. Host-based HP lasers (LaserJet 1020, P1007/P1108, M1005) need HP's driver installed and a Windows test page printed before connecting.
+
 No PowerShell or batch files are required. Printers are auto-discovered through pure native Windows Registry queries and browser WebUSB/Network APIs without any popup windows.
 
 ## 5. Test the complete path

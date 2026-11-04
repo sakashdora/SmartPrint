@@ -4,8 +4,8 @@ import { mkdir, writeFile, unlink, readFile, readdir, stat } from 'node:fs/promi
 import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, resolveActivePrinter, checkPrinterStatus } from './sumatra-helper.js';
-import { probePrinterCapabilities } from '../server/printer-capabilities.js';
+import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus } from './sumatra-helper.js';
+import { probePrinterCapabilities, classifyConnection, guessCapabilities } from '../server/printer-capabilities.js';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -89,37 +89,43 @@ async function checkPrinterExists(name) {
   return false;
 }
 
-// Verify real-time status and resolve offline printers to active USB/online counterparts
+// A shop PC set up from the dashboard's one-time key starts with environment variables only. Save them
+// on first run so a restart or the Windows startup task reconnects without the key. Existing settings
+// are never overwritten here.
+if (!savedConfig.Token && process.env.SMARTPRINT_DEVICE_TOKEN) {
+  try {
+    await writeFile(settingsPath, JSON.stringify({ ...savedConfig, Url: base, Token: secret, Printer: printer || '', LastUpdated: new Date().toISOString() }, null, 2), 'utf8');
+    savedConfig = loadConfig();
+    log(`[Connector] Saved connection settings to ${settingsPath}.`);
+  } catch (err) {
+    log(`[Connector] Could not save settings: ${err.message}`);
+  }
+}
+
+// Resolve the configured name to an installed Windows printer: exact name, an online copy of it, the
+// same model or brand (e.g. "HP Printer" -> "HP LaserJet 1020"), the default printer, then any real
+// printer. Software printers such as PDF or PaperPort are never chosen by fallback.
 if (process.platform === 'win32') {
   const installedPrinters = await getWindowsPrinters();
-  if (printer && installedPrinters.length) {
-    const res = resolveActivePrinter(printer, installedPrinters);
-    if (res.switched) {
+  if (installedPrinters.length) {
+    const res = pickPrinter(printer, installedPrinters);
+    if (res.name && res.name !== printer) {
       log(`[Printer] ${res.reason}`);
       printer = res.name;
       try {
         const cfg = loadConfig();
-        cfg.Printer = printer;
-        await writeFile(settingsPath, JSON.stringify(cfg, null, 2), 'utf8');
+        // Keep the owner's choice when the chosen printer is only a temporary online copy.
+        if (!cfg.Printer || !installedPrinters.some(p => p.Name.toLowerCase() === String(cfg.Printer).toLowerCase())) {
+          cfg.Printer = printer;
+          await writeFile(settingsPath, JSON.stringify(cfg, null, 2), 'utf8');
+        }
       } catch {}
-    } else if (res.status === 'Offline') {
-      log(`[Printer] WARNING: Configured printer "${printer}" is currently OFFLINE in Windows Spooler. Waiting for connection...`);
     }
-  }
-
-  if (!printer || !(await checkPrinterExists(printer))) {
-    const def = installedPrinters.find(p => p.Default && !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
-    if (def) {
-      printer = def.Name;
-    } else {
-      const onlinePhys = installedPrinters.find(p => checkPrinterStatus(p.PrinterStatus).status === 'Ready' && !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
-      if (onlinePhys) {
-        printer = onlinePhys.Name;
-      } else {
-        const anyPhys = installedPrinters.find(p => !/OneNote|Fax|Microsoft XPS|PDF/i.test(p.Name));
-        if (anyPhys) printer = anyPhys.Name;
-      }
+    if (res.status === 'Offline') {
+      log(`[Printer] WARNING: Printer "${printer}" is currently OFFLINE in Windows. Check the USB cable / power. Waiting for connection...`);
     }
+  } else if (printer && !(await checkPrinterExists(printer))) {
+    log(`[Printer] WARNING: Could not list Windows printers and "${printer}" was not found in the registry.`);
   }
 }
 
@@ -162,17 +168,7 @@ async function scanAndReportLocalPrinters() {
         const name = String(p.Name || '').trim();
         const driver = String(p.DriverName || name).trim();
         const { status } = checkPrinterStatus(p.PrinterStatus);
-
-        let isWifi = false, isWired = false, connType = 'Local Spooler';
-        if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /wifi|wireless|network/i.test(name)) {
-          connType = 'WiFi / Wireless Network';
-          isWifi = true;
-        } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(name)) {
-          connType = 'Wired USB Cable';
-          isWired = true;
-        } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
-          connType = 'Virtual / PDF';
-        }
+        const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
 
         printers.push({
           name,
@@ -183,8 +179,7 @@ async function scanAndReportLocalPrinters() {
           isWired,
           isDefault: Boolean(p.Default),
           status,
-          color: !/mono|black/i.test(driver || name),
-          duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name)
+          ...guessCapabilities(name, driver)
         });
       }
     }
@@ -217,16 +212,7 @@ async function scanAndReportLocalPrinters() {
             port = (parts[1].split(',')[1] || '').trim();
           }
 
-          let isWifi = false, isWired = false, connType = 'Local Spooler';
-          if (/^WSD|^TCP|^IP_/i.test(port) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) || /wifi|wireless|network/i.test(name)) {
-            connType = 'WiFi / Wireless Network';
-            isWifi = true;
-          } else if (/^USB|^DOT4|^LPT|^COM/i.test(port) || /usb/i.test(name)) {
-            connType = 'Wired USB Cable';
-            isWired = true;
-          } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
-            connType = 'Virtual / PDF';
-          }
+          const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port });
 
           printers.push({
             name,
@@ -237,8 +223,7 @@ async function scanAndReportLocalPrinters() {
             isWired,
             isDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase())),
             status: 'Ready',
-            color: !/mono|black/i.test(name),
-            duplex: /DCP-|MFC-|LaserJet|Duplex/i.test(name)
+            ...guessCapabilities(name)
           });
         }
       }

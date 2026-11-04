@@ -10,7 +10,7 @@ import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
-import { probePrinterCapabilities } from './printer-capabilities.js';
+import { probePrinterCapabilities, classifyConnection, guessCapabilities } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
 
 const runExec = promisify(execFile);
@@ -72,44 +72,12 @@ export function formatPrinterList(rawList) {
       const port = String(p.PortName || '').trim();
       const driver = String(p.DriverName || '').trim();
       const name = String(p.Name || '').trim();
-
-      let isWifi = false;
-      let isWired = false;
-      let connectionType = 'Local Spooler';
-
-      // Check for WiFi / Wireless Network indicators
-      if (
-        /^WSD/i.test(port) ||
-        /^TCP/i.test(port) ||
-        /^IP_/i.test(port) ||
-        /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(port) ||
-        /ipp|wifi|wireless|network/i.test(driver) ||
-        /wifi|wireless|network/i.test(name) ||
-        Boolean(p.Network) ||
-        p.Type === 1
-      ) {
-        connectionType = 'WiFi / Wireless Network';
-        isWifi = true;
-      } else if (
-        /^USB/i.test(port) ||
-        /^DOT4/i.test(port) ||
-        /^LPT/i.test(port) ||
-        /^COM/i.test(port) ||
-        /usb/i.test(driver) ||
-        /usb/i.test(name)
-      ) {
-        connectionType = 'Wired USB Cable';
-        isWired = true;
-      } else if (/PORTPROMPT|nul:|PDF/i.test(port) || /PDF/i.test(name)) {
-        connectionType = 'Virtual / PDF';
-      }
-
-      const isColor = !/mono|black/i.test(driver || name);
-      const isDuplex = /DCP-|MFC-|LaserJet|Duplex/i.test(driver || name);
-
-      const isOffline = p.PrinterStatus === 128 || p.PrinterStatus === 'Offline' || p.status === 'Offline';
-      const status = isOffline ? 'Offline' : (p.PrinterStatus === 0 || p.PrinterStatus === 3 || p.PrinterStatus === 'Normal' || p.status === 'Ready' || !p.PrinterStatus) ? 'Ready' : 'Normal';
-
+      const { connectionType, isWifi, isWired } = classifyConnection({ name, port, driver });
+      const guess = guessCapabilities(name, driver);
+      // Get-Printer reports the spooler bitmask: 0x80 is offline, other bits (busy, power save,
+      // toner low, ...) still accept jobs.
+      const code = Number(p.PrinterStatus);
+      const isOffline = p.PrinterStatus === 'Offline' || p.status === 'Offline' || (Number.isInteger(code) && (code & 0x80) !== 0);
       return {
         name,
         portName: port,
@@ -118,9 +86,9 @@ export function formatPrinterList(rawList) {
         isWifi,
         isWired,
         isDefault: Boolean(p.Default || p.IsDefault),
-        status,
-        color: isColor,
-        duplex: isDuplex
+        status: isOffline ? 'Offline' : 'Ready',
+        color: typeof p.color === 'boolean' ? p.color : guess.color,
+        duplex: typeof p.duplex === 'boolean' ? p.duplex : guess.duplex
       };
     });
 }
@@ -206,13 +174,48 @@ export async function scanWindowsPrinters() {
 
 export const deviceMetadata = new Map();
 
+// True only when the owner's browser runs on the same computer as this server process, so the server
+// may read that computer's printers and start its connector. A request relayed by a proxy or tunnel
+// (Render, cloudflared, ngrok) carries forwarding headers or a public Host and is treated as remote:
+// another shop must never see, or take over, the printers of the PC that hosts the server.
+export function isLocalRequest(req) {
+  const address = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!['127.0.0.1', '::1'].includes(address)) return false;
+  if (req.headers['x-forwarded-for'] || req.headers['x-forwarded-host'] || req.headers.forwarded || req.headers['x-real-ip']) return false;
+  const host = String(req.headers.host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return ['localhost', '127.0.0.1', '::1'].includes(host);
+}
+
+const connectorRootPath = () => join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
+
+function readConnectorSettings() {
+  try {
+    const settingsPath = join(connectorRootPath(), 'settings.json');
+    if (!existsSync(settingsPath)) return {};
+    const raw = readFileSync(settingsPath, 'utf8').replace(/^﻿/, '').trim();
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+const serverUrlFor = (req, local) => process.env.PUBLIC_BASE_URL || (req.headers.host ? `${local ? 'http' : 'https'}://${req.headers.host}` : `http://localhost:${process.env.PORT || 3000}`);
+
+// What a shop PC needs to run its own connector. Shown once to the owner, like any device key.
+export function connectorSetup(serverUrl, secret, printerName) {
+  return {
+    url: serverUrl,
+    token: secret,
+    printer: printerName,
+    command: `set "SMARTPRINT_URL=${serverUrl}" && set "SMARTPRINT_DEVICE_TOKEN=${secret}" && set "SMARTPRINT_PRINTER=${printerName}" && node connector\\index.js`
+  };
+}
+
 export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, maintenance }) {
   const owner = requireRole('owner');
 
   app.get('/api/owner/printers/scan', owner, async (req, res) => {
     const shop = await ownerShop(req);
     let localList = [];
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && isLocalRequest(req)) {
       localList = await scanWindowsPrinters();
     }
     const connectorList = shopScannedPrinters.get(shop.id) || [];
@@ -227,6 +230,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.post('/api/owner/printers/scanned-report', owner, async (req, res) => {
     const shop = await ownerShop(req);
+    // Only the browser on the server PC can read that PC's printers; remote reports are ignored.
+    if (!isLocalRequest(req)) return res.json({ ok: true, count: 0 });
     const list = cleanPrinterList(req.body.printers);
     if (list.length) {
       const existing = shopScannedPrinters.get(shop.id) || [];
@@ -242,7 +247,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/local/printers', owner, async (req, res) => {
     let printers = [];
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && isLocalRequest(req)) {
       try { printers = await scanWindowsPrinters(); } catch {}
     }
     res.json({ ok: true, platform: process.platform, printers });
@@ -259,64 +264,73 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.post('/api/owner/printers/autoconnect', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const printerName = String(req.body.name || '').trim();
+    const printerName = String(req.body.name || '').trim().slice(0, 100);
     if (!printerName) throw fail(400, 'Choose a printer.');
+    const local = process.platform === 'win32' && isLocalRequest(req);
+    const serverUrl = serverUrlFor(req, local);
+
+    // The connector on this PC serves exactly one shop. Never repoint or stop it for another shop.
+    if (local) {
+      const linkedToken = readConnectorSettings().Token;
+      if (linkedToken) {
+        const [linked] = await db.query('SELECT shop_id FROM devices WHERE token=$1 AND active=1', [digest(String(linkedToken))]);
+        if (linked && linked.shop_id !== shop.id) {
+          throw fail(409, "The print connector on this computer is already linked to another shop. Connect this shop's printer from its own shop PC.");
+        }
+      }
+    }
 
     let [device] = await db.query(
-      'SELECT id, name, active, color, duplex FROM devices WHERE shop_id=$1 AND (LOWER(name) = LOWER($2) OR LOWER(name) LIKE LOWER($3) OR LOWER($2) LIKE LOWER(name)) ORDER BY active DESC LIMIT 1',
-      [shop.id, printerName, `%${printerName}%`]
+      'SELECT id, name, active, color, duplex, heartbeat FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
+      [shop.id, printerName]
     );
     // Capabilities come from the request or the Windows driver; unknown means no colour and no duplex,
-    // so a colour or two-sided job is never routed to a printer that may not support it.
-    const probed = typeof req.body.color === 'boolean' && typeof req.body.duplex === 'boolean' ? null : (await probePrinterCapabilities([printerName])).get(printerName);
+    // so a colour or two-sided job is never routed to a printer that may not support it. The driver can
+    // only be asked on this PC; a remote shop's connector reports the real values when it starts.
+    const explicit = typeof req.body.color === 'boolean' && typeof req.body.duplex === 'boolean';
+    const probed = explicit || !local ? null : (await probePrinterCapabilities([printerName])).get(printerName);
     const capability = flag => typeof req.body[flag] === 'boolean' ? req.body[flag] : probed?.[flag];
+    const isOnline = d => Boolean(d?.active && d.heartbeat && Date.now() - new Date(d.heartbeat).getTime() < 180000);
     let secret = null;
     if (!device) {
       const id = randomUUID();
       secret = token();
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,heartbeat) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
-        id, shop.id, printerName, digest(secret), capability('color') ? 1 : 0, capability('duplex') ? 1 : 0, now()
+      // No heartbeat: the printer shows online only once a real connector checks in with this key.
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
+        id, shop.id, printerName, digest(secret), capability('color') ? 1 : 0, capability('duplex') ? 1 : 0
       ]);
-      device = { id, name: printerName, active: 1, color: capability('color') ? 1 : 0, duplex: capability('duplex') ? 1 : 0 };
+      device = { id, name: printerName, active: 1, color: capability('color') ? 1 : 0, duplex: capability('duplex') ? 1 : 0, heartbeat: null };
     } else {
       // Reconnecting keeps the stored capabilities unless better information is available.
       const color = capability('color') === undefined ? device.color : (capability('color') ? 1 : 0);
       const duplex = capability('duplex') === undefined ? device.duplex : (capability('duplex') ? 1 : 0);
-      if (req.body.regenerateToken) {
+      // Keys are stored hashed, so a remote owner reconnecting an offline printer gets a fresh one for
+      // the shop PC. An online printer keeps its key, so a running connector is never cut off.
+      if (req.body.regenerateToken || (!local && !isOnline(device))) {
         secret = token();
-        await db.query('UPDATE devices SET name=$1, active=1, token=$2, heartbeat=$3, color=$4, duplex=$5 WHERE id=$6', [printerName, digest(secret), now(), color, duplex, device.id]);
+        await db.query('UPDATE devices SET name=$1, active=1, token=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, digest(secret), color, duplex, device.id]);
       } else {
-        await db.query('UPDATE devices SET name=$1, active=1, heartbeat=$2, color=$3, duplex=$4 WHERE id=$5', [printerName, now(), color, duplex, device.id]);
+        await db.query('UPDATE devices SET name=$1, active=1, color=$2, duplex=$3 WHERE id=$4', [printerName, color, duplex, device.id]);
       }
       Object.assign(device, { name: printerName, active: 1, color, duplex });
     }
-    deviceMetadata.set(device.id, { is_paused: 0, status_note: 'Ready' });
+    deviceMetadata.set(device.id, { is_paused: 0 });
 
-    const serverUrl = process.env.PUBLIC_BASE_URL || (req.headers.host ? `https://${req.headers.host}` : `http://localhost:${process.env.PORT || 3000}`);
-
-    // If running on a local Windows machine, update local connector configuration and launch
-    if (process.platform === 'win32') {
+    // When the owner is on the server PC itself, configure and start its connector directly.
+    let launched = false;
+    if (local) {
       try {
-        const connectorRoot = join(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
+        const connectorRoot = connectorRootPath();
         mkdirSync(connectorRoot, { recursive: true });
         const settingsPath = join(connectorRoot, 'settings.json');
-        let existingSumatra = '', existingToken = '';
-        try {
-          if (existsSync(settingsPath)) {
-            const raw = readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '').trim();
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              existingSumatra = parsed.Sumatra || '';
-              existingToken = parsed.Token || '';
-            }
-          }
-        } catch {}
+        const existing = readConnectorSettings();
+        const existingToken = existing.Token || '';
 
         writeFileSync(settingsPath, JSON.stringify({
           Url: serverUrl,
           Token: secret || existingToken,
           Printer: printerName,
-          Sumatra: existingSumatra,
+          Sumatra: existing.Sumatra || '',
           LastUpdated: new Date().toISOString()
         }, null, 2), 'utf8');
 
@@ -353,6 +367,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         });
         if (child.pid) {
           writeFileSync(pidFile, String(child.pid), 'utf8');
+          launched = true;
         }
         child.unref();
       } catch (err) {
@@ -361,6 +376,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     }
 
     await audit(db, req.user.id, 'device.autoconnected', device.id);
+    const caps = `${device.color ? 'Colour' : 'Black & white only'} · ${device.duplex ? 'two-sided' : 'one-sided'} jobs`;
     res.json({
       ok: true,
       id: device.id,
@@ -370,7 +386,13 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       printer: printerName,
       color: Boolean(device.color),
       duplex: Boolean(device.duplex),
-      message: `${printerName} connected successfully! ${device.color ? 'Colour' : 'Black & white only'} · ${device.duplex ? 'two-sided' : 'one-sided'} jobs.`
+      launched,
+      setup: !launched && secret ? connectorSetup(serverUrl, secret, printerName) : null,
+      message: launched
+        ? `${printerName} linked. The connector is starting on this PC; the printer shows online once it checks in. ${caps}.`
+        : secret
+          ? `${printerName} added. Run the SmartPrint connector on your shop PC with the key shown below. The printer shows online once it checks in.`
+          : `${printerName} is already linked and online.`
     });
   });
 
@@ -379,11 +401,12 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(d => {
       const meta = deviceMetadata.get(d.id) || {};
-      const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 90000));
+      // Same 3-minute window the dashboard and job routing use.
+      const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000));
       return {
         ...d,
         is_paused: meta.is_paused ?? 0,
-        status_note: meta.status_note ?? (meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline')
+        status_note: meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline · connector not running'
       };
     }));
   });
@@ -395,9 +418,9 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
       id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0
     ]);
-    deviceMetadata.set(id, { is_paused: 0, status_note: 'Ready' });
+    deviceMetadata.set(id, { is_paused: 0 });
     await audit(db, req.user.id, 'device.paired', id);
-    res.status(201).json({ id, token: secret });
+    res.status(201).json({ id, token: secret, setup: connectorSetup(serverUrlFor(req, isLocalRequest(req)), secret, name) });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {

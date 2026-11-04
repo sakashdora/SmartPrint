@@ -5,6 +5,30 @@ export async function paymentsPage({ api, workspace, escape, notify }) {
   workspace(`<div class="workhead"><div><h1>Your shop’s UPI payments</h1><p class="muted">Receive payments directly through your PhonePe, Google Pay, Paytm or bank UPI ID.</p></div></div><section class="panel"><p class="notice-inline">${saved ? 'UPI is configured for your shop. Customers can pay your account using their preferred UPI app.' : 'Add your shop’s UPI ID to enable QR payments at customer checkout.'}</p><form id="upi-settings"><label class="field">Shop UPI ID<input name="upi_id" placeholder="yourname@bank" autocapitalize="none" spellcheck="false" value="${escape(saved?.upi_id || '')}" required maxlength="264"></label><label class="field">Account holder’s name<input name="payee" value="${escape(saved?.payee || '')}" required maxlength="100"></label><p class="muted">Copy the UPI ID linked to your shop’s receiving account from your payment app. Enter the account name customers should check before paying. Never enter a UPI PIN, OTP or password here.</p><button class="primary">Save UPI details</button></form><p class="muted">SmartPrint generates an order-specific QR with your UPI ID and the exact amount. No payment gateway account is required. Check the credit in your own bank or UPI app before confirming payment. A customer’s reference or screenshot is not payment verification.</p></section>`, 'payments');
   document.querySelector('#upi-settings').onsubmit = async event => { event.preventDefault(); const button = event.submitter; button.disabled = true; try { await api('/api/owner/payments', { method: 'PUT', body: Object.fromEntries(new FormData(event.target)) }); notify('UPI details saved. Existing orders keep their original payment account.'); await paymentsPage({ api, workspace, escape, notify }); } catch (error) { notify(error.message); } finally { button.disabled = false; } };
 }
+// The one-time connector key for a printer added from a browser that is not on the shop PC. Kept
+// across re-renders until dismissed, because the key cannot be shown again.
+let pendingSetup = null;
+function setupPanel(escape) {
+  if (!pendingSetup) return '';
+  const s = pendingSetup;
+  return `<section class="panel notice-inline" id="connector-setup">
+    <h2>Finish connecting “${escape(s.printer)}” on your shop PC</h2>
+    <p class="muted">This printer stays <strong>offline</strong> until the SmartPrint connector runs on the Windows PC the printer is plugged into (USB) or shares a network with (WiFi). Copy this key now: it is shown only once.</p>
+    <ol class="muted small">
+      <li>On the shop PC, install the printer's Windows driver and print a Windows test page.</li>
+      <li>Install Node.js 24 and copy the SmartPrint folder to the PC.</li>
+      <li>Open Command Prompt in the SmartPrint folder and run:</li>
+    </ol>
+    <pre style="white-space: pre-wrap; word-break: break-all; user-select: all;">${escape(s.command)}</pre>
+    <p class="muted small">Server: ${escape(s.url)} · Printer name: ${escape(s.printer)} · Device key: <code style="user-select: all;">${escape(s.token)}</code></p>
+    <p class="muted small">The connector saves these settings and picks the matching Windows printer (for example “HP LaserJet 1020”) automatically. Next time, just run <code>start-connector.bat</code>.</p>
+    <div class="actions">
+      <button class="secondary small" id="copy-connector-command">Copy command</button>
+      <button class="secondary small" id="dismiss-connector-setup">I've saved it</button>
+    </div>
+  </section>`;
+}
+
 export async function printersPage({ api, workspace, escape, notify }) {
   // Proactively check local Windows PC bridge (auto-syncs local printers if local service is present)
   try {
@@ -40,6 +64,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
       <span class="badge ${onlineCount > 0 ? 'active' : 'pending'}">${onlineCount} of ${activeCount} Online</span>
     </div>
   </div>
+
+  ${setupPanel(escape)}
 
   <section class="panel scanner-panel">
     <div class="panel-heading">
@@ -123,26 +149,23 @@ export async function printersPage({ api, workspace, escape, notify }) {
         <span class="muted small">Click any printer to link it instantly to your shop</span>
       </div>
       <div class="quick-presets-grid">
-        <div class="preset-card is-popular">
+        <div class="preset-card">
           <div>
             <div class="preset-header">
               <span class="preset-icon">🖨️</span>
               <div>
-                <div class="preset-name">Brother DCP-T820DW Printer</div>
-                <span class="chip chip-gold">Recommended for your shop</span>
+                <div class="preset-name">Brother DCP / HL / MFC</div>
+                <span class="chip">Brother Series</span>
               </div>
             </div>
-            <p class="muted small">Supports USB cable (USB001) and WiFi network printing with auto double-sided.</p>
+            <p class="muted small">Ink tank and laser printers via USB cable or WiFi network.</p>
             <div class="preset-tags">
-              <span class="chip">🔌 USB001</span>
-              <span class="chip">📶 WiFi WSD</span>
-              <span class="chip">Full Colour</span>
-              <span class="chip">Auto-Duplex</span>
+              <span class="chip">USB / WiFi</span>
+              <span class="chip">B&amp;W / Colour</span>
+              <span class="chip">A4 Standard</span>
             </div>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
-            <button class="primary small" data-autoconnect="Brother DCP-T820DW Printer (Copy 1) USB" data-wifi="false" data-wired="true">🔌 1-Click Connect Brother (USB Cable)</button>
-            <button class="secondary small" data-autoconnect="Brother DCP-T820DW Printer" data-wifi="true" data-wired="false">📶 Connect Brother (WiFi / Network)</button>
           </div>
+          <button class="primary small" data-autoconnect="Brother Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Brother</button>
         </div>
 
         <div class="preset-card">
@@ -154,14 +177,14 @@ export async function printersPage({ api, workspace, escape, notify }) {
                 <span class="chip">HP Series</span>
               </div>
             </div>
-            <p class="muted small">High-speed laser &amp; inkjet printing via USB cable or wireless office network.</p>
+            <p class="muted small">LaserJet (1020, P1108, M1005 …), DeskJet, Ink Tank &amp; Smart Tank via USB cable or WiFi network.</p>
             <div class="preset-tags">
               <span class="chip">USB / WiFi</span>
               <span class="chip">B&amp;W / Colour</span>
               <span class="chip">A4 Standard</span>
             </div>
           </div>
-          <button class="primary small" data-autoconnect="HP LaserJet Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect HP</button>
+          <button class="primary small" data-autoconnect="HP Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect HP</button>
         </div>
 
         <div class="preset-card">
@@ -180,7 +203,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
               <span class="chip">A4 &amp; Cards</span>
             </div>
           </div>
-          <button class="primary small" data-autoconnect="Canon PIXMA Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect Canon</button>
+          <button class="primary small" data-autoconnect="Canon Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Canon</button>
         </div>
 
         <div class="preset-card">
@@ -199,7 +222,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
               <span class="chip">Eco Tank</span>
             </div>
           </div>
-          <button class="primary small" data-autoconnect="Epson EcoTank Series" data-wifi="true" data-wired="true">⚡ 1-Click Connect Epson</button>
+          <button class="primary small" data-autoconnect="Epson Printer" data-wifi="true" data-wired="true">⚡ 1-Click Connect Epson</button>
         </div>
       </div>
     </div>
@@ -225,7 +248,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
             ${!d.active ? 'Revoked' : d.is_paused ? 'Paused' : isOnline ? 'Online & Ready' : 'Offline'}
           </span>
         </div>
-        <p class="muted small">${isOnline ? `Last seen ${secondsAgo}s ago · ${escape(d.status_note || 'Ready')}` : 'Ready to print'}</p>
+        <p class="muted small">${isOnline ? `Last seen ${secondsAgo}s ago · ${escape(d.status_note || 'Ready')}` : d.active ? (d.heartbeat ? `Offline · last seen ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on the shop PC.` : 'Waiting for the SmartPrint connector on the shop PC to check in.') : 'Disconnected'}</p>
         <div class="capability-tags">
           <span class="chip">A4 Standard</span>
           <span class="chip">${d.color ? 'Full Colour' : 'Black & White'}</span>
@@ -245,7 +268,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
     <p class="muted">Generate a device credential for a custom or network printer attached to your Windows PC.</p>
     <form id="device-form">
       <label class="field">Printer name
-        <input name="name" placeholder="e.g. Brother DCP-T820DW Printer or HP LaserJet" maxlength="100" required>
+        <input name="name" placeholder="Exact Windows printer name, e.g. HP LaserJet 1020" maxlength="100" required>
       </label>
       <div class="fields-row">
         <label class="check"><input type="checkbox" name="color"> Supports Colour</label>
@@ -256,6 +279,16 @@ export async function printersPage({ api, workspace, escape, notify }) {
     <div id="device-secret"></div>
   </section>`, 'printers');
 
+  document.querySelector('#copy-connector-command')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(pendingSetup?.command || ''); notify('Connector command copied.'); }
+    catch { notify('Select the command and copy it manually.'); }
+  });
+  document.querySelector('#dismiss-connector-setup')?.addEventListener('click', () => {
+    pendingSetup = null;
+    document.querySelector('#connector-setup')?.remove();
+  });
+  const afterConnect = res => { if (res?.setup) pendingSetup = res.setup; };
+
   document.querySelectorAll('[data-autoconnect]').forEach(button => button.onclick = async () => {
     button.disabled = true;
     button.textContent = 'Connecting...';
@@ -265,7 +298,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
         method: 'POST',
         body: { name, isWifi: button.dataset.wifi === 'true', isWired: button.dataset.wired === 'true' }
       });
-      notify(res.message || `${name} connected successfully!`);
+      afterConnect(res);
+      notify(res.message || `${name} added.`);
       await printersPage({ api, workspace, escape, notify });
     } catch (error) {
       notify(error.message);
@@ -303,7 +337,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
           method: 'POST',
           body: { name, isWired: true, isWifi: false }
         });
-        notify(res.message || `${name} connected successfully!`);
+        afterConnect(res);
+        notify(res.message || `${name} added.`);
         await printersPage({ api, workspace, escape, notify });
       }
     } catch (err) {
@@ -315,7 +350,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
   document.querySelector('#scan-trigger-usb')?.addEventListener('click', scanUsb);
 
   const scanWifi = async () => {
-    const input = window.prompt('Enter your WiFi printer IP address or name (e.g. 192.168.1.100 or Brother DCP-T820DW):', 'Brother DCP-T820DW (WiFi)');
+    const input = window.prompt('Enter your printer name as shown in Windows "Printers & scanners" (e.g. HP LaserJet 1020 or Canon G3010):', '');
     if (input && input.trim()) {
       const name = input.trim();
       try {
@@ -323,7 +358,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
           method: 'POST',
           body: { name, isWifi: true, isWired: false }
         });
-        notify(res.message || `${name} connected successfully!`);
+        afterConnect(res);
+        notify(res.message || `${name} added.`);
         await printersPage({ api, workspace, escape, notify });
       } catch (err) {
         notify(err.message);
@@ -344,11 +380,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
         method: 'POST',
         body: { name: data.get('name'), color: data.has('color'), duplex: data.has('duplex') }
       });
-      document.querySelector('#device-secret').innerHTML = `
-        <div class="notice-inline">
-          <strong>✓ ${escape(data.get('name'))} paired successfully!</strong> Ready to receive print jobs and test prints.
-        </div>`;
-      notify('Device paired successfully.');
+      afterConnect(device);
+      notify(`${data.get('name')} added. Run the connector on your shop PC to bring it online.`);
       await printersPage({ api, workspace, escape, notify });
     } catch (error) {
       notify(error.message);

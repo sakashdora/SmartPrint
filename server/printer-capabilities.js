@@ -14,6 +14,35 @@ const script = [
   'ConvertTo-Json -Compress -InputObject $out'
 ].join('\n');
 
+// Software printers that accept a job but never put paper out. Picking one of these as the fallback
+// printer makes jobs "print" successfully while nothing comes out.
+const VIRTUAL_NAME = /OneNote|Fax|XPS|PDF|PaperPort|Image Printer|AnyDesk|TeamViewer|Snagit|Send To|CutePDF|doPDF|novaPDF|Bullzip|PDFCreator|Foxit|Nitro|Print to|Document Writer|ePrint/i;
+const VIRTUAL_PORT = /^(nul:?|PORTPROMPT:|FILE:|XPSPort:|SHRFAX:|PDF.*|.*Writer Port.*|AnyDesk.*)$/i;
+export function isVirtualPrinter({ name = '', port = '', driver = '' } = {}) {
+  return VIRTUAL_NAME.test(name) || VIRTUAL_NAME.test(driver) || VIRTUAL_PORT.test(String(port).trim());
+}
+
+// Port naming used by Windows and the vendor port monitors (HP, Brother, Canon, Epson).
+export function classifyConnection({ name = '', port = '', driver = '' } = {}) {
+  const p = String(port).trim();
+  if (isVirtualPrinter({ name, port: p, driver })) return { connectionType: 'Virtual / PDF', isWifi: false, isWired: false };
+  if (/^(USB|DOT4|LPT|COM)\d*/i.test(p) || /^HPUSB|usb/i.test(p) || /\busb\b/i.test(name)) return { connectionType: 'Wired USB Cable', isWifi: false, isWired: true };
+  if (/^(WSD|TCP|IP_|NPI|HP[0-9A-F]{6}|BRN|BRW|CNB|EP[0-9A-F]{6})/i.test(p) || /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(p) || /^https?:/i.test(p) || /wifi|wireless|network/i.test(name)) {
+    return { connectionType: 'WiFi / Wireless Network', isWifi: true, isWired: false };
+  }
+  return { connectionType: 'Local Spooler', isWifi: false, isWired: false };
+}
+
+// Display-only guess from the model name, used until the driver is probed. It errs on "no": a mono
+// laser such as the HP LaserJet 1020 must never be advertised as colour or two-sided.
+export function guessCapabilities(name = '', driver = '') {
+  const text = `${name} ${driver}`;
+  const mono = /mono|black|\bB&?W\b/i.test(text) || (/laser|LBP|HL-|\bML-|SCX|imageCLASS/i.test(text) && !/colou?r|\bCP\d|\bCM\d|\bM[2-4]5\d|\bM[2-4]8\d|\bM47\d|\bMFC-L3|\bHL-L3|\bDCP-L3/i.test(text));
+  const color = !mono && /colou?r|DeskJet|OfficeJet|ENVY|Ink ?Tank|Smart ?Tank|PIXMA|MAXIFY|EcoTank|Epson|Photo|\bDCP-T|\bMFC-T|\bDCP-J|\bMFC-J|\bG\d{4}\b|\bL\d{3,4}\b/i.test(text);
+  const duplex = /duplex/i.test(text) || /\d+[a-z]*d[nw]?\b/i.test(name);
+  return { color, duplex };
+}
+
 export async function probePrinterCapabilities(names) {
   const list = [...new Set((Array.isArray(names) ? names : [names]).map(n => String(n ?? '').trim()).filter(Boolean))].slice(0, 50);
   const result = new Map();
