@@ -4,7 +4,7 @@ import { mkdir, writeFile, unlink, readFile, readdir, stat } from 'node:fs/promi
 import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus } from './sumatra-helper.js';
+import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs } from './sumatra-helper.js';
 import { probePrinterCapabilities, classifyConnection, guessCapabilities } from '../server/printer-capabilities.js';
 import { startBridge, BRIDGE_PORT } from './local-bridge.js';
 
@@ -467,6 +467,10 @@ const heartbeat = setInterval(() => {
     });
 }, 10000);
 
+// Old SmartPrint jobs still waiting in a Windows queue would all print when a cable is plugged back in.
+const clearStale = () => clearStaleConnectorJobs(root, { log }).catch(() => 0);
+await clearStale();
+const staleCleaner = setInterval(clearStale, 10 * 60000);
 await scanAndReportLocalPrinters();
 const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
 
@@ -520,3 +524,4 @@ while (running) {
 await preparing;
 clearInterval(heartbeat);
 clearInterval(printerScanner);
+clearInterval(staleCleaner);

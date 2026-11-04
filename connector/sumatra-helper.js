@@ -304,30 +304,76 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
     throw new Error(`Could not print document to "${targetPrinter}". No working print engine available.`);
   }
 
-  // Post-submission verification: verify spooler does not report immediate error
-  if (process.platform === 'win32') {
-    try {
-      const psCheck = 'ConvertTo-Json -Compress -InputObject @(Get-PrintJob -PrinterName $env:SMARTPRINT_TARGET -ErrorAction SilentlyContinue | Select-Object Id, DocumentName, @{ n = "JobStatus"; e = { [string]$_.JobStatus } })';
-      const { stdout: jobOut } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCheck], { timeout: 10000, windowsHide: true, env: { ...process.env, SMARTPRINT_TARGET: targetPrinter } });
-      if (jobOut && jobOut.trim()) {
-        const jobs = JSON.parse(jobOut);
-        const list = (Array.isArray(jobs) ? jobs : [jobs]).filter(Boolean);
-        const fileName = pdfPath.split(/[\\/]/).pop().toLowerCase();
-        const failing = j => j.JobStatus && /Error|Blocked|Offline/i.test(String(j.JobStatus));
-        const ownJob = list.find(j => String(j.DocumentName || '').toLowerCase().includes(fileName));
-        const stuck = list.find(j => j !== ownJob && failing(j));
-        if (ownJob && failing(ownJob)) {
-          throw new Error(`Printer "${targetPrinter}" reported spooler error: ${ownJob.JobStatus}`);
-        }
-        if (stuck) {
-          // An older failed job at the head of the Windows queue blocks every job behind it.
-          throw new Error(`Printer "${targetPrinter}" reported spooler error: an earlier Windows print job ("${stuck.DocumentName || stuck.Id}") is stuck with status ${stuck.JobStatus}. Clear the printer queue in Windows, then retry.`);
-        }
-      }
-    } catch (spoolErr) {
-      if (spoolErr.message.includes('reported spooler error')) throw spoolErr;
-    }
-  }
+  // Windows accepts a job even when the printer is unplugged or off, and would print it whenever the
+  // cable is connected again, long after the owner gave up on it. Wait until the printer takes the job;
+  // if it does not, take the job back out of the Windows queue and report the failure.
+  if (process.platform === 'win32') await waitForPrinterToTakeJob(targetPrinter, pdfPath);
 
   return { method: printMethod, printer: targetPrinter };
+}
+
+const LIST_JOBS = 'ConvertTo-Json -Compress -InputObject @(Get-PrintJob -PrinterName $env:SMARTPRINT_TARGET -ErrorAction Stop | Select-Object Id, DocumentName, PagesPrinted, @{ n = "JobStatus"; e = { [string]$_.JobStatus } }, @{ n = "Submitted"; e = { $_.SubmittedTime.ToUniversalTime().ToString("o") } })';
+async function listJobs(printerName) {
+  const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', LIST_JOBS], { timeout: 15000, windowsHide: true, env: { ...process.env, SMARTPRINT_TARGET: printerName } });
+  const parsed = JSON.parse(stdout.trim() || '[]');
+  return (Array.isArray(parsed) ? parsed : [parsed]).filter(Boolean);
+}
+async function removeJob(printerName, id) {
+  await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Remove-PrintJob -PrinterName $env:SMARTPRINT_TARGET -ID ([int]$env:SMARTPRINT_JOB) -Confirm:$false -ErrorAction Stop'], { timeout: 15000, windowsHide: true, env: { ...process.env, SMARTPRINT_TARGET: printerName, SMARTPRINT_JOB: String(id) } });
+}
+
+// Pure decision for one poll of the Windows queue, so it can be tested without a printer.
+// Returns 'taken' (left the queue or started printing), 'wait', 'cancel' (the printer never started it).
+export function spoolerVerdict(jobs, fileName, { idleMs, idleLimit }) {
+  const own = jobs.find(j => String(j.DocumentName || '').toLowerCase().includes(fileName.toLowerCase()));
+  if (!own) return { verdict: 'taken' };
+  // An unplugged USB printer shows "Error, Printing": the spooler tried the port and nothing was printed.
+  const problem = status => /Error|Offline|Blocked|Paper|Intervention|Paused/i.test(String(status));
+  const progressing = j => Number(j.PagesPrinted) > 0 || (/Printing|Printed|Complete/i.test(String(j.JobStatus)) && !problem(j.JobStatus));
+  if (progressing(own)) return { verdict: 'taken' };
+  // Another job is printing ahead of ours: the printer is working, keep waiting.
+  const busy = jobs.some(j => j !== own && progressing(j));
+  if (busy) return { verdict: 'wait', busy: true, own };
+  if (idleMs >= idleLimit) return { verdict: 'cancel', own };
+  return { verdict: 'wait', own };
+}
+
+export async function waitForPrinterToTakeJob(printerName, pdfPath, { idleLimit = 90000, maxWait = 900000, interval = 3000 } = {}) {
+  const fileName = pdfPath.split(/[\\/]/).pop();
+  const started = Date.now();
+  let idleSince = Date.now(), failures = 0, last;
+  while (Date.now() - started < maxWait) {
+    let jobs;
+    try { jobs = await listJobs(printerName); failures = 0; }
+    catch { if (++failures >= 5) return { verdict: 'unknown' }; await new Promise(r => setTimeout(r, interval)); continue; }
+    last = spoolerVerdict(jobs, fileName, { idleMs: Date.now() - idleSince, idleLimit });
+    if (last.verdict === 'taken') return last;
+    if (last.busy) idleSince = Date.now();
+    if (last.verdict === 'cancel') break;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  const id = last?.own?.Id;
+  let removed = false;
+  if (id != null) { try { await removeJob(printerName, id); removed = true; } catch {} }
+  throw new Error(`Printer "${printerName}" did not start this job (${last?.own?.JobStatus || 'waiting'}): it may be unplugged, switched off or out of paper. ${removed ? 'The job was removed from the Windows queue so it cannot print later by surprise.' : 'Remove it from the Windows print queue before reconnecting the printer.'} Fix the printer, then retry the order.`);
+}
+
+// Jobs this connector submitted earlier that are still waiting in a Windows queue (for example sent
+// while the printer was unplugged, by an older connector version or before a crash). Left there they
+// all print the moment the printer is connected again.
+export async function clearStaleConnectorJobs(connectorRoot, { olderThanMs = 15 * 60000, log = console.log } = {}) {
+  if (process.platform !== 'win32') return 0;
+  const marker = String(connectorRoot).toLowerCase().replace(/\//g, '\\');
+  let removed = 0;
+  for (const p of await getWindowsPrinters()) {
+    let jobs = [];
+    try { jobs = await listJobs(p.Name); } catch { continue; }
+    for (const j of jobs) {
+      const doc = String(j.DocumentName || '').toLowerCase();
+      const age = Date.now() - Date.parse(j.Submitted || 0);
+      if (!doc.startsWith(marker) || !(age > olderThanMs) || /Printing/i.test(String(j.JobStatus))) continue;
+      try { await removeJob(p.Name, j.Id); removed++; log(`[Queue] Removed a stale SmartPrint job from the Windows queue of "${p.Name}" (submitted ${Math.round(age / 60000)} min ago).`); } catch {}
+    }
+  }
+  return removed;
 }

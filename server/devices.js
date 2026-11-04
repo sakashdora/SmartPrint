@@ -171,6 +171,33 @@ export async function scanWindowsPrinters() {
 
 export const deviceMetadata = new Map();
 
+const BACKLOG_AGE_MS = 10 * 60000, STALE_TEST_MS = 5 * 60000;
+// A printer that checks in after being offline (connector restarted, cable or key fixed) would otherwise
+// print every order queued in the meantime, nonstop. Old diagnostic test pages are cancelled; if paid
+// customer jobs waited longer than 10 minutes, the printer is paused and the owner decides.
+export async function holdBacklog(db, device) {
+  const testCutoff = new Date(Date.now() - STALE_TEST_MS).toISOString();
+  const staleTests = await db.query(
+    "UPDATE orders SET status='cancelled', deleted_at=$1 WHERE shop_id=$2 AND status='queued' AND amount=0 AND options LIKE '%SmartPrint_Diagnostic_Test.pdf%' AND created<$3 RETURNING id",
+    [now(), device.shop_id, testCutoff]
+  );
+  const [{ count }] = await db.query(
+    "SELECT COUNT(*) AS count FROM orders WHERE shop_id=$1 AND status='queued' AND payment='paid' AND created<$2",
+    [device.shop_id, new Date(Date.now() - BACKLOG_AGE_MS).toISOString()]
+  );
+  const waiting = Number(count);
+  if (!waiting) return { cancelledTests: staleTests.length, held: 0 };
+  deviceMetadata.set(device.id, { ...(deviceMetadata.get(device.id) || {}), is_paused: 1, status_note: `Paused: ${waiting} older job${waiting === 1 ? '' : 's'} waiting` });
+  await createNotification(db, {
+    shopId: device.shop_id,
+    eventType: 'print.backlog_held',
+    title: `${device.name} paused: ${waiting} job${waiting === 1 ? '' : 's'} waited while it was offline`,
+    body: `Check the print queue and cancel anything that is no longer needed, then press Resume on the Printers page to print the rest.${staleTests.length ? ` ${staleTests.length} old test page${staleTests.length === 1 ? ' was' : 's were'} cancelled.` : ''}`,
+    data: { deviceId: device.id, waiting }
+  });
+  return { cancelledTests: staleTests.length, held: waiting };
+}
+
 // True only when the owner's browser runs on the same computer as this server process, so the server
 // may read that computer's printers and start its connector. A request relayed by a proxy or tunnel
 // (Render, cloudflared, ngrok) carries forwarding headers or a public Host and is treated as remote:
@@ -287,7 +314,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       return {
         ...d,
         is_paused: meta.is_paused ?? 0,
-        status_note: meta.is_paused ? 'Paused by owner' : isOnline ? 'Ready' : 'Offline · connector not running'
+        status_note: meta.is_paused ? (meta.status_note || 'Paused by owner') : isOnline ? 'Ready' : 'Offline · connector not running'
       };
     }));
   });
@@ -484,7 +511,11 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   app.use('/api/device', async (req, res, next) => {
     const [device] = await db.query('SELECT * FROM devices WHERE token=$1 AND active=1', [digest(req.headers.authorization?.replace(/^Bearer /, '') || '')]);
     if (!device) throw fail(401, 'Device credential is invalid or revoked.'); req.device = device;
-    await db.query('UPDATE devices SET heartbeat=$1 WHERE id=$2', [now(), device.id]); next();
+    const wasOffline = !device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000;
+    await db.query('UPDATE devices SET heartbeat=$1 WHERE id=$2', [now(), device.id]);
+    // Coming back online must not print everything that piled up meanwhile without the owner seeing it.
+    if (wasOffline) await holdBacklog(db, device).catch(err => console.warn('[SmartPrint Devices] Backlog check failed:', err.message));
+    next();
   });
   app.post('/api/device/heartbeat', async (req, res) => {
     // Respond immediately so device heartbeats are fast (<5ms) and never timeout
