@@ -46,7 +46,7 @@ function environmentLabel() {
 }
 
 function header() {
-  const isWorkspace = me ? (me.role === 'admin' ? '#admin' : (me.role === 'customer' ? '#track' : '#owner')) : '#workspace';
+  const isWorkspace = me ? (me.role === 'admin' ? '#admin' : (me.role === 'customer' ? '#edu' : '#owner')) : '#workspace';
   return `<header class="home-floating-header-wrapper">
     <div class="home-floating-nav">
       <div class="nav-brand-slot">${brand()}</div>
@@ -60,7 +60,7 @@ function header() {
       <div class="nav-right-actions">
         <a href="${isWorkspace}" class="nav-workspace-btn">
           ${icon('user')}
-          <span>${me ? (me.role === 'customer' ? 'My Print Orders →' : 'Go to Workspace →') : 'Workspace sign in →'}</span>
+          <span>${me ? (me.role === 'customer' ? 'My Institution →' : 'Go to Workspace →') : 'Workspace sign in →'}</span>
         </a>
         <button id="home-mobile-toggle" class="home-mobile-menu-btn" aria-label="Toggle navigation">
           ${icon('menu')}
@@ -74,7 +74,7 @@ function header() {
         <a href="#how-it-works" class="mobile-nav-link">${icon('file')} How it works</a>
         <a href="#for-shop-owners" class="mobile-nav-link">${icon('shop')} For shop owners</a>
         <a href="#support" class="mobile-nav-link">${icon('support')} Support</a>
-        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? (me.role === 'customer' ? 'My Print Orders' : 'Workspace') : 'Workspace sign in'}</a>
+        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? (me.role === 'customer' ? 'My Institution' : 'Workspace') : 'Workspace sign in'}</a>
       </nav>
     </div>
   </header>${environmentLabel()}`;
@@ -851,7 +851,7 @@ function auth(register = false) {
     </form>
     ${!register && health?.demo ? '<div class="notice-inline">Local demo environment active. Sign in with your registered account credentials.</div>' : ''}
     <p class="foot"><a href="${register ? '#login' : '#register'}">${register ? 'Already registered? Sign in' : 'New here? Register your shop'}</a></p>
-    <p class="foot">${register ? '<a href="#register-org">College, university or detailed application →</a>' : '<a href="#forgot-password">Forgot your password?</a> · <a href="#register-org">Register a college or university</a>'}</p>
+    <p class="foot">${register ? '<a href="#register-org">College, university or detailed application →</a>' : '<a href="#forgot-password">Forgot your password?</a> · <a href="#college-login">Student or staff? Sign in with College ID</a> · <a href="#register-org">Register a college or university</a>'}</p>
   </main>`);
 
   const togglePassBtn = document.querySelector('#auth-toggle-pass');
@@ -1008,9 +1008,9 @@ async function route() {
       }
     }
     const [viewName, viewArg] = view.split('/');
-    if (['register-org', 'verify-email', 'application', 'invite', 'forgot-password', 'reset-password', 'edu'].includes(viewName)) {
+    if (['register-org', 'verify-email', 'application', 'invite', 'forgot-password', 'reset-password', 'edu', 'college-login'].includes(viewName)) {
       const platformPages = await import('./platform.js');
-      return platformPages.orgPage(viewName, viewArg, { api, mount, escape, notify, me, route });
+      return platformPages.orgPage(viewName, viewArg, { api, mount, escape, notify, me, route, setMe: user => { me = user; } });
     }
     if (view === 'workspace' || view === 'login' || view === 'admin-login') {
       if (me && !me.mfaRequired) {

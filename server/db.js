@@ -2,10 +2,10 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
-export async function openDatabase({ url = process.env.DATABASE_URL, path = '.data/smartprint.sqlite' } = {}) {
+export async function openDatabase({ url = process.env.DATABASE_URL, path = process.env.SMARTPRINT_SQLITE_PATH || '.data/smartprint.sqlite' } = {}) {
   if (url) {
     let hasSmartprintSchema = true;
     const qualify = sql => hasSmartprintSchema ? sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2') : sql;
@@ -76,7 +76,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
             ['sessions', 'mfa', 'INTEGER NOT NULL DEFAULT 0'],
             ['devices', 'paused', 'INTEGER NOT NULL DEFAULT 0'],
             ['devices', 'paused_note', 'TEXT'],
-            ['shops', 'organization_id', 'TEXT']
+            ['shops', 'organization_id', 'TEXT'],
+            ['stored_objects', 'owner_id', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -131,6 +132,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN paused_note TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE shops ADD COLUMN organization_id TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE stored_objects ADD COLUMN owner_id TEXT;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

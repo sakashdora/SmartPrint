@@ -97,8 +97,16 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
   const requireSession = (req, res, next) => req.user ? next() : next(fail(401, 'Please sign in.'));
 
   app.post('/api/auth/login', async (req, res) => {
-    const email = String(req.body.email ?? '').trim().toLowerCase(), password = req.body.password;
-    await limitRate(db, 'login-account', email, 10, 900);
+    let email = String(req.body.email ?? '').trim().toLowerCase();
+    const password = req.body.password;
+    if (!email && req.body.institutionCode && req.body.collegeId) {
+      // Students and staff sign in with the institution code and their College ID; the id is only unique per institution.
+      const code = String(req.body.institutionCode).trim().toLowerCase().slice(0, 80), collegeId = String(req.body.collegeId).trim().slice(0, 40);
+      await limitRate(db, 'login-college-id', `${code}:${collegeId.toLowerCase()}`, 10, 900);
+      const [row] = await db.query("SELECT u.email FROM edu_profiles p JOIN organizations o ON o.id=p.org_id JOIN users u ON u.id=p.user_id WHERE o.slug=$1 AND o.status='active' AND LOWER(p.college_id)=LOWER($2)", [code, collegeId]);
+      email = row?.email ?? '';
+    }
+    await limitRate(db, 'login-account', email || 'unknown-college-id', 10, 900);
     const [user] = await db.query('SELECT * FROM users WHERE email=$1', [email]);
     const valid = typeof password === 'string' && password.length <= 128 && await checkPassword(password, user?.password ?? await getDummyHash());
     if (!user || !valid || (req.body.role && req.body.role !== user.role)) throw fail(401, 'Email, password or verification code is incorrect.');

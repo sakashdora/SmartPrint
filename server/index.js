@@ -19,6 +19,7 @@ import { requestLogger, logEvent } from './logger.js';
 import { applyMigrations } from './migrations.js';
 import { platformRoutes } from './platform.js';
 import { agentRoutes } from './agents.js';
+import { eduRoutes } from './edu.js';
 import { sweepAttempts } from './queue.js';
 import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
 
@@ -74,7 +75,7 @@ export async function createApp({ database, seed = true } = {}) {
     });
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/')) {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/')) {
       let origin = req.headers.origin;
       if (!origin && req.headers.referer) {
         try { origin = new URL(req.headers.referer).origin; } catch {}
@@ -122,7 +123,9 @@ export async function createApp({ database, seed = true } = {}) {
         }
       }
     }
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    // Institution users share campus network addresses, so their writes are limited per person instead of per address.
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/v2/edu/') && req.user) await limitRate(db, 'edu-mutations', req.user.id, 240);
     if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
     if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', req.ip, 40, 900);
     next();
@@ -642,6 +645,7 @@ export async function createApp({ database, seed = true } = {}) {
   });
   platformRoutes(app, { db, config });
   agentRoutes(app, { db, key });
+  eduRoutes(app, { db, key, config });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -674,6 +678,7 @@ export async function createApp({ database, seed = true } = {}) {
     // and audit are deliberately kept: they are financial evidence or dedupe records.
     await tx.query('DELETE FROM quotes WHERE expires<=$1', [new Date(Date.now() - 7 * 86400000).toISOString()]);
     await tx.query('DELETE FROM idempotency_keys WHERE expires<=$1', [now()]);
+    await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE expires<=$2 AND deleted_at IS NULL', [Buffer.alloc(0), now()]);
     await tx.query('DELETE FROM email_outbox WHERE created<=$1', [new Date(Date.now() - 14 * 86400000).toISOString()]);
     await tx.query('DELETE FROM auth_tokens WHERE expires<=$1', [new Date(Date.now() - 86400000).toISOString()]);
     await tx.query('DELETE FROM invitations WHERE expires<=$1 AND used_at IS NULL', [new Date(Date.now() - 30 * 86400000).toISOString()]);

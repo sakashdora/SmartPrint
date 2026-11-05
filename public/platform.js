@@ -4,7 +4,7 @@ const field = (label, name, { type = 'text', required = true, attrs = '', hint =
   `<label class="field">${label}<input name="${name}" type="${type}" ${required ? 'required' : ''} ${attrs}>${hint ? `<small class="muted">${hint}</small>` : ''}</label>`;
 const card = (eyebrow, title, body) => `<main class="auth panel"><span class="eyebrow">${eyebrow}</span><h1>${title}</h1>${body}</main>`;
 
-export async function orgPage(name, arg, { api, mount, escape, notify, me, route }) {
+export async function orgPage(name, arg, { api, mount, escape, notify, me, route, setMe }) {
   const done = (eyebrow, title, message, linkHtml = '<a href="#login">Sign in</a>') => mount(card(eyebrow, title, `<p class="muted">${escape(message)}</p><p class="foot">${linkHtml}</p>`));
 
   if (name === 'register-org') {
@@ -125,11 +125,12 @@ export async function orgPage(name, arg, { api, mount, escape, notify, me, route
 
   if (name === 'edu') {
     if (!me) { location.hash = 'login'; return; }
-    let ctx = null; try { ctx = await api('/api/v2/me'); } catch {}
-    const org = ctx?.organization;
-    mount(card('INSTITUTION WORKSPACE', escape(org?.name || 'Your institution'), `
-      <p class="muted">${org ? `You are signed in as <strong>${escape(org.role.replaceAll('_', ' '))}</strong>.` : 'Your account is not attached to an organization yet.'} The institution workspace (users, printers, policies and printing) is being built and will appear here.</p>
-      <p class="foot"><button class="secondary" id="logout">Sign out</button></p>`));
+    const workspace = await import('./edu.js');
+    return workspace.eduApp(arg, { api, mount, escape, notify, route });
+  }
+  if (name === 'college-login') {
+    const workspace = await import('./edu.js');
+    return workspace.collegeLogin({ api, mount, escape, notify, route, setMe });
   }
 }
 

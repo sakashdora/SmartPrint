@@ -54,6 +54,29 @@ export const migrations = [
       for (const table of ['agents', 'agent_credentials', 'printers', 'printer_pools', 'pool_members', 'stored_objects', 'print_jobs', 'print_attempts', 'queue_events', 'agent_health_events']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`);
     }
   }
+  ,
+  {
+    id: '0006_institutions_people',
+    description: 'Institution settings, campuses, departments, staff and student profiles',
+    async up(tx) {
+      for (const table of ['institution_settings', 'campuses', 'departments', 'edu_profiles']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`);
+      await tx.query('SELECT owner_id FROM stored_objects LIMIT 1');
+    }
+  }
+  ,
+  {
+    id: '0007_users_role_allows_customer',
+    description: 'users.role accepts the placeholder role used by institution accounts',
+    async up(tx, { postgres }) {
+      if (postgres) {
+        const rows = await tx.query("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid='smartprint.users'::regclass AND contype='c' AND conname='users_role_check'");
+        if (rows.length && !String(rows[0].def).includes("'customer'")) throw new Error("users_role_check does not allow 'customer'; run npm run migrate with the database owner login");
+      } else {
+        const [table] = await tx.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'");
+        if (table && !String(table.sql).includes("'customer'")) throw new Error("this SQLite file was created by an old version (users.role check without 'customer'); delete it or point SMARTPRINT_SQLITE_PATH at a new file");
+      }
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();
