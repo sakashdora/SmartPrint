@@ -279,16 +279,23 @@ export function agentRoutes(app, { db, key }) {
     const waitMs = Math.min(25, Math.max(0, Number(req.body.waitSeconds) || 0)) * 1000, deadline = Date.now() + waitMs;
     let aborted = false;
     req.on('close', () => { aborted = true; });
-    for (;;) {
-      const jobs = await claimJobs(db, req.agent, ids);
-      if (jobs.length || aborted || Date.now() >= deadline) return res.json({ jobs });
-      await new Promise(resolve => {
-        const done = () => { clearTimeout(timer); jobSignal.off('job', onJob); resolve(); };
-        const onJob = orgId => { if (!orgId || orgId === req.agent.org_id) done(); };
-        const timer = setTimeout(done, Math.min(5000, deadline - Date.now()));
-        jobSignal.on('job', onJob);
-      });
-    }
+    // Subscribe BEFORE looking for work: a job that arrives while the query is running must not be missed (it used to
+    // be, and the agent then waited out the 5 s timer; a slow database made that visible).
+    let pending = false, wake = null;
+    const onJob = orgId => { if (!orgId || orgId === req.agent.org_id) { pending = true; wake?.(); } };
+    jobSignal.on('job', onJob);
+    try {
+      for (;;) {
+        pending = false;
+        const jobs = await claimJobs(db, req.agent, ids);
+        if (jobs.length || aborted || Date.now() >= deadline) return res.json({ jobs });
+        if (pending) continue; // something arrived during the query: look again at once
+        await new Promise(resolve => {
+          const timer = setTimeout(() => { wake = null; resolve(); }, Math.min(5000, deadline - Date.now()));
+          wake = () => { clearTimeout(timer); wake = null; resolve(); };
+        });
+      }
+    } finally { jobSignal.off('job', onJob); }
   });
 
   const liveAttempt = async req => {
