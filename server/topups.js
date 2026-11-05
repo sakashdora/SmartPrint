@@ -4,6 +4,7 @@ import { requirePermission } from './tenant.js';
 import { auditV2 } from './orgs.js';
 import { policiesOf } from './edu.js';
 import { orgKey } from './storage.js';
+import { emitEvent } from './webhooks.js';
 import { encrypt, decrypt } from './security.js';
 import { creditStudent, debitStudent, ensureAccount, balanceOf } from './wallet.js';
 
@@ -23,8 +24,8 @@ const now = () => new Date().toISOString();
 const fail = (status, message, code) => Object.assign(new Error(message), { status, code });
 const apiBase = () => (process.env.RAZORPAY_API_BASE || 'https://api.razorpay.com').replace(/\/+$/, '');
 const MAX_TOPUP = 5_000_000; // ₹50,000
-const sealText = async (q, orgId, text) => { const s = encrypt(Buffer.from(text), await orgKey(q, orgId)); return JSON.stringify({ p: s.payload.toString('hex'), i: s.iv, t: s.tag }); };
-const openText = async (q, orgId, sealed) => { const o = JSON.parse(sealed); return decrypt({ payload: Buffer.from(o.p, 'hex'), iv: o.i, tag: o.t }, await orgKey(q, orgId)).toString(); };
+export const sealText = async (q, orgId, text) => { const s = encrypt(Buffer.from(text), await orgKey(q, orgId)); return JSON.stringify({ p: s.payload.toString('hex'), i: s.iv, t: s.tag }); };
+export const openText = async (q, orgId, sealed) => { const o = JSON.parse(sealed); return decrypt({ payload: Buffer.from(o.p, 'hex'), iv: o.i, tag: o.t }, await orgKey(q, orgId)).toString(); };
 const same = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
 const sign = (secret, data) => createHmac('sha256', secret).update(data).digest('hex');
 
@@ -45,6 +46,7 @@ async function loadSettings(q, orgId, { requireEnabled = true } = {}) {
 async function applyCapture(tx, { intent, paymentId, source }) {
   const credited = await creditStudent(tx, { orgId: intent.org_id, userId: intent.user_id, amountMinor: Number(intent.amount_minor), key: `gw:razorpay:${paymentId}`, kind: 'topup', actor: source, note: `Online top-up ${paymentId}` });
   await tx.query("UPDATE payment_intents SET state='captured', provider_payment_id=$1, captured_at=$2 WHERE id=$3 AND state<>'captured'", [paymentId, now(), intent.id]);
+  if (!credited.replay) await emitEvent(tx, intent.org_id, 'wallet.topup', { userId: intent.user_id, amountMinor: Number(intent.amount_minor), paymentId });
   return credited;
 }
 

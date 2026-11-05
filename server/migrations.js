@@ -149,6 +149,12 @@ export const migrations = [
     description: 'Operational alerts for institutions',
     async up(tx) { await tx.query('SELECT 1 FROM alerts LIMIT 1'); }
   }
+  ,
+  {
+    id: '0017_webhooks',
+    description: 'Outbound signed webhooks: endpoints and an outbox of deliveries',
+    async up(tx) { await tx.query('SELECT 1 FROM webhook_endpoints LIMIT 1'); await tx.query('SELECT 1 FROM webhook_deliveries LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

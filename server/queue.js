@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { token, digest } from './security.js';
 import { putObject, markObjectDeleted } from './storage.js';
 import { settleJob, releaseJob } from './wallet.js';
+import { emitEvent, publicEventName } from './webhooks.js';
 
 // Education print queue: jobs, fenced attempts and the rules that keep a job from printing twice.
 //
@@ -34,8 +35,11 @@ export const agentOnline = lastSeen => Boolean(lastSeen) && Date.now() - Date.pa
 // though its agent is alive. Real hardware showed this: an Offline Brother copy was still being offered work.
 export const printerUsable = printer => agentOnline(printer.agent_seen) && String(printer.device_status ?? '').toLowerCase() !== 'offline';
 
-const queueEvent = (tx, orgId, jobId, type, actor, data = {}) =>
-  tx.query('INSERT INTO queue_events (id,org_id,job_id,type,actor,data,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), orgId, jobId, type, actor, JSON.stringify(data), now()]);
+const queueEvent = async (tx, orgId, jobId, type, actor, data = {}) => {
+  await tx.query('INSERT INTO queue_events (id,org_id,job_id,type,actor,data,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), orgId, jobId, type, actor, JSON.stringify(data), now()]);
+  const publicName = publicEventName(type); // opaque ids only: no names, e-mail addresses or document titles
+  if (publicName) await emitEvent(tx, orgId, publicName, { jobId, ...(data.pages !== undefined ? { pages: data.pages } : {}) });
+};
 
 export async function ensureDefaultPool(tx, orgId) {
   const [existing] = await tx.query('SELECT id FROM printer_pools WHERE org_id=$1 AND is_default=1', [orgId]);

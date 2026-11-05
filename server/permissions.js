@@ -11,7 +11,7 @@ const P = {
     'institution.profile.edit', 'campuses.manage', 'departments.manage', 'users.read', 'users.create', 'users.import',
     'users.reset_password', 'policies.edit', 'pricing.edit', 'retention.edit', 'audit.read', 'reports.view_org',
     'agents.manage', 'agents.view_health', 'printers.manage', 'printers.pause', 'pools.manage', 'jobs.submit', 'jobs.view_own', 'jobs.cancel_own', 'jobs.view_queue', 'jobs.cancel_any',
-    'jobs.retry', 'jobs.resolve_uncertain', 'wallet.view_any', 'wallet.adjust', 'refunds.issue', 'payments.configure', 'support_access.approve'
+    'jobs.retry', 'jobs.resolve_uncertain', 'wallet.view_any', 'wallet.adjust', 'refunds.issue', 'payments.configure', 'integrations.manage', 'support_access.approve'
   ],
   department_admin: ['users.read', 'users.create', 'users.reset_password', 'reports.view_dept', 'jobs.submit', 'jobs.view_own', 'jobs.cancel_own', 'jobs.view_queue', 'printers.pause'],
   staff: ['jobs.submit', 'jobs.view_own', 'jobs.cancel_own', 'print.unlimited_official', 'documents.open_own'],

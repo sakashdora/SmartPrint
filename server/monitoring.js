@@ -3,6 +3,7 @@ import { agentOnline } from './queue.js';
 import { verifyLedger } from './wallet.js';
 import { sendMail } from './mailer.js';
 import { requirePermission } from './tenant.js';
+import { emitEvent } from './webhooks.js';
 
 // Operational alerts for institutions. Every check produces "findings" (kind + subject + message). A finding that is
 // new opens an alert row and e-mails the institution administrators once; one that stays true only refreshes the row
@@ -68,6 +69,7 @@ export async function applyFindings(db, org, findings) {
   for (const [key, row] of byKey) {
     if (!live.has(key) && !row.resolved_at) { await db.query('UPDATE alerts SET resolved_at=$1 WHERE id=$2', [now(), row.id]); resolved.push(row); }
   }
+  for (const f of opened) await emitEvent(db, org.id, 'alert.opened', { kind: f.kind, message: f.message });
   if (opened.length) {
     const to = await recipients(db, org.id);
     for (const r of to) await sendMail(db, { to: r.email, kind: 'alert', subject: `[SmartPrint] ${org.name}: ${opened.length} thing${opened.length > 1 ? 's' : ''} need attention`, text: `${opened.map(f => `- ${f.message}`).join('\n')}\n\nSign in to SmartPrint and open Alerts for details.` });
