@@ -81,6 +81,47 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
         catch (err) { notify(err.message); }
       };
     }
+    // Alerts, webhooks and sign-in sessions (each panel appears only for people allowed to use it).
+    const when = value => value ? new Date(value).toLocaleString() : '';
+    if (can('agents.view_health')) {
+      const alerts = await api('/api/v2/edu/alerts').catch(() => []);
+      const openAlerts = alerts.filter(a => !a.resolved);
+      document.querySelector('#policies').insertAdjacentHTML('beforebegin', `<section class="panel"><h2>Alerts</h2>
+        ${openAlerts.length ? `<ul>${openAlerts.map(a => `<li><strong>${escape(a.kind.replaceAll('_', ' '))}</strong>: ${escape(a.message)} <small class="muted">since ${escape(when(a.opened))}</small></li>`).join('')}</ul>` : '<p class="muted">Nothing needs attention. Alerts appear here (and are e-mailed to administrators) when a print PC goes quiet, printers are unavailable while work waits, a job is left uncertain, or the wallet check finds a problem.</p>'}
+        ${alerts.length > openAlerts.length ? `<details><summary>Earlier alerts</summary><ul>${alerts.filter(a => a.resolved).slice(0, 10).map(a => `<li>${escape(a.message)} <small class="muted">${escape(when(a.lastSeen))}</small></li>`).join('')}</ul></details>` : ''}</section>`);
+    }
+    if (can('integrations.manage')) {
+      const hooks = await api('/api/v2/edu/webhooks').catch(() => ({ events: [], endpoints: [] }));
+      document.querySelector('#policies').insertAdjacentHTML('afterend', `<section class="panel" id="webhooks"><h2>Webhooks</h2>
+        <p class="muted">Send events (job printed or failed, wallet top-ups, alerts) to your own system, for example an ERP. Each request is signed with a secret; the receiver must use https and be reachable from the internet. Events contain ids only, never names or documents.</p>
+        ${hooks.endpoints.length ? table(['Address', 'Events', 'Status', ''], hooks.endpoints.map(h => `<tr><td>${escape(h.url)}</td><td>${escape(h.events.join(', '))}</td><td>${escape(h.status)}</td><td><button class="secondary small" data-hook-test="${escape(h.id)}">Send test</button> <button class="secondary small" data-hook-toggle="${escape(h.id)}" data-status="${escape(h.status)}">${h.status === 'active' ? 'Disable' : 'Enable'}</button> <button class="secondary small" data-hook-rotate="${escape(h.id)}">New secret</button> <button class="secondary small" data-hook-log="${escape(h.id)}">Deliveries</button> <button class="secondary small" data-hook-delete="${escape(h.id)}">Delete</button></td></tr>`)) : '<p class="muted">No webhooks yet.</p>'}
+        <div id="hook-output"></div>
+        <form id="hook-form"><label class="field">Receiver address<input name="url" type="url" required maxlength="500" placeholder="https://erp.college.edu/smartprint"></label>
+        <fieldset class="field"><legend>Events</legend>${hooks.events.filter(e => e !== 'ping').map(e => `<label style="margin-right:14px"><input type="checkbox" name="event" value="${escape(e)}" ${['job.completed', 'job.failed', 'job.uncertain'].includes(e) ? 'checked' : ''}> ${escape(e)}</label>`).join('')}</fieldset>
+        <button class="primary">Add webhook</button></form></section>`);
+      const out = html => { document.querySelector('#hook-output').innerHTML = html; };
+      document.querySelector('#hook-form').onsubmit = async event => {
+        event.preventDefault();
+        const f = event.target, events = [...f.querySelectorAll('[name=event]:checked')].map(i => i.value);
+        try { const r = await api('/api/v2/edu/webhooks', { method: 'POST', body: { url: f.url.value.trim(), events } }); out(`<div class="notice-inline">Signing secret (shown once): <code>${escape(r.secret)}</code></div>`); f.reset(); }
+        catch (err) { notify(err.message); }
+      };
+      const hookAct = (attr, run) => act(`[${attr}]`, async el => { try { await run(el.getAttribute(attr)); } finally { el.disabled = false; } });
+      hookAct('data-hook-test', async id => { await api(`/api/v2/edu/webhooks/${id}/test`, { method: 'POST' }); notify('Test event queued. It is sent within a minute; check Deliveries.'); });
+      hookAct('data-hook-rotate', async id => { const r = await api(`/api/v2/edu/webhooks/${id}/rotate-secret`, { method: 'POST' }); out(`<div class="notice-inline">New signing secret (shown once; the old one no longer works): <code>${escape(r.secret)}</code></div>`); });
+      hookAct('data-hook-delete', async id => { if (confirm('Delete this webhook and its delivery history?')) { await api(`/api/v2/edu/webhooks/${id}`, { method: 'DELETE' }); await refresh(); } });
+      document.querySelectorAll('[data-hook-toggle]').forEach(b => b.onclick = async () => { try { await api(`/api/v2/edu/webhooks/${b.dataset.hookToggle}`, { method: 'PATCH', body: { status: b.dataset.status === 'active' ? 'disabled' : 'active' } }); await refresh(); } catch (err) { notify(err.message); } });
+      hookAct('data-hook-log', async id => { const rows = await api(`/api/v2/edu/webhooks/${id}/deliveries`); out(rows.length ? table(['Event', 'Result', 'Tries', 'Detail', 'When'], rows.map(r => `<tr><td>${escape(r.type)}</td><td>${escape(r.status)}</td><td>${r.attempts}</td><td>${escape(r.lastError || (r.lastStatus ? `HTTP ${r.lastStatus}` : ''))}</td><td>${escape(when(r.created))}</td></tr>`)) : '<p class="muted">No deliveries yet.</p>'); });
+    }
+    {
+      const sessions = await api('/api/auth/sessions').catch(() => []);
+      document.querySelector('main').insertAdjacentHTML('beforeend', `<section class="panel"><h2>Where you are signed in</h2>
+        ${table(['Device', 'Last active', ''], sessions.map(s => `<tr><td>${escape(s.device)}${s.current ? ' <strong>(this device)</strong>' : ''}</td><td>${escape(when(s.lastSeen || s.created))}</td><td>${s.current ? '' : `<button class="secondary small" data-session-end="${escape(s.handle)}">Sign out</button>`}</td></tr>`))}
+        ${sessions.length > 1 ? '<button class="secondary" id="end-others">Sign out all other devices</button>' : ''}
+        <p class="muted">Administrator sessions end automatically after an hour without activity.</p></section>`);
+      document.querySelectorAll('[data-session-end]').forEach(b => b.onclick = async () => { try { await api(`/api/auth/sessions/${b.dataset.sessionEnd}`, { method: 'DELETE' }); await refresh(); } catch (err) { notify(err.message); } });
+      document.querySelector('#end-others')?.addEventListener('click', async () => { try { const r = await api('/api/auth/sessions/revoke-others', { method: 'POST' }); notify(`Signed out ${r.revoked} other device(s).`); await refresh(); } catch (err) { notify(err.message); } });
+    }
     document.querySelector('#policies').onsubmit = async event => {
       event.preventDefault();
       const f = event.target, num = n => Number(f[n].value);
