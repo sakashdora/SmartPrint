@@ -1,0 +1,10 @@
+# Secret-scan configuration (gitleaks). The default rules stay on; the only exception is below.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public documentation values used as test vectors"
+# test/storage.test.js signs a request with the example credentials from AWS's published Signature V4 test suite
+# (access key AKIDEXAMPLE, secret ...EXAMPLEKEY) and checks the result against AWS's published signature. They are
+# public, belong to no account, and the test would be meaningless with different values.
+paths = ['''test/storage\.test\.js''']
