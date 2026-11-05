@@ -105,6 +105,28 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     const cap = v => v === null || v === undefined ? 'unknown' : v ? 'yes' : 'no';
     shell(`<section class="panel"><h2>Printers</h2><p class="muted">Colour and two-sided jobs only go to printers that report those abilities.</p>
       ${table(['Printer', 'Agent', 'Colour', 'Two-sided', 'State', ''], printers.map(p => `<tr><td>${escape(p.display_name)}</td><td>${escape(p.agent_name)}</td><td>${cap(p.cap_color)}</td><td>${cap(p.cap_duplex)}</td><td>${p.paused ? 'Paused' : p.online ? 'Online' : 'Offline'}</td><td><button class="secondary small" data-pause="${escape(p.id)}" data-paused="${p.paused}">${p.paused ? 'Resume' : 'Pause'}</button> <button class="secondary small" data-test="${escape(p.id)}">Test page</button></td></tr>`))}</section>`);
+    // Printer groups: which printers belong to a group and which departments may use it (no department = open to everyone).
+    const [pools, depts] = await Promise.all([api('/api/v2/edu/pools'), api('/api/v2/edu/departments').catch(() => [])]);
+    document.querySelector('main .panel').insertAdjacentHTML('afterend', `<section class="panel"><h2>Printer groups</h2>
+      <p class="muted">A group is a set of printers. Leave every department unticked to make a group open to everyone; tick departments to reserve it for them. Several departments can share a group, and a department can have several groups.</p>
+      ${pools.map(g => `<form class="pool" data-pool="${escape(g.id)}" style="border-top:1px solid #ddd;padding:10px 0"><strong>${escape(g.name)}</strong> <small class="muted">${g.departmentIds.length ? 'reserved for the ticked departments' : 'open to everyone'}</small>
+        <div><small class="muted">Printers</small><br>${printers.map(p => `<label style="margin-right:14px"><input type="checkbox" name="printer" value="${escape(p.id)}" ${g.printerIds.includes(p.id) ? 'checked' : ''}> ${escape(p.display_name)}</label>`).join('') || '<small class="muted">No printers yet.</small>'}</div>
+        ${depts.length ? `<div><small class="muted">Departments</small><br>${depts.map(d => `<label style="margin-right:14px"><input type="checkbox" name="dept" value="${escape(d.id)}" ${g.departmentIds.includes(d.id) ? 'checked' : ''}> ${escape(d.name)}</label>`).join('')}</div>` : ''}
+        <button class="secondary small">Save group</button></form>`).join('')}
+      <form id="new-pool" class="inline-form"><label class="field">New group<input name="name" required maxlength="80" placeholder="Physics lab"></label><button class="primary">Create group</button></form></section>`);
+    document.querySelectorAll('form.pool').forEach(form => form.onsubmit = async event => {
+      event.preventDefault();
+      const ids = name => [...form.querySelectorAll(`[name=${name}]:checked`)].map(i => i.value);
+      try {
+        await api(`/api/v2/edu/pools/${form.dataset.pool}/members`, { method: 'PUT', body: { printerIds: ids('printer') } });
+        await api(`/api/v2/edu/pools/${form.dataset.pool}/access`, { method: 'PUT', body: { departmentIds: ids('dept') } });
+        notify('Group saved.'); await refresh();
+      } catch (err) { notify(err.message); }
+    });
+    document.querySelector('#new-pool').onsubmit = async event => {
+      event.preventDefault();
+      try { await api('/api/v2/edu/pools', { method: 'POST', body: { name: event.target.name.value } }); await refresh(); } catch (err) { notify(err.message); }
+    };
     act('[data-pause]', async el => { await api(`/api/v2/edu/printers/${el.dataset.pause}/${el.dataset.paused === '1' ? 'resume' : 'pause'}`, { method: 'POST' }); await refresh(); });
     act('[data-test]', async el => { await api(`/api/v2/edu/printers/${el.dataset.test}/test-print`, { method: 'POST' }); notify('Test page queued.'); el.disabled = false; });
   } else if (current === 'people') {
@@ -196,7 +218,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     const rows = Object.entries(r.byClass).map(([k, v]) => `<tr><td>${escape(k)}</td><td>${v.jobs}</td><td>${v.completed}</td><td>${v.pagesPrinted}</td><td>${v.colourJobs}</td></tr>`);
     shell(`<section class="panel"><h2>Usage</h2><p>${r.total.jobs} jobs, ${r.total.pagesPrinted} pages printed.</p>${table(['Class', 'Jobs', 'Printed', 'Pages', 'Colour jobs'], rows)}</section>`);
   } else {
-    const jobs = await api('/api/v2/edu/jobs');
+    const [jobs, pools] = await Promise.all([api('/api/v2/edu/jobs'), api('/api/v2/edu/pools/available').catch(() => [])]);
     shell(`<section class="panel"><h2>Print a document</h2>
       <form id="print-form">
         <label class="field">File (PDF, PNG or JPEG, up to 20 MB)<input type="file" name="file" accept="application/pdf,image/png,image/jpeg" required></label>
@@ -204,6 +226,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
         <label class="field">Colour<select name="color"><option value="bw">Black &amp; white</option><option value="color">Colour</option></select></label>
         <label class="field"><span><input type="checkbox" name="duplex"> Print on both sides</span></label>
         <label class="field">Pages (e.g. 1-3, 5; empty = all)<input name="range" maxlength="200"></label>
+        ${pools.length > 1 ? `<label class="field">Printer group<select name="poolId"><option value="">Automatic</option>${pools.map(g => `<option value="${escape(g.id)}">${escape(g.name)}</option>`).join('')}</select></label>` : ''}
         <div id="quote" class="notice-inline" hidden></div>
         <button class="secondary" id="quote-btn" type="button">Check price</button> <button class="primary" id="print-btn">Print</button></form></section>
       <section class="panel"><h2>My prints</h2>${table(['File', 'Pages', 'Status', 'When', ''], jobs.map(j => `<tr><td>${escape(j.fileName || 'Document')}</td><td>${j.pages}</td><td>${escape(STATUS_TEXT[j.status] || j.status)}</td><td>${escape(time(j.enqueued_at))}</td><td>${j.status === 'queued' ? `<button class="secondary small" data-cancel="${escape(j.id)}">Cancel</button>` : ''}</td></tr>`))}</section>`);
@@ -225,7 +248,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     form.onsubmit = async event => {
       event.preventDefault();
       const button = document.querySelector('#print-btn'); button.disabled = true;
-      try { await api('/api/v2/edu/jobs', { method: 'POST', body: { documentId: await upload(), fileName: form.file.files[0].name, options: optionsOf() } }); notify('Sent to the printer queue.'); await refresh(); }
+      try { await api('/api/v2/edu/jobs', { method: 'POST', body: { documentId: await upload(), fileName: form.file.files[0].name, options: optionsOf(), ...(form.poolId?.value ? { poolId: form.poolId.value } : {}) } }); notify('Sent to the printer queue.'); await refresh(); }
       catch (err) { notify(err.message); button.disabled = false; }
     };
     act('[data-cancel]', async el => { await api(`/api/v2/edu/my-jobs/${el.dataset.cancel}/cancel`, { method: 'POST' }); await refresh(); });

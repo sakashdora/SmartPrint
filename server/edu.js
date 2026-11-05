@@ -321,6 +321,20 @@ export function eduRoutes(app, { db, key, config }) {
     const cost = price(prepared.pages, options, rates);
     return { raw, options, prepared, student, jobClass: student ? 'student' : 'staff', quote: { pages: prepared.pages, sheets: cost.sheets, sides: cost.sides, costMinor: student ? cost.amount : 0, charged: student && policies.studentPrinting === 'wallet', payer: student ? 'student' : 'institution' } };
   }
+  // The pools this person may print on, most specific first: pools restricted to their own department, then open pools.
+  // Institution administrators and print operators may use every pool.
+  async function poolsFor(q, req) {
+    const pools = await q.query('SELECT id, name, is_default FROM printer_pools WHERE org_id=$1 ORDER BY is_default DESC, name', [req.org.id]);
+    const links = await q.query('SELECT d.pool_id, d.department_id FROM pool_departments d JOIN printer_pools p ON p.id=d.pool_id WHERE p.org_id=$1', [req.org.id]);
+    if (['institution_admin', 'print_operator'].includes(req.org.role)) return pools;
+    const [profile] = await q.query('SELECT department_id FROM edu_profiles WHERE user_id=$1 AND org_id=$2', [req.user.id, req.org.id]);
+    const mine = profile?.department_id ?? null;
+    const restrictedTo = pool => links.filter(l => l.pool_id === pool.id);
+    const allowed = pools.filter(p => !restrictedTo(p).length || (mine && restrictedTo(p).some(l => l.department_id === mine)));
+    return [...allowed.filter(p => restrictedTo(p).length), ...allowed.filter(p => !restrictedTo(p).length)];
+  }
+  app.get('/api/v2/edu/pools/available', need('jobs.submit'), async (req, res) => res.json(await poolsFor(db, req)));
+
   app.post('/api/v2/edu/jobs/quote', need('jobs.submit'), async (req, res) => {
     const { quote } = await buildJob(req, req.body);
     if (quote.charged) {
@@ -333,7 +347,22 @@ export function eduRoutes(app, { db, key, config }) {
     const built = await buildJob(req, req.body);
     const jobId = await db.transaction(async tx => {
       const objectId = await storeObject(tx, req.org.id, Buffer.from(built.prepared.bytes), { encrypt, key });
-      const id = await enqueueJob(tx, { orgId: req.org.id, submitterId: req.user.id, jobClass: built.jobClass, objectId, options: { ...built.options, file_name: String(req.body.fileName ?? 'document').slice(0, 150) }, pages: built.quote.pages, sheets: built.quote.sheets, payer: built.quote.charged ? 'wallet' : 'institution', costMinor: built.quote.costMinor });
+      // Choose the pool: the one asked for (if the person may use it), otherwise the first allowed pool that has a printer able to do the job.
+      const allowed = await poolsFor(tx, req);
+      let candidates = allowed;
+      if (req.body.poolId) {
+        candidates = allowed.filter(p => p.id === String(req.body.poolId));
+        if (!candidates.length) throw fail(403, 'You may not print on that printer group.', 'pool.not_allowed');
+      }
+      if (!candidates.length) throw fail(409, 'No printer group is available to you. Ask your administrator.', 'pool.none_available');
+      let id = null, lastError = null;
+      for (const pool of candidates) {
+        try {
+          id = await enqueueJob(tx, { orgId: req.org.id, poolId: pool.id, submitterId: req.user.id, jobClass: built.jobClass, objectId, options: { ...built.options, file_name: String(req.body.fileName ?? 'document').slice(0, 150) }, pages: built.quote.pages, sheets: built.quote.sheets, payer: built.quote.charged ? 'wallet' : 'institution', costMinor: built.quote.costMinor });
+          break;
+        } catch (error) { if (error.code !== 'job.no_compatible_printer') throw error; lastError = error; }
+      }
+      if (!id) throw lastError;
       // Wallet mode: the price is held now; if the balance is not enough the whole transaction (and the job) is rolled back.
       if (built.quote.charged) await holdForJob(tx, { orgId: req.org.id, userId: req.user.id, jobId: id, amountMinor: built.quote.costMinor });
       await markObjectDeleted(tx, req.org.id, built.raw.id); // the raw upload is not kept

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, created TEXT NOT
 CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS orders_shop ON orders(shop_id, created);
 CREATE INDEX IF NOT EXISTS documents_expiry ON documents(expires);
-CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires TEXT NOT NULL, mfa INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires TEXT NOT NULL, mfa INTEGER NOT NULL DEFAULT 0, last_seen TEXT, user_agent TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS rate_limits (id TEXT PRIMARY KEY, count INTEGER NOT NULL, expires TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mfa (user_id TEXT PRIMARY KEY REFERENCES users(id), payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step BIGINT NOT NULL DEFAULT -1, recovery_codes TEXT DEFAULT '[]', created TEXT);
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, public_key BYTEA NOT NULL, counter BIGINT NOT NULL DEFAULT 0, device_type TEXT, backed_up INTEGER DEFAULT 0, transports TEXT, created TEXT NOT NULL);
@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS payment_intents (id TEXT PRIMARY KEY, org_id TEXT NOT
 CREATE INDEX IF NOT EXISTS payment_intents_org ON payment_intents(org_id, state, created);
 CREATE TABLE IF NOT EXISTS gateway_events (provider TEXT NOT NULL, event_id TEXT NOT NULL, org_id TEXT NOT NULL, type TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'received', detail TEXT, created TEXT NOT NULL, PRIMARY KEY(provider, event_id));
 CREATE TABLE IF NOT EXISTS refunds_v2 (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL, intent_id TEXT NOT NULL REFERENCES payment_intents(id), provider_refund_id TEXT, amount_minor BIGINT NOT NULL CHECK(amount_minor > 0), state TEXT NOT NULL CHECK(state IN ('pending','issued','processed','failed')), reason TEXT, created TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pool_departments (pool_id TEXT NOT NULL REFERENCES printer_pools(id), department_id TEXT NOT NULL REFERENCES departments(id), PRIMARY KEY(pool_id, department_id));
 CREATE TABLE IF NOT EXISTS queue_classes (pool_id TEXT NOT NULL REFERENCES printer_pools(id), class TEXT NOT NULL, f_last DOUBLE PRECISION NOT NULL DEFAULT 0, PRIMARY KEY(pool_id, class));
 CREATE INDEX IF NOT EXISTS print_jobs_queue ON print_jobs(org_id, pool_id, status, priority_boost, enqueued_at);
 CREATE TABLE IF NOT EXISTS print_attempts (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), job_id TEXT NOT NULL REFERENCES print_jobs(id), printer_id TEXT NOT NULL REFERENCES printers(id), agent_id TEXT NOT NULL REFERENCES agents(id), attempt_no INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'claimed' CHECK(state IN ('claimed','submitted','uncertain','completed','failed','expired','cancelled')), lease_token_hash TEXT NOT NULL, lease_expires TEXT NOT NULL, pages_reported INTEGER, error TEXT, created TEXT NOT NULL, finished TEXT, UNIQUE(job_id, attempt_no));

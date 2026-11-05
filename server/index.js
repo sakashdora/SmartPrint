@@ -115,8 +115,19 @@ export async function createApp({ database, seed = true } = {}) {
     const sessionId = req.headers.cookie ? req.headers.cookie.split(';').map(c => c.trim()).find(v => v.startsWith('sp_session='))?.slice(11) : null;
     if (sessionId) {
       req.sessionId = digest(sessionId);
-      const [user] = await db.query('SELECT u.*, s.mfa FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
-      if (user) {
+      const [user] = await db.query('SELECT u.*, s.mfa, s.last_seen FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires>$2', [req.sessionId, now()]);
+      // Administrator accounts (platform admins and institution/department administrators) are signed out after a period
+      // of inactivity. Shop owners, staff and students keep the plain 8-hour session, exactly as before. Activity is
+      // written at most once a minute, and the role lookup only happens when a session has already been idle that long.
+      const idleMs = Number(process.env.ADMIN_IDLE_MINUTES || 60) * 60000;
+      let expired = false;
+      if (user && user.last_seen && Date.now() - Date.parse(user.last_seen) > idleMs) {
+        expired = user.role === 'admin' || (await db.query("SELECT 1 FROM memberships WHERE user_id=$1 AND role IN ('institution_admin','department_admin')", [user.id])).length > 0;
+      }
+      if (expired) {
+        await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]);
+      } else if (user) {
+        if (!user.last_seen || Date.now() - Date.parse(user.last_seen) > 60000) await db.query('UPDATE sessions SET last_seen=$1 WHERE id=$2', [now(), req.sessionId]);
         delete user.password;
         if (user.status === 'suspended' || user.status === 'disabled') {
           req.user = null;

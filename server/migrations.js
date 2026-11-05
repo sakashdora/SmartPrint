@@ -131,6 +131,18 @@ export const migrations = [
     description: 'Per-institution payment settings, top-up intents, gateway events and refunds',
     async up(tx) { for (const table of ['payment_settings', 'payment_intents', 'gateway_events', 'refunds_v2']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`); }
   }
+  ,
+  {
+    id: '0014_pool_departments',
+    description: 'Department access to printer pools',
+    async up(tx) { await tx.query('SELECT 1 FROM pool_departments LIMIT 1'); }
+  }
+  ,
+  {
+    id: '0015_session_activity',
+    description: 'Session activity (last seen, device, created) for idle timeout and the session list',
+    async up(tx) { await tx.query('SELECT last_seen, user_agent, created FROM sessions LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

@@ -86,9 +86,9 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     return Array.from(set).filter(h => h && h !== '127.0.0.1' && h !== '::1');
   };
 
-  async function session(res, user, mfa) {
+  async function session(req, res, user, mfa) {
     const secret = token();
-    await db.query('INSERT INTO sessions (id,user_id,expires,mfa) VALUES ($1,$2,$3,$4)', [digest(secret), user.id, new Date(Date.now() + 8 * 3600000).toISOString(), mfa ? 1 : 0]);
+    await db.query('INSERT INTO sessions (id,user_id,expires,mfa,last_seen,user_agent,created) VALUES ($1,$2,$3,$4,$5,$6,$5)', [digest(secret), user.id, new Date(Date.now() + 8 * 3600000).toISOString(), mfa ? 1 : 0, new Date().toISOString(), String(req.headers['user-agent'] ?? '').slice(0, 200)]);
     res.cookie('sp_session', secret, cookieOptions);
     const policy = mfaPolicy(user, mfa, config.production);
     const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
@@ -164,7 +164,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
       await db.query('DELETE FROM sessions WHERE id=$1', [req.sessionId]);
       onSessionInvalidate?.(req.sessionId, user.id);
     }
-    res.json(await session(res, user, mfaSatisfied));
+    res.json(await session(req, res, user, mfaSatisfied));
   });
 
   app.post('/api/auth/logout', async (req, res) => {
@@ -174,6 +174,27 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     }
     res.clearCookie('sp_session', { path: '/', httpOnly: true, secure: config.production, sameSite: 'lax' });
     res.json({ ok: true });
+  });
+
+  // Your own signed-in sessions. The handle is a short prefix of the stored digest; the real cookie secret is never shown.
+  const handleOf = id => String(id).slice(0, 16);
+  app.get('/api/auth/sessions', requireSession, async (req, res) => {
+    const rows = await db.query('SELECT id, created, last_seen, expires, user_agent FROM sessions WHERE user_id=$1 AND expires>$2 ORDER BY last_seen DESC', [req.user.id, new Date().toISOString()]);
+    res.json(rows.map(r => ({ handle: handleOf(r.id), current: r.id === req.sessionId, created: r.created, lastSeen: r.last_seen, expires: r.expires, device: r.user_agent || 'Unknown device' })));
+  });
+  app.delete('/api/auth/sessions/:handle', requireSession, async (req, res) => {
+    const rows = await db.query('SELECT id FROM sessions WHERE user_id=$1', [req.user.id]);
+    const target = rows.find(r => handleOf(r.id) === req.params.handle && r.id !== req.sessionId);
+    if (!target) return res.status(404).json({ error: 'Session not found.' });
+    await db.query('DELETE FROM sessions WHERE id=$1 AND user_id=$2', [target.id, req.user.id]);
+    onSessionInvalidate?.(target.id, req.user.id);
+    res.json({ ok: true });
+  });
+  app.post('/api/auth/sessions/revoke-others', requireSession, async (req, res) => {
+    const others = (await db.query('SELECT id FROM sessions WHERE user_id=$1 AND id<>$2', [req.user.id, req.sessionId])).map(r => r.id);
+    await db.query('DELETE FROM sessions WHERE user_id=$1 AND id<>$2', [req.user.id, req.sessionId]);
+    for (const id of others) onSessionInvalidate?.(id, req.user.id);
+    res.json({ ok: true, revoked: others.length });
   });
 
   app.get('/api/me', (req, res) => res.json(req.user ?? null));
@@ -309,7 +330,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
       onSessionInvalidate?.(req.sessionId, passkey.user_id);
     }
     const [user] = await db.query('SELECT id, email, role, status FROM users WHERE id=$1', [passkey.user_id]);
-    const s = await session(res, user, true);
+    const s = await session(req, res, user, true);
     await db.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), user.id, 'passkey.authenticated', passkey.id, new Date().toISOString()]);
     res.json({ ok: true, ...s });
   });
@@ -361,7 +382,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [req.user.id]);
     });
     onSessionInvalidate?.(null, req.user.id);
-    const s = await session(res, req.user, true);
+    const s = await session(req, res, req.user, true);
     await db.query('INSERT INTO audit (id,actor,action,target,created) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), req.user.id, 'mfa.enabled', req.user.id, new Date().toISOString()]);
     res.json({ ...s, recoveryCodes: plainRecoveryCodes });
   });

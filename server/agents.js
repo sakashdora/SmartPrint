@@ -108,7 +108,8 @@ export function agentRoutes(app, { db, key }) {
   app.get('/api/v2/edu/pools', managePools, async (req, res) => {
     const pools = await db.query('SELECT id,name,scheduler,is_default,weights,aging_rate,max_wait_seconds,user_cap FROM printer_pools WHERE org_id=$1 ORDER BY is_default DESC, name', [req.org.id]);
     const members = await db.query('SELECT m.pool_id, m.printer_id FROM pool_members m JOIN printer_pools p ON p.id=m.pool_id WHERE p.org_id=$1', [req.org.id]);
-    res.json(pools.map(p => ({ ...p, printerIds: members.filter(m => m.pool_id === p.id).map(m => m.printer_id) })));
+    const access = await db.query('SELECT d.pool_id, d.department_id FROM pool_departments d JOIN printer_pools p ON p.id=d.pool_id WHERE p.org_id=$1', [req.org.id]);
+    res.json(pools.map(p => ({ ...p, printerIds: members.filter(m => m.pool_id === p.id).map(m => m.printer_id), departmentIds: access.filter(a => a.pool_id === p.id).map(a => a.department_id) })));
   });
   app.post('/api/v2/edu/pools', managePools, async (req, res) => {
     const name = String(req.body.name ?? '').trim();
@@ -129,6 +130,22 @@ export function agentRoutes(app, { db, key }) {
       await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'pool.members_set', targetType: 'pool', targetId: pool.id, data: { count: ids.length } });
     });
     res.json({ ok: true });
+  });
+
+  // Who may print on a pool. No departments listed = open to everybody in the institution (how the default pool works);
+  // listing departments restricts the pool to their members. A department can be given several pools, and several
+  // departments can share one pool. Institution administrators and print operators are never restricted.
+  app.put('/api/v2/edu/pools/:id/access', managePools, async (req, res) => {
+    const [pool] = await db.query('SELECT id FROM printer_pools WHERE id=$1 AND org_id=$2', [req.params.id, req.org.id]);
+    if (!pool) throw fail(404, 'Pool not found.');
+    const ids = [...new Set(Array.isArray(req.body.departmentIds) ? req.body.departmentIds.map(String) : [])];
+    await db.transaction(async tx => {
+      for (const id of ids) if (!(await tx.query('SELECT id FROM departments WHERE id=$1 AND org_id=$2', [id, req.org.id])).length) throw fail(404, 'Department not found.');
+      await tx.query('DELETE FROM pool_departments WHERE pool_id=$1', [pool.id]);
+      for (const id of ids) await tx.query('INSERT INTO pool_departments (pool_id,department_id) VALUES ($1,$2)', [pool.id, id]);
+      await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'pool.access_set', targetType: 'pool', targetId: pool.id, data: { departments: ids.length } });
+    });
+    res.json({ ok: true, open: ids.length === 0 });
   });
 
   // Scheduler settings of a pool. Weights are relative shares per class; agingRate (cost units per second) makes old
