@@ -60,8 +60,9 @@ function header() {
       <div class="nav-right-actions">
         <a href="${isWorkspace}" class="nav-workspace-btn">
           ${icon('user')}
-          <span>${me ? (me.role === 'customer' ? 'My Institution →' : 'Go to Workspace →') : 'Workspace sign in →'}</span>
+          <span>${me ? (me.role === 'customer' ? 'My institution' : 'Open workspace') : 'Sign in'}</span>
         </a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch between light and dark appearance" title="Light / dark"><span aria-hidden="true">◐</span></button>
         <button id="home-mobile-toggle" class="home-mobile-menu-btn" aria-label="Toggle navigation">
           ${icon('menu')}
         </button>
@@ -74,7 +75,7 @@ function header() {
         <a href="#how-it-works" class="mobile-nav-link">${icon('file')} How it works</a>
         <a href="#for-shop-owners" class="mobile-nav-link">${icon('shop')} For shop owners</a>
         <a href="#support" class="mobile-nav-link">${icon('support')} Support</a>
-        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? (me.role === 'customer' ? 'My Institution' : 'Workspace') : 'Workspace sign in'}</a>
+        <a href="${isWorkspace}" class="mobile-nav-link highlight">${icon('user')} ${me ? (me.role === 'customer' ? 'My institution' : 'Workspace') : 'Sign in'}</a>
       </nav>
     </div>
   </header>${environmentLabel()}`;
@@ -96,6 +97,12 @@ function mount(content, { workspacePage = false } = {}) {
     });
   }
 
+  document.querySelector('#theme-toggle')?.addEventListener('click', () => {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.documentElement.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+    const next = dark ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('sp-theme', next); } catch {}
+  });
   document.querySelector('#logout')?.addEventListener('click', event => busy(event.currentTarget, async () => {
     await api('/api/auth/logout', { method: 'POST' });
     me = null;
@@ -831,9 +838,10 @@ async function admin(view) {
 
 function auth(register = false) {
   mount(`<main class="auth panel">
+    ${register ? '' : `<nav class="audience-switch" aria-label="Who is signing in"><a href="#login" class="is-active" aria-current="page">Shop owner</a><a href="#college-login">College student or staff</a></nav>`}
     <span class="eyebrow">${register ? 'JOIN SMARTPRINT' : 'WELCOME BACK'}</span>
     <h1>${register ? 'Register your shop' : 'Sign in'}</h1>
-    <p class="muted">${register ? 'Register your shop. Set your prices. Start printing after admin approval.' : 'Sign in to access your shop workspace or administration platform.'}</p>
+    <p class="muted">${register ? 'Register your shop. Set your prices. Start printing after admin approval.' : 'Sign in to manage your shop, printers and orders.'}</p>
     <form id="auth-form">
       ${register ? '<label class="field">Shop name<input name="name" required maxlength="100" autocomplete="organization"></label><label class="field">Shop location<input name="location" required maxlength="200" autocomplete="street-address"></label>' : ''}
       <label class="field">Email<input name="email" type="email" required autocomplete="username"></label>
@@ -845,7 +853,7 @@ function auth(register = false) {
         ${register ? '<small class="muted" style="display:block;margin-top:4px;font-size:12px;">Minimum 12 characters</small>' : ''}
       </label>
       ${!register ? '<div id="auth-totp-field" hidden><label class="field">6-digit Authenticator code<input name="code" inputmode="numeric" maxlength="19" placeholder="Enter 6-digit code or recovery code" autocomplete="one-time-code"></label></div>' : ''}
-      <div id="auth-error-banner" class="inline-error" style="display:none; color:#dc2626; background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; font-size:13px; margin: 12px 0;" role="alert"></div>
+      <div id="auth-error-banner" class="inline-error auth-error" style="display:none"  role="alert"></div>
       <button class="primary wide" id="auth-submit-btn">${register ? 'Register shop →' : 'Sign in →'}</button>
       ${!register ? '<button type="button" class="secondary wide" id="passkey-login" style="margin-top: 10px;">🔑 Sign in with Passkey</button>' : ''}
     </form>

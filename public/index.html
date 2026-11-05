@@ -10,16 +10,21 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="SmartPrint">
   <meta name="theme-color" content="#2563eb">
+  <meta name="color-scheme" content="light dark">
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/logo.png">
   <link rel="icon" type="image/png" href="/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/premium.css?v=1.0.4">
-  <script type="module" src="/app.js?v=1.0.4"></script>
+  <link rel="stylesheet" href="/tokens.css?v=1.1.0">
+  <link rel="stylesheet" href="/premium.css?v=1.1.0">
+  <link rel="stylesheet" href="/design.css?v=1.1.5">
+  <script type="module" src="/app.js?v=1.1.0"></script>
+  <script>try { var t = localStorage.getItem('sp-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {}</script>
 </head>
 <body>
+  <a class="skip-link" href="#app">Skip to content</a>
   <div id="app">
     <main class="welcome"><p role="status">Opening SmartPrint…</p></main>
   </div>

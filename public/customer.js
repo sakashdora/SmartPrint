@@ -363,8 +363,8 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
     <!-- Hero Header -->
     <div class="customer-hero-header">
-      <h1 class="customer-hero-title">Upload document to print</h1>
-      <p class="customer-hero-sub">Select your file, choose print options, and submit your order directly to the shop printer.</p>
+      <h1 class="customer-hero-title">Print your document</h1>
+      <p class="customer-hero-sub">Choose a file, pick your options and pay. The shop prints it for you to collect.</p>
       
       <!-- 3-Step Indicator -->
       <div class="customer-stepper" aria-label="Order progress">
@@ -411,11 +411,15 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
               <div class="dropzone-icon-circle">
                 ${icon('upload')}
               </div>
-              <strong class="dropzone-main-text">Drag & drop your document here</strong>
-              <span class="dropzone-or-divider">or</span>
+              <strong class="dropzone-main-text"><span class="only-pointer">Drag &amp; drop your document here</span><span class="only-touch">Add the document you want to print</span></strong>
+              <span class="dropzone-or-divider only-pointer">or</span>
               <label class="primary btn-browse-files" for="files">
-                ${icon('file')} <span>Browse files</span>
+                ${icon('file')} <span>Choose a file</span>
               </label>
+              <label class="secondary btn-take-photo only-touch" for="camera">
+                ${icon('crop')} <span>Take a photo of a page</span>
+              </label>
+              <input id="camera" class="visually-hidden" type="file" accept="image/*" capture="environment">
               <p class="dropzone-sub-text">PDF, JPG, PNG${health.office ? ', Word, PowerPoint, Excel' : ''}<br>Up to 20 MB</p>
               <input id="files" class="visually-hidden" type="file" accept=".pdf,.jpg,.jpeg,.png${health.office ? ',.docx,.pptx,.xlsx' : ''}" multiple>
             </div>
@@ -727,46 +731,15 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
 
           <div class="summary-security-footer">
             <div class="security-lock-icon">${icon('shield')}</div>
-            <p>Your files are encrypted. Print files are deleted after printing; temporary uploads expire automatically.</p>
+            <p>Your file is encrypted and deleted from our servers after it prints.</p>
           </div>
         </section>
       </aside>
     </div>
 
-    <!-- Bottom: Privacy Information & Supporting Assurance -->
-    <div class="customer-bottom-privacy-card">
-      <div class="bottom-privacy-inner">
-        <div class="bottom-privacy-icon">${icon('shield')}</div>
-        <div class="bottom-privacy-content">
-          <strong>Your files are secure</strong>
-          <p>Files are encrypted and automatically deleted after printing. Temporary uploads expire automatically.</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Trust Strip -->
-    <div class="customer-trust-strip">
-      <div class="trust-badge-item">
-        <div class="trust-icon-box icon-green">${icon('lock')}</div>
-        <div class="trust-text">
-          <strong>Secure & Private</strong>
-          <p>Your files are encrypted and automatically deleted after printing.</p>
-        </div>
-      </div>
-      <div class="trust-badge-item">
-        <div class="trust-icon-box icon-blue">${icon('lightning')}</div>
-        <div class="trust-text">
-          <strong>Fast & Convenient</strong>
-          <p>Upload, pay and print in minutes directly at your local shop.</p>
-        </div>
-      </div>
-      <div class="trust-badge-item">
-        <div class="trust-icon-box icon-teal">${icon('shield')}</div>
-        <div class="trust-text">
-          <strong>Trusted by Students & Professionals</strong>
-          <p>High quality prints with instant contactless pickup across partner shops.</p>
-        </div>
-      </div>
+    <div class="mobile-checkout-bar" id="mobile-checkout-bar" hidden>
+      <div class="mobile-checkout-total"><small>Total</small><strong id="mobile-total">—</strong></div>
+      <button type="button" class="primary" id="mobile-place-order" disabled>Place order →</button>
     </div>
   </main>`);
 
@@ -785,6 +758,28 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   if (shop.printerCount > 0 && shop.duplexAvailable === false) limitOption('[name=duplex][value=true]', '.option-sides-group', 'This shop prints one-sided only.');
   const dropPanel = document.querySelector('#drop-panel');
   const fileInput = document.querySelector('#files');
+  // A photo taken with the phone camera goes through exactly the same path as a chosen file.
+  document.querySelector('#camera')?.addEventListener('change', event => {
+    const transfer = new DataTransfer();
+    [...event.target.files].forEach(file => transfer.items.add(file));
+    if (transfer.files.length) { fileInput.files = transfer.files; fileInput.dispatchEvent(new Event('change', { bubbles: true })); }
+    event.target.value = '';
+  });
+  // Phone checkout bar: shows the price and the order button without scrolling back up. It only mirrors the real controls.
+  {
+    const bar = document.querySelector('#mobile-checkout-bar'), real = document.querySelector('#place-order-btn'), total = document.querySelector('#total-amount');
+    const sync = () => {
+      document.querySelector('#mobile-total').textContent = total.textContent;
+      document.querySelector('#mobile-place-order').disabled = real.disabled;
+      bar.hidden = real.disabled && !/\d/.test(total.textContent); // nothing to pay yet: stay out of the way
+    };
+    if (bar && real && total && typeof MutationObserver === 'function') {
+      new MutationObserver(sync).observe(total, { childList: true, characterData: true, subtree: true });
+      new MutationObserver(sync).observe(real, { attributes: true, attributeFilter: ['disabled'] });
+      document.querySelector('#mobile-place-order').onclick = () => real.click();
+      sync();
+    }
+  }
   const dropzone = document.querySelector('#direct-dropzone');
   const fileDisplay = document.querySelector('#selected-files-display');
   const placeBtn = document.querySelector('#place-order-btn');

@@ -1,0 +1,138 @@
+/* SmartPrint design layer. Loaded after premium.css; shared refinements for every screen live here.
+   Colours come from tokens.css (light and dark). Rules of thumb: phone first, 44px touch targets, visible focus,
+   plain wording, one primary action per screen. */
+
+/* ---------- Accessibility basics ---------- */
+.skip-link { position: absolute; left: 12px; top: -48px; z-index: 1000; background: var(--c-2563eb); color: #fff; padding: 10px 14px; border-radius: 10px; font-weight: 600; transition: top .15s; }
+.skip-link:focus { top: 12px; }
+:focus-visible { outline: 3px solid var(--c-2563eb); outline-offset: 2px; border-radius: 6px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline-offset: 0; }
+.visually-hidden:focus-visible + * , .segment-btn:has(input:focus-visible), .option-card:has(input:focus-visible) { outline: 3px solid var(--c-2563eb); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+/* Inputs at 16px stop iOS from zooming the page when they are focused. */
+input, select, textarea { font-size: max(16px, 1em); }
+button, .primary, .secondary, .danger, select, input:not([type=checkbox]):not([type=radio]) { min-height: 44px; }
+.small { min-height: 36px; }
+
+/* ---------- Header: a calm, flat top bar instead of a floating pill ---------- */
+.home-floating-header-wrapper { top: 0; max-width: none; padding: 0; background: rgba(var(--white-rgb), .92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--c-e2e8f0); }
+.home-floating-nav { max-width: 1360px; margin: 0 auto; border: 0; border-radius: 0; box-shadow: none; background: transparent; padding: 10px 24px; }
+.nav-workspace-btn { border-radius: 10px; }
+.theme-toggle { min-height: 40px; min-width: 40px; border-radius: 10px; border: 1px solid var(--c-e2e8f0); background: transparent; color: inherit; font-size: 18px; cursor: pointer; }
+.theme-toggle:hover { background: var(--c-f1f5f9); }
+.demo { padding: 4px 16px; font-size: 11px; }
+@media (max-width: 700px) { .home-floating-nav { padding: 8px 16px; } }
+
+/* ---------- Touch vs mouse wording ---------- */
+.only-touch { display: none; }
+@media (pointer: coarse) { .only-pointer { display: none !important; } .only-touch { display: inline-block; } .btn-take-photo.only-touch { display: inline-flex; } }
+
+/* ---------- QR order page ---------- */
+.customer-hero-title { letter-spacing: -.02em; }
+.btn-take-photo { margin-top: 10px; gap: 8px; align-items: center; justify-content: center; min-height: 48px; padding: 0 18px; border-radius: 12px; cursor: pointer; }
+.btn-browse-files { min-height: 48px; border-radius: 12px; }
+.option-card, .segment-btn { min-height: 48px; }
+.mobile-checkout-bar { display: none; }
+@media (max-width: 900px) {
+  .customer-shell { padding-bottom: 96px; }
+  .customer-order-layout { grid-template-columns: minmax(0, 1fr); }
+  .preview-empty-card { display: none; }
+  .customer-stepper .step-name { font-size: 12px; }
+  /* Keep the price and the order button in view while choosing options. */
+  .mobile-checkout-bar:not([hidden]) { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 80; gap: 14px; align-items: center; justify-content: space-between; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: rgba(var(--white-rgb), .97); border-top: 1px solid var(--c-e2e8f0); box-shadow: 0 -6px 20px rgba(15, 23, 42, .1); }
+  .mobile-checkout-total { display: grid; line-height: 1.15; }
+  .mobile-checkout-total small { color: var(--c-64748b); font-size: 12px; }
+  .mobile-checkout-total strong { font-size: 20px; }
+  .mobile-checkout-bar .primary { flex: 1; max-width: 220px; min-height: 48px; border-radius: 12px; font-weight: 700; }
+  /* The full summary stays available, but the repeated order button is not needed twice. */
+  .customer-order-summary-card .btn-place-order { margin-top: 8px; }
+}
+
+/* ---------- Workspaces (shop owner, administrators): cards and tables that read well on a phone ---------- */
+.panel { border-radius: 14px; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap table { min-width: 560px; }
+.empty-state { text-align: center; padding: 32px 16px; color: var(--c-64748b); }
+@media (max-width: 700px) {
+  .tabs, nav.tabs { overflow-x: auto; flex-wrap: nowrap !important; scrollbar-width: none; padding-bottom: 6px; }
+  nav.tabs a { white-space: nowrap; padding: 8px 4px; }
+  .actions { gap: 10px; }
+}
+select, input, textarea { border-radius: 10px; }
+
+/* Order page, phone: the document card must stay readable when a file is chosen. */
+@media (max-width: 700px) {
+  .customer-card-header { flex-wrap: wrap; gap: 8px; }
+  .customer-card-header .card-step-title h2 { font-size: 18px; }
+  .btn-change-header { display: none !important; }              /* the same action sits inside the file card */
+  .card-header-actions { width: 100%; }
+  .selected-file-item { flex-direction: column; align-items: stretch; gap: 12px; }
+  .selected-file-item > * { flex: none !important; min-height: 0; }
+  .file-actions-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+  .file-actions-wrap .btn-remove-file { grid-column: 1 / -1; width: 100%; height: auto; min-height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--c-e2e8f0); background: transparent; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--c-dc2626); }
+  .file-actions-wrap .btn-remove-file::after { content: " Remove"; font-size: 14px; }
+  .file-actions-wrap .small { width: 100%; justify-content: center; text-align: center; }
+  .option-cards-two, .segmented-control { gap: 8px; }
+  .segments-three { display: grid; grid-template-columns: 1fr; }
+}
+
+/* ---------- Sign-in ---------- */
+.audience-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: 0 0 18px; background: var(--c-f1f5f9); border-radius: 12px; }
+.audience-switch a { text-align: center; padding: 10px 8px; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--c-475569); text-decoration: none; }
+.audience-switch a.is-active { background: var(--c-ffffff); color: var(--c-0f172a); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.auth-error { color: var(--c-dc2626); background: var(--c-fef2f2); border: 1px solid var(--c-fecaca); border-radius: 10px; padding: 10px 14px; font-size: 14px; margin: 12px 0; }
+
+/* ---------- Shop owner overview on a phone: four numbers fit on one screen ---------- */
+@media (max-width: 700px) {
+  .overview-metrics-grid { grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+  .overview-metrics-grid .metric-card { padding: 14px; min-height: 0; }
+  .overview-metrics-grid .metric-card-icon-wrap { display: none; }
+  .overview-metrics-grid .metric-card strong, .overview-metrics-grid .metric-card .metric-value { font-size: 22px; }
+}
+
+/* The logo file has a white background; in dark mode it sits on a light chip instead of a hard white box. */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .brand-img { background: #fff; border-radius: 10px; padding: 3px 8px; } }
+:root[data-theme="dark"] .brand-img { background: #fff; border-radius: 10px; padding: 3px 8px; }
+
+/* ---------- College / institution screens ---------- */
+.edu-shell { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+.edu-head { align-items: flex-start; flex-direction: row !important; flex-wrap: nowrap; justify-content: space-between; gap: 12px; }
+.edu-head .secondary { flex: none; }
+.edu-head h1 { margin: 2px 0 0; font-size: clamp(22px, 5vw, 30px); letter-spacing: -.02em; }
+.edu-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 16px -16px 20px; padding: 0 16px 2px; border-bottom: 1px solid var(--c-e2e8f0); scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.edu-tabs::-webkit-scrollbar { display: none; }
+.edu-tabs a { flex: none; padding: 12px 14px; font-weight: 600; font-size: 14px; color: var(--c-475569); text-decoration: none; border-bottom: 3px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.edu-tabs a:hover { color: var(--c-0f172a); }
+.edu-tabs a.active { color: var(--c-2563eb); border-bottom-color: var(--c-2563eb); }
+.edu-shell .panel { margin-bottom: 16px; }
+.checklist { list-style: none; margin: 8px 0 12px; padding: 0; display: grid; gap: 10px; }
+.checklist li { display: flex; gap: 12px; align-items: flex-start; line-height: 1.5; }
+.checklist .step-dot { flex: none; width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--c-cbd5e1); display: grid; place-items: center; font-size: 14px; font-weight: 700; color: #fff; margin-top: 1px; }
+.checklist .is-done .step-dot { background: var(--c-059669); border-color: var(--c-059669); }
+.checklist .is-done > span:last-child { color: var(--c-64748b); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.form-grid { display: grid; gap: 14px 20px; }
+@media (min-width: 900px) { .form-grid { grid-template-columns: 1fr 1fr; align-items: start; }
+  .form-grid .field:has(input[type=checkbox]) { grid-column: 1 / -1; } .form-grid > button, .form-grid > .notice-inline { grid-column: 1 / -1; justify-self: start; } }
+.form-grid .field { margin: 0; }
+@media (max-width: 700px) { .edu-shell { padding-top: 12px; } }
+
+/* ---------- Student / staff print form ---------- */
+.file-pick { display: grid; gap: 4px; place-items: center; text-align: center; padding: 28px 16px; border: 2px dashed var(--c-cbd5e1); border-radius: 14px; background: var(--c-f8fafc); cursor: pointer; margin-bottom: 16px; }
+.file-pick:hover, .file-pick:focus-within { border-color: var(--c-2563eb); background: var(--c-eff6ff); }
+.file-pick-title { font-weight: 700; font-size: 16px; overflow-wrap: anywhere; }
+.file-pick-sub { color: var(--c-64748b); font-size: 13px; }
+.file-pick.has-file { border-style: solid; border-color: var(--c-059669); background: var(--c-ecfdf5); }
+.print-options { display: grid; gap: 14px 20px; grid-template-columns: 1fr; }
+@media (min-width: 700px) { .print-options { grid-template-columns: 1fr 1fr; } }
+.seg-field { border: 0; margin: 0; padding: 0; min-width: 0; }
+.seg-field legend { font-weight: 600; font-size: 14px; margin-bottom: 6px; padding: 0; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--c-f1f5f9); border-radius: 12px; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.seg span { display: grid; place-items: center; min-height: 44px; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--c-475569); text-align: center; padding: 0 6px; }
+.seg input:checked + span { background: var(--c-ffffff); color: var(--c-0f172a); box-shadow: 0 1px 3px rgba(15, 23, 42, .15); }
+.seg input:focus-visible + span { outline: 3px solid var(--c-2563eb); outline-offset: 1px; }
+.print-actions { display: flex; gap: 10px; margin-top: 16px; }
+.print-actions .primary { flex: 1; }
+@media (max-width: 700px) { .print-actions { position: sticky; bottom: 0; padding: 12px 0 calc(12px + env(safe-area-inset-bottom)); background: var(--c-ffffff); border-top: 1px solid var(--c-e2e8f0); margin: 16px -16px 0; padding-left: 16px; padding-right: 16px; } }

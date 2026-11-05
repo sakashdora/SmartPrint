@@ -7,8 +7,9 @@ const ROLE_LABEL = r => String(r).replaceAll('_', ' ');
 const STATUS_TEXT = { queued: 'Waiting', claimed: 'Starting', submitted: 'Printing', completed: 'Printed', failed: 'Failed', uncertain: 'Check output', cancelled: 'Cancelled' };
 
 export async function collegeLogin({ api, mount, escape, notify, setMe, route }) {
-  mount(`<main class="auth panel"><span class="eyebrow">STUDENTS &amp; STAFF</span><h1>Sign in with your College ID</h1>
-    <p class="muted">Use the institution code your college gave you.</p>
+  mount(`<main class="auth panel"><nav class="audience-switch" aria-label="Who is signing in"><a href="#login">Shop owner</a><a href="#college-login" class="is-active" aria-current="page">College student or staff</a></nav>
+    <span class="eyebrow">STUDENTS &amp; STAFF</span><h1>Sign in with your College ID</h1>
+    <p class="muted">Use the institution code your college gave you. Ask your print desk if you do not have it.</p>
     <form id="college-form">
       <label class="field">Institution code<input name="institutionCode" required maxlength="80" autocapitalize="none" autocomplete="organization"></label>
       <label class="field">College / staff ID<input name="collegeId" required maxlength="40" autocomplete="username"></label>
@@ -17,7 +18,7 @@ export async function collegeLogin({ api, mount, escape, notify, setMe, route })
       <div id="college-error" class="inline-error" style="display:none" role="alert"></div>
       <button class="primary wide">Sign in →</button>
     </form>
-    <p class="foot"><a href="#forgot-password">Forgot your password?</a> · <a href="#login">Sign in with e-mail</a></p></main>`);
+    <p class="foot"><a href="#forgot-password">Forgot your password?</a></p></main>`);
   const form = document.querySelector('#college-form');
   try { const saved = localStorage.getItem('sp-institution'); if (saved) form.institutionCode.value = saved; } catch {}
   form.onsubmit = async event => {
@@ -41,19 +42,19 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
   const tabs = TABS.filter(([, , permission]) => can(permission));
   if (!tabs.length) return mount(`<main class="auth panel"><h1>${escape(org?.name || 'Institution')}</h1><p class="muted">Your role has no screens yet.</p><button class="secondary" id="logout">Sign out</button></main>`);
   const current = tabs.find(([id]) => id === view) ? view : tabs[0][0];
-  const shell = body => mount(`<main class="container"><div class="workhead"><div><span class="eyebrow">${escape(ROLE_LABEL(org.role)).toUpperCase()}</span><h1>${escape(org.name)}</h1></div><button class="secondary" id="logout">Sign out</button></div>
-    <nav class="tabs" aria-label="Institution" style="display:flex;gap:18px;flex-wrap:wrap;margin:14px 0">${tabs.map(([id, label]) => `<a href="#edu/${id}" class="${id === current ? 'active' : ''}" style="${id === current ? 'font-weight:700;border-bottom:2px solid currentColor' : ''}" ${id === current ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>${body}</main>`);
+  const shell = body => mount(`<main class="container edu-shell"><div class="workhead edu-head"><div><span class="eyebrow">${escape(ROLE_LABEL(org.role)).toUpperCase()}</span><h1>${escape(org.name)}</h1></div><button class="secondary small" id="logout">Sign out</button></div>
+    <nav class="edu-tabs" aria-label="Institution">${tabs.map(([id, label]) => `<a href="#edu/${id}" class="${id === current ? 'active' : ''}" ${id === current ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>${body}</main>`);
   const time = v => v ? new Date(v).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
   const act = (selector, fn) => document.querySelectorAll(selector).forEach(el => { el.onclick = async event => { event.preventDefault(); el.disabled = true; try { await fn(el); } catch (e) { notify(e.message); el.disabled = false; } }; });
   const refresh = () => route();
-  const table = (head, rows) => rows.length ? `<div class="table-wrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
+  const table = (head, rows, empty = 'Nothing here yet.') => rows.length ? `<div class="table-wrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>` : `<div class="empty-state">${empty}</div>`;
 
   if (current === 'overview') {
     const info = await api('/api/v2/edu/institution');
-    const p = info.policies, step = (done, text) => `<li>${done ? '✅' : '⬜'} ${text}</li>`;
-    shell(`<section class="panel"><h2>Get started</h2><ul>${step(info.setup.agents > 0, 'Install the SmartPrint agent on the printer PC <a href="#edu/agents">(Agents)</a>')}${step(info.setup.printers > 0, 'Printers appear automatically once the agent runs <a href="#edu/printers">(Printers)</a>')}${step(info.setup.people > 1, 'Add staff and students <a href="#edu/people">(People)</a>')}</ul>
-      <p class="muted">Departments and campuses are optional; add them whenever you need them. Students and staff sign in at <strong>#college-login</strong> with the institution code <strong>${escape(info.loginCode)}</strong> and their ID.</p></section>
-      <section class="panel"><h2>Printing policies</h2><form id="policies">
+    const p = info.policies, step = (done, text) => `<li class="${done ? 'is-done' : ''}"><span class="step-dot" aria-hidden="true">${done ? '✓' : ''}</span><span>${text}${done ? ' <span class="sr-only">(done)</span>' : ''}</span></li>`;
+    shell(`<section class="panel"><h2>Get started</h2><ul class="checklist">${step(info.setup.agents > 0, 'Install the SmartPrint agent on the printer PC <a href="#edu/agents">(Agents)</a>')}${step(info.setup.printers > 0, 'Printers appear automatically once the agent runs <a href="#edu/printers">(Printers)</a>')}${step(info.setup.people > 1, 'Add staff and students <a href="#edu/people">(People)</a>')}</ul>
+      <p class="muted">Departments and campuses are optional; add them whenever you need them. Students and staff sign in at <strong>${escape(location.origin)}/#college-login</strong> with the institution code <strong>${escape(info.loginCode)}</strong> and their ID.</p></section>
+      <section class="panel"><h2>Printing policies</h2><form id="policies" class="form-grid">
         <label class="field">Student printing<select name="studentPrinting"><option value="disabled" ${p.studentPrinting === 'disabled' ? 'selected' : ''}>Off</option><option value="free" ${p.studentPrinting === 'free' ? 'selected' : ''}>On, free of charge (pilot)</option><option value="wallet" ${p.studentPrinting === 'wallet' ? 'selected' : ''}>On, charged from the student wallet</option></select></label>
         <label class="field">Max pages per job<input name="maxPagesPerJob" type="number" min="1" max="500" value="${p.maxPagesPerJob}"></label>
         <label class="field">Max copies<input name="maxCopies" type="number" min="1" max="100" value="${p.maxCopies}"></label>
@@ -66,7 +67,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
         <button class="primary">Save policies</button></form></section>`);
     if (can('payments.configure')) {
       const pay = await api('/api/v2/edu/payments/settings').catch(() => ({ configured: false }));
-      document.querySelector('#policies').insertAdjacentHTML('afterend', `<section class="panel"><h2>Online payments (Razorpay)</h2>
+      document.querySelector('#policies').closest('section').insertAdjacentHTML('afterend', `<section class="panel"><h2>Online payments (Razorpay)</h2>
         <p class="muted">Money from student top-ups goes straight to <strong>your own</strong> Razorpay account. Create the keys in your Razorpay dashboard and add the webhook address shown below.</p>
         ${pay.configured ? `<p>Status: <strong>${pay.enabled ? 'on' : 'off'}</strong> (${escape(pay.mode)} mode, key ${escape(pay.keyId)}).<br>Webhook address: <input readonly style="width:100%" value="${escape(pay.webhookUrl)}" onclick="this.select()"><br><small class="muted">Subscribe it to payment.captured, payment.failed and refund.processed.</small></p>` : '<p class="muted">Not set up yet.</p>'}
         <form id="pay-form"><label class="field">Key ID<input name="keyId" required placeholder="rzp_test_…" autocomplete="off"></label>
@@ -86,13 +87,13 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     if (can('agents.view_health')) {
       const alerts = await api('/api/v2/edu/alerts').catch(() => []);
       const openAlerts = alerts.filter(a => !a.resolved);
-      document.querySelector('#policies').insertAdjacentHTML('beforebegin', `<section class="panel"><h2>Alerts</h2>
+      document.querySelector('#policies').closest('section').insertAdjacentHTML('beforebegin', `<section class="panel"><h2>Alerts</h2>
         ${openAlerts.length ? `<ul>${openAlerts.map(a => `<li><strong>${escape(a.kind.replaceAll('_', ' '))}</strong>: ${escape(a.message)} <small class="muted">since ${escape(when(a.opened))}</small></li>`).join('')}</ul>` : '<p class="muted">Nothing needs attention. Alerts appear here (and are e-mailed to administrators) when a print PC goes quiet, printers are unavailable while work waits, a job is left uncertain, or the wallet check finds a problem.</p>'}
         ${alerts.length > openAlerts.length ? `<details><summary>Earlier alerts</summary><ul>${alerts.filter(a => a.resolved).slice(0, 10).map(a => `<li>${escape(a.message)} <small class="muted">${escape(when(a.lastSeen))}</small></li>`).join('')}</ul></details>` : ''}</section>`);
     }
     if (can('integrations.manage')) {
       const hooks = await api('/api/v2/edu/webhooks').catch(() => ({ events: [], endpoints: [] }));
-      document.querySelector('#policies').insertAdjacentHTML('afterend', `<section class="panel" id="webhooks"><h2>Webhooks</h2>
+      document.querySelector('#policies').closest('section').insertAdjacentHTML('afterend', `<section class="panel" id="webhooks"><h2>Webhooks</h2>
         <p class="muted">Send events (job printed or failed, wallet top-ups, alerts) to your own system, for example an ERP. Each request is signed with a secret; the receiver must use https and be reachable from the internet. Events contain ids only, never names or documents.</p>
         ${hooks.endpoints.length ? table(['Address', 'Events', 'Status', ''], hooks.endpoints.map(h => `<tr><td>${escape(h.url)}</td><td>${escape(h.events.join(', '))}</td><td>${escape(h.status)}</td><td><button class="secondary small" data-hook-test="${escape(h.id)}">Send test</button> <button class="secondary small" data-hook-toggle="${escape(h.id)}" data-status="${escape(h.status)}">${h.status === 'active' ? 'Disable' : 'Enable'}</button> <button class="secondary small" data-hook-rotate="${escape(h.id)}">New secret</button> <button class="secondary small" data-hook-log="${escape(h.id)}">Deliveries</button> <button class="secondary small" data-hook-delete="${escape(h.id)}">Delete</button></td></tr>`)) : '<p class="muted">No webhooks yet.</p>'}
         <div id="hook-output"></div>
@@ -150,7 +151,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
       return `<select data-cap="${escape(p.id)}" data-kind="${kind}" aria-label="${kind === 'color' ? 'Colour' : 'Two-sided'} for ${escape(p.display_name)}">${unset ? '<option value="" selected disabled>Not detected: choose</option>' : ''}<option value="false" ${!unset && !value ? 'selected' : ''}>${labels[0]}</option><option value="true" ${!unset && value ? 'selected' : ''}>${labels[1]}</option></select>`;
     };
     shell(`<section class="panel"><h2>Printers</h2><p class="muted">Say what each printer can do: black &amp; white only or colour, one-sided only or two-sided. Colour and two-sided jobs only go to printers set up for them. The agent pre-fills what it detects; what you choose is kept.</p>
-      ${table(['Printer', 'Agent', 'Colour', 'Two-sided', 'State', ''], printers.map(p => `<tr><td>${escape(p.display_name)}</td><td>${escape(p.agent_name)}</td><td>${capSelect(p, 'color')}</td><td>${capSelect(p, 'duplex')}${p.cap_source === 'admin' ? `<br><small class="muted">set by you · <a href="#" data-detect="${escape(p.id)}">use detected</a></small>` : ''}</td><td>${p.paused ? 'Paused' : p.online ? 'Online' : 'Offline'}</td><td><button class="secondary small" data-pause="${escape(p.id)}" data-paused="${p.paused}">${p.paused ? 'Resume' : 'Pause'}</button> <button class="secondary small" data-test="${escape(p.id)}">Test page</button></td></tr>`))}</section>`);
+      ${table(['Printer', 'Agent', 'Colour', 'Two-sided', 'State', ''], printers.map(p => `<tr><td>${escape(p.display_name)}</td><td>${escape(p.agent_name)}</td><td>${capSelect(p, 'color')}</td><td>${capSelect(p, 'duplex')}${p.cap_source === 'admin' ? `<br><small class="muted">set by you · <a href="#" data-detect="${escape(p.id)}">use detected</a></small>` : ''}</td><td>${p.paused ? 'Paused' : p.online ? 'Online' : 'Offline'}</td><td><button class="secondary small" data-pause="${escape(p.id)}" data-paused="${p.paused}">${p.paused ? 'Resume' : 'Pause'}</button> <button class="secondary small" data-test="${escape(p.id)}">Test page</button></td></tr>`), 'No printers yet. Install the SmartPrint agent on the PC the printer is connected to (Agents tab). Its printers appear here by themselves.')}</section>`);
     document.querySelectorAll('select[data-cap]').forEach(select => select.onchange = async () => {
       const row = select.closest('tr'), get = kind => row.querySelector(`select[data-kind=${kind}]`).value;
       const body = {};
@@ -277,17 +278,20 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     const [jobs, pools] = await Promise.all([api('/api/v2/edu/jobs'), api('/api/v2/edu/pools/available').catch(() => [])]);
     shell(`<section class="panel"><h2>Print a document</h2>
       <form id="print-form">
-        <label class="field">File (PDF, PNG or JPEG, up to 20 MB)<input type="file" name="file" accept="application/pdf,image/png,image/jpeg" required></label>
-        <label class="field">Copies<input name="copies" type="number" min="1" max="100" value="1"></label>
-        <label class="field">Colour<select name="color"><option value="bw">Black &amp; white</option><option value="color">Colour</option></select></label>
-        <label class="field"><span><input type="checkbox" name="duplex"> Print on both sides</span></label>
-        <label class="field">Pages (e.g. 1-3, 5; empty = all)<input name="range" maxlength="200"></label>
+        <label class="file-pick" id="file-pick"><span class="file-pick-title" id="file-pick-title">Choose the document to print</span><span class="file-pick-sub">PDF, PNG or JPEG, up to 20 MB</span><input class="visually-hidden" type="file" name="file" accept="application/pdf,image/png,image/jpeg" required></label>
+        <div class="print-options">
+          <fieldset class="seg-field"><legend>Colour</legend><div class="seg"><label><input type="radio" name="color" value="bw" checked><span>Black &amp; white</span></label><label><input type="radio" name="color" value="color"><span>Colour</span></label></div></fieldset>
+          <fieldset class="seg-field"><legend>Sides</legend><div class="seg"><label><input type="radio" name="duplex" value="false" checked><span>One-sided</span></label><label><input type="radio" name="duplex" value="true"><span>Both sides</span></label></div></fieldset>
+          <label class="field">Copies<input name="copies" type="number" min="1" max="100" value="1" inputmode="numeric"></label>
+          <label class="field">Pages <small class="muted">(for example 1-3, 5; empty = all)</small><input name="range" maxlength="200" inputmode="text"></label>
+        </div>
         ${pools.length > 1 ? `<label class="field">Printer group<select name="poolId"><option value="">Automatic</option>${pools.map(g => `<option value="${escape(g.id)}">${escape(g.name)}</option>`).join('')}</select></label>` : ''}
         <div id="quote" class="notice-inline" hidden></div>
-        <button class="secondary" id="quote-btn" type="button">Check price</button> <button class="primary" id="print-btn">Print</button></form></section>
+        <div class="print-actions"><button class="secondary" id="quote-btn" type="button">Check price</button><button class="primary" id="print-btn">Send to printer</button></div></form></section>
       <section class="panel"><h2>My prints</h2>${table(['File', 'Pages', 'Status', 'When', ''], jobs.map(j => `<tr><td>${escape(j.fileName || 'Document')}</td><td>${j.pages}</td><td>${escape(STATUS_TEXT[j.status] || j.status)}</td><td>${escape(time(j.enqueued_at))}</td><td>${j.status === 'queued' ? `<button class="secondary small" data-cancel="${escape(j.id)}">Cancel</button>` : ''}</td></tr>`))}</section>`);
     const form = document.querySelector('#print-form'), quoteBox = document.querySelector('#quote');
-    const optionsOf = () => ({ copies: Number(form.copies.value), color: form.color.value, duplex: form.duplex.checked, range: form.range.value.trim() });
+    const optionsOf = () => ({ copies: Number(form.copies.value), color: form.color.value, duplex: form.duplex.value === 'true', range: form.range.value.trim() });
+    form.file.addEventListener('change', () => { const f = form.file.files[0]; document.querySelector('#file-pick-title').textContent = f ? f.name : 'Choose the document to print'; document.querySelector('#file-pick').classList.toggle('has-file', Boolean(f)); });
     const upload = async () => {
       const file = form.file.files[0]; if (!file) throw new Error('Choose a file.');
       const response = await fetch('/api/v2/edu/documents', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
