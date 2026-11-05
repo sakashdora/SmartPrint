@@ -50,8 +50,7 @@ jobs:
           code=$?
           if [ $code -ne 0 ]; then
             # Job logs need a sign-in to read; an annotation does not. Put the failure details there.
-            node -e "const t=require('fs').readFileSync('pg-tests.log','utf8').split('
-');const start=t.findIndex(l=>/failing tests:/.test(l));const keep=[];for(let i=Math.max(start,0);i<t.length;i++){if(/✖|error:|message:|code:|Error|expected|actual|detail|hint|at .*(test|server).*:\d+/.test(t[i]))keep.push(t[i].trim().slice(0,260))}console.log('::error title=PostgreSQL test failures::'+keep.slice(0,45).join('%0A'))"
+            node scripts/ci-failure-summary.cjs pg-tests.log
           fi
           exit $code
 
