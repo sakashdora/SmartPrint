@@ -43,7 +43,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: node --test test/postgres-integration.test.js
+      - run: node --test --test-concurrency=1 test/postgres-integration.test.js test/phase3-agents.test.js
 
   # Fails the build if a credential-looking value is committed.
   secrets:

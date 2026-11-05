@@ -18,6 +18,8 @@ import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
 import { requestLogger, logEvent } from './logger.js';
 import { applyMigrations } from './migrations.js';
 import { platformRoutes } from './platform.js';
+import { agentRoutes } from './agents.js';
+import { sweepAttempts } from './queue.js';
 import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
 
 const now = () => new Date().toISOString();
@@ -72,7 +74,7 @@ export async function createApp({ database, seed = true } = {}) {
     });
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/')) {
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/')) {
       let origin = req.headers.origin;
       if (!origin && req.headers.referer) {
         try { origin = new URL(req.headers.referer).origin; } catch {}
@@ -120,7 +122,7 @@ export async function createApp({ database, seed = true } = {}) {
         }
       }
     }
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
     if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
     if (req.path.startsWith('/api/auth/')) await limitRate(db, 'auth', req.ip, 40, 900);
     next();
@@ -639,6 +641,7 @@ export async function createApp({ database, seed = true } = {}) {
     });
   });
   platformRoutes(app, { db, config });
+  agentRoutes(app, { db, key });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -676,14 +679,14 @@ export async function createApp({ database, seed = true } = {}) {
     await tx.query('DELETE FROM invitations WHERE expires<=$1 AND used_at IS NULL', [new Date(Date.now() - 30 * 86400000).toISOString()]);
     await tx.query('DELETE FROM notifications WHERE created<=$1', [new Date(Date.now() - 90 * 86400000).toISOString()]);
   });
-  const maintain = async () => { await cleanup(); await sweepLeases(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
+  const maintain = async () => { await cleanup(); await sweepLeases(db); await sweepAttempts(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
   app.get('/maintenance', async (req, res) => { if (!process.env.CRON_SECRET || digest(req.headers.authorization || '') !== digest(`Bearer ${process.env.CRON_SECRET}`)) return res.sendStatus(401); await maintain(); res.json({ ok: true }); });
   app.get('/readyz', async (req, res) => { const [row] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); const ready = row && Date.now() - Date.parse(row.last_success) < 180000; res.status(ready ? 200 : 503).json({ ready: Boolean(ready) }); });
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     const status = error.status ?? (error.type === 'entity.too.large' ? 413 : 500);
     if (status === 500) console.error('Request failed:', error);
-    res.status(status).json({ error: status === 500 ? 'Something went wrong. Please try again.' : error.message });
+    res.status(status).json({ error: status === 500 ? 'Something went wrong. Please try again.' : error.message, ...(status < 500 && /^[a-z]+\.[a-z_]+$/.test(String(error.code ?? '')) ? { code: error.code } : {}) });
   });
   const timer = setInterval(() => { maintain().catch(() => console.error('Maintenance failed; check database and cleanup alerts.')); }, 60000);
   timer.unref(); await maintain();

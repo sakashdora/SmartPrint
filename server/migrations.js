@@ -46,6 +46,14 @@ export const migrations = [
       await backfillBusinessOrgs(tx);
     }
   }
+  ,
+  {
+    id: '0005_agents_printers_queue',
+    description: 'Agents, printers, pools, stored objects, print jobs, fenced attempts, queue and health events',
+    async up(tx) {
+      for (const table of ['agents', 'agent_credentials', 'printers', 'printer_pools', 'pool_members', 'stored_objects', 'print_jobs', 'print_attempts', 'queue_events', 'agent_health_events']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`);
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();

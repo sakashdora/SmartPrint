@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = '.data/smartprint.sqlite' } = {}) {
