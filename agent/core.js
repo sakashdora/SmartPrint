@@ -58,9 +58,10 @@ export class AgentCore {
     this.db.exec(`CREATE TABLE IF NOT EXISTS journal (attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, printer_id TEXT NOT NULL, lease_token TEXT NOT NULL, state TEXT NOT NULL, sha256 TEXT, options TEXT, pages INTEGER, created TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL, lease_token TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, college_id TEXT NOT NULL, limit_minor INTEGER NOT NULL, server_spent_minor INTEGER NOT NULL, state TEXT NOT NULL, expires TEXT NOT NULL, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, failures INTEGER NOT NULL DEFAULT 0, ack_pending INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS staff_pins (college_id TEXT PRIMARY KEY, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, failures INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS spend_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, reservation_id TEXT NOT NULL, job_ref TEXT, pages INTEGER NOT NULL, amount_minor INTEGER NOT NULL, at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS offline_jobs (seq INTEGER PRIMARY KEY AUTOINCREMENT, college_id TEXT NOT NULL, pages INTEGER NOT NULL, file_name TEXT, at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);`);
-    this.status = 'idle'; this.lastHeartbeat = 0; this.lastReport = 0; this.printerIds = this.settings.printerIds || {};
+    this.status = 'idle'; this.lastContact = 0; this.offlineAfterMs = 120000; this.lastHeartbeat = 0; this.lastReport = 0; this.printerIds = this.settings.printerIds || {};
   }
   close() { if (!this.closed) { this.closed = true; this.db.close(); } }
   #save() { writeFileSync(this.settingsPath, JSON.stringify({ ...this.settings, instanceId: this.instanceId, printerIds: this.printerIds }, null, 2)); }
@@ -81,6 +82,7 @@ export class AgentCore {
       throw Object.assign(new Error(info.error || 'Conflict'), { status: 409, code: info.code, halt: info.code === 'agent.instance_conflict' });
     }
     if (!response.ok) throw Object.assign(new Error(`Server answered ${response.status}`), { status: response.status });
+    this.lastContact = Date.now();
     return binary ? { bytes: Buffer.from(await response.arrayBuffer()), headers: response.headers } : response.json();
   }
   // Only genuine network trouble (no connection, timeout) or a server error is worth retrying; anything else is a bug and must surface.
@@ -154,7 +156,10 @@ export class AgentCore {
     return { rollback: false, now: this.settings.lastWall };
   }
   async fetchGrants() {
-    const { grants } = await this.#request('/api/agent/v2/offline/grants');
+    const { grants, staff = [], rates, limits } = await this.#request('/api/agent/v2/offline/grants');
+    this.settings.offline = { rates, limits }; this.#save();
+    this.db.prepare('DELETE FROM staff_pins WHERE college_id NOT IN (' + (staff.map(() => '?').join(',') || "''") + ')').run(...staff.map(m => m.collegeId));
+    for (const m of staff) this.db.prepare('INSERT INTO staff_pins (college_id,pin_salt,pin_hash,failures) VALUES (?,?,?,0) ON CONFLICT(college_id) DO UPDATE SET pin_salt=excluded.pin_salt, pin_hash=excluded.pin_hash, failures=0').run(m.collegeId, m.pin.salt, m.pin.hash);
     const keep = new Set(grants.map(g => g.id));
     const upsert = this.db.prepare("INSERT INTO grants (id,college_id,limit_minor,server_spent_minor,state,expires,pin_salt,pin_hash,failures) VALUES (?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET server_spent_minor=excluded.server_spent_minor, state=excluded.state, expires=excluded.expires, failures=0");
     for (const g of grants) upsert.run(g.id, g.collegeId, g.limitMinor, g.spentMinor, g.state, g.expires, g.pin.salt, g.pin.hash);
@@ -184,8 +189,32 @@ export class AgentCore {
     }
     const remaining = this.remainingMinor(grant);
     if (amountMinor > remaining) refuse('offline.insufficient', `Only ₹${(remaining / 100).toFixed(2)} is left on this reservation.`);
-    this.db.prepare('INSERT INTO spend_log (reservation_id,job_ref,pages,amount_minor,at) VALUES (?,?,?,?,?)').run(grant.id, jobRef, pages, amountMinor, new Date(clock.now).toISOString());
-    return { ok: true, remainingMinor: remaining - amountMinor };
+    const logged = this.db.prepare('INSERT INTO spend_log (reservation_id,job_ref,pages,amount_minor,at) VALUES (?,?,?,?,?)').run(grant.id, jobRef, pages, amountMinor, new Date(clock.now).toISOString());
+    return { ok: true, remainingMinor: remaining - amountMinor, seq: Number(logged.lastInsertRowid) };
+  }
+  // True when the server has not been reached for a while: the only time the LAN portal accepts work.
+  isOffline() { return Date.now() - this.lastContact > this.offlineAfterMs; }
+  // A spend that turned out smaller (partial print) or never happened (nothing printed) is corrected before it is synced.
+  adjustSpend(seq, amountMinor) {
+    if (amountMinor <= 0) this.db.prepare('DELETE FROM spend_log WHERE seq=? AND synced=0').run(seq);
+    else this.db.prepare('UPDATE spend_log SET amount_minor=? WHERE seq=? AND synced=0').run(amountMinor, seq);
+  }
+  staffPagesToday() {
+    const since = new Date(Date.now() - 86400000).toISOString();
+    return this.db.prepare('SELECT COALESCE(SUM(pages),0) AS n FROM offline_jobs WHERE at>=?').get(since).n;
+  }
+  // Staff identify themselves with the offline PIN set while online; no money is involved.
+  localStaffAuth(collegeId, pin) {
+    const refuse = (code, message) => { throw Object.assign(new Error(message), { code }); };
+    const row = this.db.prepare('SELECT * FROM staff_pins WHERE LOWER(college_id)=LOWER(?)').get(String(collegeId));
+    if (!row) return null;
+    if (row.failures >= AgentCore.PIN_ATTEMPTS) refuse('offline.locked', 'Too many wrong PINs. Try again when the print point is back online.');
+    const candidate = scryptSync(String(pin ?? ''), row.pin_salt, 32, { N: 16384 }), expected = Buffer.from(row.pin_hash, 'hex');
+    if (!(candidate.length === expected.length && timingSafeEqual(candidate, expected))) {
+      this.db.prepare('UPDATE staff_pins SET failures=failures+1 WHERE college_id=?').run(row.college_id);
+      refuse('offline.wrong_pin', 'Wrong PIN.');
+    }
+    return { collegeId: row.college_id };
   }
   recordOfflineStaffJob({ collegeId, pages, fileName = null }) {
     this.db.prepare('INSERT INTO offline_jobs (college_id,pages,file_name,at) VALUES (?,?,?,?)').run(String(collegeId), pages, fileName, new Date(this.#wall().now).toISOString());

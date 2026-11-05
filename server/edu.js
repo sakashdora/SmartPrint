@@ -24,7 +24,8 @@ export const DEFAULT_POLICIES = Object.freeze({
   offlineStudentPrinting: false,    // students may reserve money for use while the internet is down
   offlineStaffPrinting: false,
   maxReservationMinor: 20000,       // most a student may keep reserved at once (paise)
-  reservationHours: 24
+  reservationHours: 24,
+  offlineStaffDailyPages: 200       // most pages one staff member may print through an agent's offline portal per day
 });
 const POLICY_RULES = {
   studentPrinting: v => ['disabled', 'free', 'wallet'].includes(v),
@@ -36,7 +37,8 @@ const POLICY_RULES = {
   studentRateColourMinor: v => Number.isInteger(v) && v >= 0 && v <= 100000,
   offlineStudentPrinting: v => typeof v === 'boolean', offlineStaffPrinting: v => typeof v === 'boolean',
   maxReservationMinor: v => Number.isInteger(v) && v >= 100 && v <= 1000000,
-  reservationHours: v => Number.isInteger(v) && v >= 1 && v <= 168
+  reservationHours: v => Number.isInteger(v) && v >= 1 && v <= 168,
+  offlineStaffDailyPages: v => Number.isInteger(v) && v >= 1 && v <= 5000
 };
 export async function policiesOf(db, orgId) {
   const [row] = await db.query('SELECT policies, version FROM institution_settings WHERE org_id=$1', [orgId]);

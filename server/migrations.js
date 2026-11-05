@@ -119,6 +119,12 @@ export const migrations = [
     description: 'Offline reservations bound to one agent, replay-safe sync log, reconciliation cases',
     async up(tx) { for (const table of ['offline_reservations', 'offline_sync_log', 'reconciliation_cases']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`); }
   }
+  ,
+  {
+    id: '0012_offline_staff_pins',
+    description: 'Offline PIN verifiers for staff',
+    async up(tx) { await tx.query('SELECT 1 FROM offline_staff_pins LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

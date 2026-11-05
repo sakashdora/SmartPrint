@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS offline_reservations (id TEXT PRIMARY KEY, org_id TEX
 CREATE INDEX IF NOT EXISTS offline_res_agent ON offline_reservations(agent_id, state);
 CREATE INDEX IF NOT EXISTS offline_res_user ON offline_reservations(user_id, state);
 CREATE TABLE IF NOT EXISTS offline_sync_log (agent_id TEXT NOT NULL, seq BIGINT NOT NULL, kind TEXT NOT NULL, created TEXT NOT NULL, PRIMARY KEY(agent_id, seq, kind));
+CREATE TABLE IF NOT EXISTS offline_staff_pins (user_id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reconciliation_cases (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), kind TEXT NOT NULL, ref TEXT, detail TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL, resolved TEXT);
 CREATE TABLE IF NOT EXISTS queue_classes (pool_id TEXT NOT NULL REFERENCES printer_pools(id), class TEXT NOT NULL, f_last DOUBLE PRECISION NOT NULL DEFAULT 0, PRIMARY KEY(pool_id, class));
 CREATE INDEX IF NOT EXISTS print_jobs_queue ON print_jobs(org_id, pool_id, status, priority_boost, enqueued_at);

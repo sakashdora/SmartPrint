@@ -24,10 +24,21 @@ To start at logon, create a Task Scheduler task that runs `node agent/index.js r
 - **Credential rotation** every 30 days (the old one works for 24 more hours).
 - **Pages printed are reported** (from the Windows queue) so partial prints can be charged and handled correctly.
 
+## Outage printing page (LAN portal)
+
+`node agent/index.js run --portal 17640` also serves a small web page on the campus network (`http://<this PC>:17640`). It exists for outages only:
+
+- It **accepts work only while the agent cannot reach the server**. While the internet works it tells people to use the website, so the normal queue, wallet and audit trail are never bypassed.
+- **Students** enter their ID and the PIN they chose when reserving money (Wallet → reserve for offline use at this print point). The cost comes out of that reservation and never exceeds it.
+- **Staff** enter their ID and the offline PIN they set while online (`PUT /api/v2/edu/me/offline-pin`); no charge, limited to a daily number of pages (policy `offlineStaffDailyPages`).
+- Five wrong PINs lock the ID until the agent is back online. Everything is written to the numbered local log and applied by the server once, when the connection returns.
+- Colour goes only to a colour printer; a printer Windows reports as Offline is never chosen; a job that did not print is not charged, and a partly printed one is charged only for the pages that came out.
+- **The page is plain HTTP on the local network, so the PIN crosses that network unencrypted.** Use it on a trusted network or behind a TLS proxy. The page needs no internet; the file is processed on the agent PC.
+- It has been tested over real HTTP with a simulated printer, not yet with a real printer in an outage.
+
 ## Not included yet
 
 - Running as a Windows *service* and a **signed auto-updater**. The server already tells an outdated agent to update (`updateRequired`) but nothing installs updates. Both need a code-signing certificate and a distribution channel.
-- The LAN portal for offline printing (Phase 7).
 - **Real-printer validation.** The Windows driver reuses the shop connector's proven SumatraPDF/spooler code, but the v3 agent has only been tested with a simulated printer and with the job-tracking logic on recorded queue states. Before relying on it, run the test plan below with paper.
 
 ## Real-printer test plan (needs a person at the printer)

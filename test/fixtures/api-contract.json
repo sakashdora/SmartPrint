@@ -160,6 +160,7 @@
   "PUT /api/owner/prices",
   "PUT /api/uploads/:id/chunks/:part",
   "PUT /api/v2/edu/institution/policies",
+  "PUT /api/v2/edu/me/offline-pin",
   "PUT /api/v2/edu/pools/:id/members",
   "PUT /api/v2/edu/pools/:id/scheduler"
 ]

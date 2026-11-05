@@ -88,6 +88,20 @@ export function offlineRoutes(app, { db }) {
     if (!moved.length) throw fail(404, 'Active reservation not found.');
     res.json({ ok: true, state: 'closing', message: 'The money returns to your wallet once the print point has synced, or when the reservation expires.' });
   });
+  // A staff member chooses an offline PIN while online; agents receive only a salted verifier of it.
+  app.put('/api/v2/edu/me/offline-pin', need('print.unlimited_official'), async (req, res) => {
+    const { policies } = await policiesOf(db, req.org.id);
+    if (!policies.offlineStaffPrinting) throw fail(403, 'Offline printing for staff is not enabled for this institution.', 'offline.disabled');
+    const pin = String(req.body.pin ?? '');
+    if (!PIN.test(pin)) throw fail(400, 'Choose a PIN of 4–8 digits.');
+    const v = pinVerifier(pin);
+    await db.transaction(async tx => {
+      await tx.query('DELETE FROM offline_staff_pins WHERE user_id=$1', [req.user.id]);
+      await tx.query('INSERT INTO offline_staff_pins (user_id,org_id,pin_salt,pin_hash,created) VALUES ($1,$2,$3,$4,$5)', [req.user.id, req.org.id, v.salt, v.hash, now()]);
+      await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'offline.staff_pin_set', targetType: 'user', targetId: req.user.id });
+    });
+    res.json({ ok: true });
+  });
   app.get('/api/v2/edu/offline/reservations', need('wallet.view_any'), async (req, res) => {
     res.json((await db.query('SELECT r.*, p.name, p.college_id FROM offline_reservations r LEFT JOIN edu_profiles p ON p.user_id=r.user_id AND p.org_id=r.org_id WHERE r.org_id=$1 ORDER BY r.created DESC LIMIT 200', [req.org.id])).map(r => ({ ...view(r), name: r.name, collegeId: r.college_id })));
   });
@@ -99,7 +113,16 @@ export function offlineRoutes(app, { db }) {
   // What this agent may spend: only reservations bound to it. The PIN itself is never sent, only a salted verifier.
   app.get('/api/agent/v2/offline/grants', async (req, res) => {
     const rows = await db.query("SELECT r.*, p.college_id FROM offline_reservations r LEFT JOIN edu_profiles p ON p.user_id=r.user_id AND p.org_id=r.org_id WHERE r.agent_id=$1 AND r.org_id=$2 AND r.state IN ('active','closing')", [bearerAgent(req).id, bearerAgent(req).org_id]);
-    res.json({ grants: rows.map(r => ({ id: r.id, collegeId: r.college_id, limitMinor: Number(r.limit_minor), spentMinor: Number(r.spent_minor), state: r.state, expires: r.expires, pin: { salt: r.pin_salt, hash: r.pin_hash } })) });
+    const { policies } = await policiesOf(db, bearerAgent(req).org_id);
+    const staff = policies.offlineStaffPrinting
+      ? await db.query('SELECT p.college_id, s.pin_salt, s.pin_hash FROM offline_staff_pins s JOIN edu_profiles p ON p.user_id=s.user_id AND p.org_id=s.org_id WHERE s.org_id=$1', [bearerAgent(req).org_id])
+      : [];
+    res.json({
+      grants: rows.map(r => ({ id: r.id, collegeId: r.college_id, limitMinor: Number(r.limit_minor), spentMinor: Number(r.spent_minor), state: r.state, expires: r.expires, pin: { salt: r.pin_salt, hash: r.pin_hash } })),
+      staff: staff.map(r => ({ collegeId: r.college_id, pin: { salt: r.pin_salt, hash: r.pin_hash } })),
+      rates: { bw: policies.studentRateBwMinor, color: policies.studentRateColourMinor },
+      limits: { maxPagesPerJob: policies.maxPagesPerJob, maxCopies: policies.maxCopies, colourStudents: policies.colourStudents, colourStaff: policies.colourStaff, staffDailyPages: policies.offlineStaffDailyPages, studentsEnabled: policies.offlineStudentPrinting, staffEnabled: policies.offlineStaffPrinting }
+    });
   });
 
   app.post('/api/agent/v2/sync', async (req, res) => {

@@ -76,7 +76,7 @@ test('spending offline: PIN, limit, expiry, lock-out and a clock set backwards',
   await s.credit(10000); await s.reserve(a, 1000, '2468');
   await a.fetchGrants();
   const id = await s.collegeId(s.student);
-  const spend = (o = {}) => { try { return a.localSpend({ collegeId: id, pin: '2468', pages: 2, amountMinor: 300, ...o }); } catch (e) { return { code: e.code }; } };
+  const spend = (o = {}) => { try { const r = a.localSpend({ collegeId: id, pin: '2468', pages: 2, amountMinor: 300, ...o }); return { ok: r.ok, remainingMinor: r.remainingMinor }; } catch (e) { return { code: e.code }; } };
   assert.deepEqual(spend({ pin: '0000' }), { code: 'offline.wrong_pin' });
   assert.deepEqual(spend({ collegeId: 'NOBODY' }), { code: 'offline.no_reservation' });
   assert.deepEqual(spend({ amountMinor: 1100 }), { code: 'offline.insufficient' });
