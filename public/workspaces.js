@@ -23,6 +23,11 @@ const isOnline = d => Boolean(d?.active && d.heartbeat && Date.now() - Date.pars
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let freshScan = false;
 
+// What a printer can do. The owner always has the last word; detection only pre-fills the choice.
+const abilityPicker = ({ color, duplex, scope, id = '', disabled = false }) => `<div class="ability-picker" style="display:flex;gap:12px;flex-wrap:wrap;margin:8px 0">
+  <label class="small">Prints <select data-ability="color" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${color ? '' : 'selected'}>Black &amp; white only</option><option value="true" ${color ? 'selected' : ''}>Colour</option></select></label>
+  <label class="small">Sides <select data-ability="duplex" data-scope="${scope}" data-id="${id}" ${disabled ? 'disabled' : ''}><option value="false" ${duplex ? '' : 'selected'}>One-sided only</option><option value="true" ${duplex ? 'selected' : ''}>Two-sided (automatic)</option></select></label></div>`;
+
 function thisPcSection(pc, devices, reported, escape) {
   if (!pc) {
     return `<section class="panel scanner-panel" id="this-pc">
@@ -60,12 +65,11 @@ function thisPcSection(pc, devices, reported, escape) {
       </div>
       <div class="scanned-meta">
         <span class="chip">${escape(p.driverName || 'Windows driver')}</span>
-        <span class="chip">${p.color ? 'Colour' : 'Black & white'}</span>
-        <span class="chip">${p.duplex ? 'Two-sided' : 'One-sided'}</span>
         <span class="chip">${p.status === 'Offline' ? '⚠ Offline in Windows' : escape(p.status || 'Ready')}</span>
       </div>
       ${p.status === 'Offline' ? '<p class="muted small">Windows reports this printer offline. Check the cable and power, or use the copy of this printer that is Ready.</p>' : ''}
-      ${p.verified ? '' : '<p class="muted small">Colour and two-sided support could not be read from the driver; it is assumed unsupported.</p>'}
+      ${abilityPicker({ color: p.color, duplex: p.duplex, scope: 'scan' })}
+      ${p.verified ? '<p class="muted small">Pre-filled from the printer driver. Change it if your printer is different.</p>' : '<p class="muted small">The driver did not say what this printer can do. Choose below before connecting.</p>'}
       <div class="scanned-actions">
         ${ready ? `<span class="badge active"><span class="live-dot dot-online"></span> Connected &amp; online</span>
           <button class="secondary small" data-test-print="${device.id}">Test print</button>`
@@ -122,10 +126,8 @@ export async function printersPage({ api, workspace, escape, notify }) {
           <span class="badge ${!d.active ? 'cancelled' : d.is_paused ? 'pending' : online ? 'active' : 'pending'}">${!d.active ? 'Disconnected' : d.is_paused ? 'Paused' : online ? 'Online & ready' : 'Offline'}</span>
         </div>
         <p class="muted small">${online ? escape(d.status_note || 'Ready') : d.active ? (d.heartbeat ? `Offline since ${new Date(d.heartbeat).toLocaleString()}. Start the SmartPrint connector on its PC, or click Connect above.` : 'Waiting for the connector to check in.') : 'Disconnected'}</p>
-        <div class="capability-tags">
-          <span class="chip">${d.color ? 'Colour' : 'Black & white'}</span>
-          <span class="chip">${d.duplex ? 'Two-sided' : 'One-sided'}</span>
-        </div>
+        ${d.active ? abilityPicker({ color: Number(d.color) === 1, duplex: Number(d.duplex) === 1, scope: 'device', id: d.id }) : `<div class="capability-tags"><span class="chip">${d.color ? 'Colour' : 'Black & white'}</span><span class="chip">${d.duplex ? 'Two-sided' : 'One-sided'}</span></div>`}
+        ${d.active ? `<p class="muted small">${d.cap_source === 'manual' ? 'Set by you; scans never change it.' : 'Detected from the driver; change it if it is wrong.'}${d.cap_source === 'manual' ? ` <a href="#" data-use-detected="${d.id}">Use detected</a>` : ''}</p>` : ''}
         ${d.active ? `<div class="printer-actions">
           <button class="secondary small" data-test-print="${d.id}" ${online ? '' : 'disabled title="The printer must be online"'}>Test print</button>
           <button class="secondary small" data-pause="${d.id}">${d.is_paused ? '▶ Resume' : '⏸ Pause'}</button>
@@ -146,6 +148,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
 
   document.querySelectorAll('[data-connect-local]').forEach(button => button.onclick = async () => {
     const printer = pc.printers.find(p => p.name === button.dataset.connectLocal);
+    const picked = kind => button.closest('.scanned-card').querySelector(`[data-ability=${kind}]`).value === 'true';
     const replace = pc.linked && !pc.linkedHere;
     if (replace && !confirm(`This PC's connector prints for ${pc.server}. Move it to this shop and print here instead?`)) return;
     button.disabled = true;
@@ -153,7 +156,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
     try {
       const linked = await api('/api/owner/printers/autoconnect', {
         method: 'POST',
-        body: { name: printer.name, ...(printer.verified ? { color: printer.color, duplex: printer.duplex } : {}) }
+        body: { name: printer.name, color: picked('color'), duplex: picked('duplex'), manual: true }
       });
       await connectorCall('/pair', { method: 'POST', body: { url: location.origin, token: linked.token, printer: printer.name, replace } });
       let device;
@@ -166,6 +169,19 @@ export async function printersPage({ api, workspace, escape, notify }) {
       notify(error.message);
     }
     await rerender();
+  });
+
+  document.querySelectorAll('select[data-scope=device]').forEach(select => select.onchange = async () => {
+    const card = select.closest('.printer-card');
+    try {
+      await api(`/api/owner/devices/${select.dataset.id}`, { method: 'PATCH', body: { color: card.querySelector('[data-ability=color]').value === 'true', duplex: card.querySelector('[data-ability=duplex]').value === 'true' } });
+      notify('Printer abilities saved. Customers will only be offered what this printer can do.');
+      await rerender();
+    } catch (error) { notify(error.message); }
+  });
+  document.querySelectorAll('[data-use-detected]').forEach(link => link.onclick = async event => {
+    event.preventDefault();
+    try { await api(`/api/owner/devices/${link.dataset.useDetected}`, { method: 'PATCH', body: { useDetected: true } }); notify('This printer will use what the connector detects.'); await rerender(); } catch (error) { notify(error.message); }
   });
 
   document.querySelectorAll('[data-test-print]').forEach(button => button.onclick = async () => {
@@ -209,7 +225,7 @@ export async function printersPage({ api, workspace, escape, notify }) {
   watchUpdates(
     () => Promise.all([api('/api/owner/devices'), api('/api/owner/printers/scan').catch(() => []), connectorState()]),
     [devices, reported, pcState],
-    rerender,
+    () => document.activeElement?.matches?.('.scanned-card select') ? undefined : rerender(), // do not wipe a choice the owner is making
     5000
   );
 }

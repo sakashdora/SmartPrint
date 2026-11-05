@@ -226,7 +226,11 @@ export async function createApp({ database, seed = true } = {}) {
   });
   app.get('/api/shops/:slug', async (req, res) => {
     const [shop] = await db.query("SELECT s.id,s.slug,s.name,s.location,s.bw,s.color,s.version,s.status,p.upi_id FROM shops s LEFT JOIN shop_payments p ON p.shop_id=s.id WHERE s.slug=$1 AND s.status='active'", [req.params.slug]);
-    if (!shop) throw fail(404, 'This shop is not accepting new orders.'); res.json(shop);
+    if (!shop) throw fail(404, 'This shop is not accepting new orders.');
+    // What the shop's printers can do, so the order page only offers options the shop can actually print.
+    // Counts every connected (active) printer, so a printer that is briefly offline does not hide an option.
+    const devices = await db.query('SELECT color, duplex FROM devices WHERE shop_id=$1 AND active=1', [shop.id]);
+    res.json({ ...shop, colorAvailable: devices.some(d => Number(d.color) === 1), duplexAvailable: devices.some(d => Number(d.duplex) === 1), printerCount: devices.length });
   });
   class ConcurrencyQueue {
     constructor(maxConcurrent = 8, timeoutMs = 30000) {

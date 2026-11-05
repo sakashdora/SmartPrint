@@ -155,6 +155,12 @@ export const migrations = [
     description: 'Outbound signed webhooks: endpoints and an outbox of deliveries',
     async up(tx) { await tx.query('SELECT 1 FROM webhook_endpoints LIMIT 1'); await tx.query('SELECT 1 FROM webhook_deliveries LIMIT 1'); }
   }
+  ,
+  {
+    id: '0018_device_capability_source',
+    description: 'Shop printers remember whether colour/two-sided were set by the owner (manual) or read from the driver',
+    async up(tx) { await tx.query('SELECT cap_source FROM devices LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();

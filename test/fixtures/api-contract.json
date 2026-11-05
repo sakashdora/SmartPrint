@@ -75,6 +75,7 @@
   "GET /maintenance",
   "GET /metrics",
   "GET /readyz",
+  "PATCH /api/owner/devices/:id",
   "PATCH /api/v2/edu/departments/:id",
   "PATCH /api/v2/edu/printers/:id",
   "PATCH /api/v2/edu/users/:id",

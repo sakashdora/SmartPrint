@@ -771,6 +771,18 @@ export async function renderCustomer({ api, mount, money, escape, health, notify
   </main>`);
 
   const form = document.querySelector('#print-form');
+  // Only offer what this shop's printers can actually do (set by the shop owner, or detected from the printer).
+  const limitOption = (selector, groupSelector, message) => {
+    const input = form.querySelector(selector);
+    if (!input) return;
+    input.disabled = true;
+    input.closest('label')?.classList.add('is-disabled');
+    input.closest('label')?.setAttribute('title', message);
+    const group = form.querySelector(groupSelector);
+    if (group && !group.querySelector('.ability-note')) group.insertAdjacentHTML('beforeend', `<p class="muted small ability-note" style="margin:6px 0 0">${message}</p>`);
+  };
+  if (shop.printerCount > 0 && shop.colorAvailable === false) limitOption('[name=color][value=color]', '.option-color-group', 'This shop prints in black &amp; white only.');
+  if (shop.printerCount > 0 && shop.duplexAvailable === false) limitOption('[name=duplex][value=true]', '.option-sides-group', 'This shop prints one-sided only.');
   const dropPanel = document.querySelector('#drop-panel');
   const fileInput = document.querySelector('#files');
   const dropzone = document.querySelector('#direct-dropzone');

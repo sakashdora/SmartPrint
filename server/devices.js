@@ -286,26 +286,29 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!printerName) throw fail(400, 'Choose a printer.');
 
     let [device] = await db.query(
-      'SELECT id, name, active, color, duplex FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
+      'SELECT id, name, active, color, duplex, cap_source FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName]
     );
     // Capabilities come from the connector's driver probe on the shop PC (sent by the page) or stay
     // unknown, which means no colour and no duplex, so such jobs are never routed to this printer.
     // The connector reports the driver values again once it checks in.
+    // `manual: true` means the owner chose these on screen (they stay put; later scans never overwrite them).
     const capability = flag => typeof req.body[flag] === 'boolean' ? (req.body[flag] ? 1 : 0) : undefined;
+    const manual = req.body.manual === true && capability('color') !== undefined && capability('duplex') !== undefined;
     const secret = token();
     if (!device) {
       const id = randomUUID();
       // No heartbeat: the printer shows online only once its connector checks in with this key.
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
-        id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0
+      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
+        id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0, manual ? 'manual' : 'driver'
       ]);
       device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0 };
     } else {
-      const color = capability('color') ?? device.color, duplex = capability('duplex') ?? device.duplex;
+      const keep = device.cap_source === 'manual' && !manual; // the owner's earlier choice wins over a detected value
+      const color = keep ? device.color : capability('color') ?? device.color, duplex = keep ? device.duplex : capability('duplex') ?? device.duplex;
       // The current key keeps working until a connector actually checks in with the new one. A Connect
       // whose key never reaches the connector (blocked, closed, asleep) therefore cannot lock it out.
-      await db.query('UPDATE devices SET name=$1, color=$2, duplex=$3 WHERE id=$4', [printerName, color, duplex, device.id]);
+      await db.query('UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4 WHERE id=$5', [printerName, color, duplex, manual || keep ? 'manual' : 'driver', device.id]);
       pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
       Object.assign(device, { name: printerName, color, duplex });
     }
@@ -323,7 +326,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
     res.json(rows.map(({ paused, paused_note, ...d }) => {
       // Same 3-minute window the dashboard and job routing use.
       const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000));
@@ -339,11 +342,30 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const shop = await ownerShop(req), name = String(req.body.name || '').trim();
     if (name.length < 2 || name.length > 100) throw fail(400, 'Enter a printer name.');
     const id = randomUUID(), secret = token();
-    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
-      id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0
+    await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
+      id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0, 'driver'
     ]);
     await audit(db, req.user.id, 'device.paired', id);
     res.status(201).json({ id, token: secret });
+  });
+
+  // The owner states what a printer can do: black & white only or colour, one-sided only or two-sided. What the owner
+  // sets is never overwritten by what the connector detects; `useDetected: true` hands control back to detection.
+  app.patch('/api/owner/devices/:id', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT id, color, duplex, cap_source FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Printer not found.');
+    if (req.body.useDetected === true) {
+      await db.query("UPDATE devices SET cap_source='driver' WHERE id=$1", [device.id]);
+      await audit(db, req.user.id, 'device.capabilities_auto', device.id);
+      return res.json({ ok: true, cap_source: 'driver', color: Boolean(device.color), duplex: Boolean(device.duplex) });
+    }
+    if (typeof req.body.color !== 'boolean' && typeof req.body.duplex !== 'boolean') throw fail(400, 'Choose colour and/or two-sided.');
+    const color = typeof req.body.color === 'boolean' ? (req.body.color ? 1 : 0) : device.color;
+    const duplex = typeof req.body.duplex === 'boolean' ? (req.body.duplex ? 1 : 0) : device.duplex;
+    await db.query("UPDATE devices SET color=$1, duplex=$2, cap_source='manual' WHERE id=$3", [color, duplex, device.id]);
+    await audit(db, req.user.id, 'device.capabilities_set', device.id);
+    res.json({ ok: true, cap_source: 'manual', color: Boolean(color), duplex: Boolean(duplex) });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
@@ -547,7 +569,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     // device's own row is updated, and only from explicit booleans.
     const capabilities = req.body.capabilities;
     if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
-      await db.query('UPDATE devices SET color=$1, duplex=$2 WHERE id=$3', [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
+      await db.query("UPDATE devices SET color=$1, duplex=$2 WHERE id=$3 AND COALESCE(cap_source,'driver')<>'manual'", [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
     }
     res.json({ ok: true, count: list.length });
   });

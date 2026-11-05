@@ -63,9 +63,11 @@ export function agentRoutes(app, { db, key }) {
     if (name.length < 2 || name.length > 100) throw fail(400, 'Enter a printer name.');
     // An administrator can correct capabilities the driver could not report; that choice is not overwritten by later scans.
     const override = ['capColor', 'capDuplex'].some(k => typeof b[k] === 'boolean');
+    // `useDetected: true` hands the abilities back to what the agent detects (the next report overwrites them).
+    const source = b.useDetected === true && !override ? 'driver' : override ? 'admin' : p.cap_source;
     await db.transaction(async tx => {
       await tx.query('UPDATE printers SET display_name=$1, cap_color=$2, cap_duplex=$3, cap_source=$4, status=$5 WHERE id=$6 AND org_id=$7',
-        [name, typeof b.capColor === 'boolean' ? flag(b.capColor) : p.cap_color, typeof b.capDuplex === 'boolean' ? flag(b.capDuplex) : p.cap_duplex, override ? 'admin' : p.cap_source, ['active', 'inactive'].includes(b.status) ? b.status : p.status, p.id, req.org.id]);
+        [name, typeof b.capColor === 'boolean' ? flag(b.capColor) : p.cap_color, typeof b.capDuplex === 'boolean' ? flag(b.capDuplex) : p.cap_duplex, source, ['active', 'inactive'].includes(b.status) ? b.status : p.status, p.id, req.org.id]);
       await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'printer.updated', targetType: 'printer', targetId: p.id, data: { override } });
     });
     res.json({ ok: true });

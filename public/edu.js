@@ -143,9 +143,24 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     act('[data-revoke]', async el => { if (!confirm('Revoke this agent? It stops printing immediately.')) { el.disabled = false; return; } await api(`/api/v2/edu/agents/${el.dataset.revoke}/revoke`, { method: 'POST' }); await refresh(); });
   } else if (current === 'printers') {
     const printers = await api('/api/v2/edu/printers');
-    const cap = v => v === null || v === undefined ? 'unknown' : v ? 'yes' : 'no';
-    shell(`<section class="panel"><h2>Printers</h2><p class="muted">Colour and two-sided jobs only go to printers that report those abilities.</p>
-      ${table(['Printer', 'Agent', 'Colour', 'Two-sided', 'State', ''], printers.map(p => `<tr><td>${escape(p.display_name)}</td><td>${escape(p.agent_name)}</td><td>${cap(p.cap_color)}</td><td>${cap(p.cap_duplex)}</td><td>${p.paused ? 'Paused' : p.online ? 'Online' : 'Offline'}</td><td><button class="secondary small" data-pause="${escape(p.id)}" data-paused="${p.paused}">${p.paused ? 'Resume' : 'Pause'}</button> <button class="secondary small" data-test="${escape(p.id)}">Test page</button></td></tr>`))}</section>`);
+    // Colour and two-sided are choices the administrator can always make; detection only pre-fills them.
+    const capSelect = (p, kind) => {
+      const value = kind === 'color' ? p.cap_color : p.cap_duplex, labels = kind === 'color' ? ['Black &amp; white only', 'Colour'] : ['One-sided only', 'Two-sided (automatic)'];
+      const unset = value === null || value === undefined;
+      return `<select data-cap="${escape(p.id)}" data-kind="${kind}" aria-label="${kind === 'color' ? 'Colour' : 'Two-sided'} for ${escape(p.display_name)}">${unset ? '<option value="" selected disabled>Not detected: choose</option>' : ''}<option value="false" ${!unset && !value ? 'selected' : ''}>${labels[0]}</option><option value="true" ${!unset && value ? 'selected' : ''}>${labels[1]}</option></select>`;
+    };
+    shell(`<section class="panel"><h2>Printers</h2><p class="muted">Say what each printer can do: black &amp; white only or colour, one-sided only or two-sided. Colour and two-sided jobs only go to printers set up for them. The agent pre-fills what it detects; what you choose is kept.</p>
+      ${table(['Printer', 'Agent', 'Colour', 'Two-sided', 'State', ''], printers.map(p => `<tr><td>${escape(p.display_name)}</td><td>${escape(p.agent_name)}</td><td>${capSelect(p, 'color')}</td><td>${capSelect(p, 'duplex')}${p.cap_source === 'admin' ? `<br><small class="muted">set by you · <a href="#" data-detect="${escape(p.id)}">use detected</a></small>` : ''}</td><td>${p.paused ? 'Paused' : p.online ? 'Online' : 'Offline'}</td><td><button class="secondary small" data-pause="${escape(p.id)}" data-paused="${p.paused}">${p.paused ? 'Resume' : 'Pause'}</button> <button class="secondary small" data-test="${escape(p.id)}">Test page</button></td></tr>`))}</section>`);
+    document.querySelectorAll('select[data-cap]').forEach(select => select.onchange = async () => {
+      const row = select.closest('tr'), get = kind => row.querySelector(`select[data-kind=${kind}]`).value;
+      const body = {};
+      for (const kind of ['color', 'duplex']) if (get(kind) !== '') body[kind === 'color' ? 'capColor' : 'capDuplex'] = get(kind) === 'true';
+      try { await api(`/api/v2/edu/printers/${select.dataset.cap}`, { method: 'PATCH', body }); notify('Printer abilities saved.'); await refresh(); } catch (err) { notify(err.message); }
+    });
+    document.querySelectorAll('[data-detect]').forEach(link => link.onclick = async event => {
+      event.preventDefault();
+      try { await api(`/api/v2/edu/printers/${link.dataset.detect}`, { method: 'PATCH', body: { useDetected: true } }); notify('This printer will use what the agent detects.'); await refresh(); } catch (err) { notify(err.message); }
+    });
     // Printer groups: which printers belong to a group and which departments may use it (no department = open to everyone).
     const [pools, depts] = await Promise.all([api('/api/v2/edu/pools'), api('/api/v2/edu/departments').catch(() => [])]);
     document.querySelector('main .panel').insertAdjacentHTML('afterend', `<section class="panel"><h2>Printer groups</h2>
