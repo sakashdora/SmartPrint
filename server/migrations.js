@@ -143,6 +143,12 @@ export const migrations = [
     description: 'Session activity (last seen, device, created) for idle timeout and the session list',
     async up(tx) { await tx.query('SELECT last_seen, user_agent, created FROM sessions LIMIT 1'); }
   }
+  ,
+  {
+    id: '0016_alerts',
+    description: 'Operational alerts for institutions',
+    async up(tx) { await tx.query('SELECT 1 FROM alerts LIMIT 1'); }
+  }
 ];
 
 const now = () => new Date().toISOString();
