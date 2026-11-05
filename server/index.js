@@ -17,6 +17,8 @@ import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
 import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
 import { requestLogger, logEvent } from './logger.js';
 import { applyMigrations } from './migrations.js';
+import { platformRoutes } from './platform.js';
+import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
 
 const now = () => new Date().toISOString();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -53,8 +55,9 @@ export async function createApp({ database, seed = true } = {}) {
     for (const [id, email, role] of [['owner-demo', 'owner@smartprint.local', 'owner'], ['admin-demo', 'admin@smartprint.local', 'admin']]) {
       await db.query('INSERT INTO users (id,email,password,role) VALUES ($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [id, email, await hashPassword('SmartPrintDemo!2026'), role]);
     }
-    await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ('shop-demo','owner-demo','campus-print','Campus Print Studio','Ground floor · Near the main gate','active') ON CONFLICT(id) DO NOTHING");
-  }
+    await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ('shop-demo','owner-demo','campus-print','Campus Print Studio','Ground floor · Near the main gate','active') ON CONFLICT(id) DO NOTHING");  }
+  // Every shop belongs to exactly one business organization. Idempotent; normally a no-op after the migration.
+  try { await db.transaction(tx => backfillBusinessOrgs(tx)); } catch (error) { console.warn('[SmartPrint DB] Organization backfill skipped:', error.message); }
   const app = express();
   app.disable('x-powered-by');
   app.use(requestLogger);
@@ -190,6 +193,7 @@ export async function createApp({ database, seed = true } = {}) {
     try { await db.transaction(async tx => {
       await tx.query("INSERT INTO users (id,email,password,role) VALUES ($1,$2,$3,'owner')", [id, email, await hashPassword(password)]);
       await tx.query('INSERT INTO shops (id,owner_id,slug,name,location) VALUES ($1,$2,$3,$4,$5)', [shopId, id, `shop-${shopId.slice(0, 8)}`, name, location]);
+      await createBusinessOrg(tx, { id: shopId, owner_id: id, slug: `shop-${shopId.slice(0, 8)}`, name, status: 'pending' });
       await audit(tx, id, 'shop.registered', shopId);
     }); } catch (error) { if (String(error.message).toLowerCase().includes('unique')) throw fail(409, 'This email is already registered.'); throw error; }
     res.status(201).json({ message: 'Shop registered successfully! Platform admin approval is required before your shop can accept customer orders. Sign in to configure prices and connect printers.' });
@@ -594,7 +598,7 @@ export async function createApp({ database, seed = true } = {}) {
   app.get('/api/admin/audit', async (req, res) => res.json(await db.query('SELECT id,actor,action,target,created FROM audit ORDER BY created DESC LIMIT 100')));
   app.post('/api/admin/shops/:id/status', async (req, res) => {
     if (!['active', 'suspended'].includes(req.body.status)) throw fail(400, 'Choose active or suspended.');
-    await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
+    await db.transaction(async tx => { const changed = await tx.query('UPDATE shops SET status=$1 WHERE id=$2 RETURNING id', [req.body.status, req.params.id]); if (!changed.length) throw fail(404, 'Shop not found.'); await tx.query('UPDATE organizations SET status=$1 WHERE legacy_shop_id=$2', [req.body.status, req.params.id]); await audit(tx, req.user.id, `shop.${req.body.status}`, req.params.id); }); res.json({ ok: true });
   });
   app.get('/api/admin/orders', async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
@@ -634,6 +638,7 @@ export async function createApp({ database, seed = true } = {}) {
       daily: dailyOrders.reverse()
     });
   });
+  platformRoutes(app, { db, config });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -666,6 +671,9 @@ export async function createApp({ database, seed = true } = {}) {
     // and audit are deliberately kept: they are financial evidence or dedupe records.
     await tx.query('DELETE FROM quotes WHERE expires<=$1', [new Date(Date.now() - 7 * 86400000).toISOString()]);
     await tx.query('DELETE FROM idempotency_keys WHERE expires<=$1', [now()]);
+    await tx.query('DELETE FROM email_outbox WHERE created<=$1', [new Date(Date.now() - 14 * 86400000).toISOString()]);
+    await tx.query('DELETE FROM auth_tokens WHERE expires<=$1', [new Date(Date.now() - 86400000).toISOString()]);
+    await tx.query('DELETE FROM invitations WHERE expires<=$1 AND used_at IS NULL', [new Date(Date.now() - 30 * 86400000).toISOString()]);
     await tx.query('DELETE FROM notifications WHERE created<=$1', [new Date(Date.now() - 90 * 86400000).toISOString()]);
   });
   const maintain = async () => { await cleanup(); await sweepLeases(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };

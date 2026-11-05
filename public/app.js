@@ -133,6 +133,7 @@ function workspace(content, active, admin = false) {
   const links = admin ? [
     ['admin', 'Overview', 'home'],
     ['shops', 'Shops', 'shop'],
+    ['registrations', 'Registrations', 'list'],
     ['audit', 'Audit log', 'clock'],
     ['reports', 'Reports', 'chart'],
     ['settings-admin', 'Settings', 'gear'],
@@ -404,7 +405,7 @@ let cachedQrData = null;
 async function owner(view) {
   if (!me) { location.hash = 'login'; await route(); return; }
   if (me.role === 'admin') { location.hash = 'admin'; await route(); return; }
-  if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
+  if (me.role === 'customer') { location.hash = 'edu'; await route(); return; }
   if (me.role !== 'owner') { location.hash = 'login'; await route(); return; }
   
   if (view === 'payments') {
@@ -703,14 +704,17 @@ function empty(title, body) { return `<div class="empty"><strong>${title}</stron
 async function admin(view) {
   if (!me) { location.hash = 'login'; await route(); return; }
   if (me.role === 'owner') { location.hash = 'owner'; await route(); return; }
-  if (me.role === 'customer') { location.hash = 'track'; await route(); return; }
+  if (me.role === 'customer') { location.hash = 'edu'; await route(); return; }
   if (me.role !== 'admin') { location.hash = 'login'; await route(); return; }
   if (me.mfaRequired) { location.hash = 'security'; await route(); return; }
   const { adminDashboard } = await import('./dashboards.js?v=1.0.4');
   const load = () => Promise.all([api('/api/admin/shops'), api('/api/admin/audit'), api('/api/admin/stats').catch(() => null)]);
   const snapshot = await load(), [shops, events, stats] = snapshot;
-  let content;
-  if (view === 'audit') {
+  let content, afterRender;
+  if (view === 'registrations') {
+    const platformView = await import('./platform.js');
+    ({ html: content, bind: afterRender } = await platformView.registrationsView({ api, escape, time, notify, refresh: route }));
+  } else if (view === 'audit') {
     content = `<div class="workhead"><div><h1>Audit log</h1><p class="muted">A record of shop access, payments and print fulfilment.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Recent events</h2><span class="muted">Latest 100</span></div>${events.length ? `<div class="table-wrap"><table><thead><tr><th>Action</th><th>Actor</th><th>Target</th><th>Time</th></tr></thead><tbody>${events.map(e => `<tr><td>${escape(e.action)}</td><td>${escape(e.actor.slice(0, 12))}</td><td>${escape(e.target.slice(0, 12))}</td><td>${time(e.created)}</td></tr>`).join('')}</tbody></table></div>` : empty('No events yet.', 'Administrative and fulfilment actions appear here.')}</section>`;
   } else if (view === 'reports') {
     content = `<div class="workhead"><div><h1>Platform reports</h1><p class="muted">Aggregated usage, print volume, and shop performance metrics.</p></div><button class="secondary" id="admin-refresh">${icon('refresh')} Refresh</button></div><section class="panel"><div class="panel-heading"><h2>Platform Summary</h2></div><div class="kpi-grid"><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill green">${icon('shop')}</span><span class="admin-kpi-title">Total Shops</span></div><div class="admin-kpi-stat">${shops.length}</div><p class="admin-kpi-sub">Registered across platform</p></div><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill blue">${icon('users')}</span><span class="admin-kpi-title">Active Outlets</span></div><div class="admin-kpi-stat">${shops.filter(s => s.status === 'active').length}</div><p class="admin-kpi-sub">Accepting live prints</p></div><div class="admin-kpi-card"><div class="admin-kpi-meta"><span class="kpi-icon-pill amber">${icon('clock')}</span><span class="admin-kpi-title">Recorded Events</span></div><div class="admin-kpi-stat">${events.length}</div><p class="admin-kpi-sub">Audit trail records</p></div></div></section>`;
@@ -720,6 +724,7 @@ async function admin(view) {
     content = adminDashboard({ view, shops, events, stats, filter: shopFilter, escape, badge, time, empty, money });
   }
   workspace(content, view, true);
+  afterRender?.();
   
   const refreshBtn = document.querySelector('#admin-refresh');
   if (refreshBtn) refreshBtn.onclick = () => route();
@@ -846,6 +851,7 @@ function auth(register = false) {
     </form>
     ${!register && health?.demo ? '<div class="notice-inline">Local demo environment active. Sign in with your registered account credentials.</div>' : ''}
     <p class="foot"><a href="${register ? '#login' : '#register'}">${register ? 'Already registered? Sign in' : 'New here? Register your shop'}</a></p>
+    <p class="foot">${register ? '<a href="#register-org">College, university or detailed application →</a>' : '<a href="#forgot-password">Forgot your password?</a> · <a href="#register-org">Register a college or university</a>'}</p>
   </main>`);
 
   const togglePassBtn = document.querySelector('#auth-toggle-pass');
@@ -882,7 +888,7 @@ function auth(register = false) {
               body: { email: data.email, password: data.password, code: data.code || undefined }
             });
             me = user;
-            const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+            const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'edu' : 'owner'));
             location.hash = target;
             await route();
           } catch (err) {
@@ -966,7 +972,7 @@ function auth(register = false) {
         });
         me = user;
         notify('Signed in with Passkey!');
-        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+        const target = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'edu' : 'owner'));
         location.hash = target;
         await route();
       } catch (err) {
@@ -992,7 +998,7 @@ async function route() {
     if (!view) {
       if (path === '/workspace' || path === '/login') {
         if (me) {
-          view = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner'));
+          view = me.mfaRequired ? 'security' : (me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'edu' : 'owner'));
           location.hash = view;
         } else {
           view = 'login';
@@ -1001,10 +1007,15 @@ async function route() {
         view = 'print';
       }
     }
+    const [viewName, viewArg] = view.split('/');
+    if (['register-org', 'verify-email', 'application', 'invite', 'forgot-password', 'reset-password', 'edu'].includes(viewName)) {
+      const platformPages = await import('./platform.js');
+      return platformPages.orgPage(viewName, viewArg, { api, mount, escape, notify, me, route });
+    }
     if (view === 'workspace' || view === 'login' || view === 'admin-login') {
       if (me && !me.mfaRequired) {
         startNotificationStream();
-        const target = me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'track' : 'owner');
+        const target = me.role === 'admin' ? 'admin' : (me.role === 'customer' ? 'edu' : 'owner');
         location.hash = target;
         await route();
         return;
@@ -1030,7 +1041,7 @@ async function route() {
         notify,
         onVerified: async user => {
           me = user;
-          const target = user.role === 'admin' ? 'admin' : (user.role === 'customer' ? 'track' : 'owner');
+          const target = user.role === 'admin' ? 'admin' : (user.role === 'customer' ? 'edu' : 'owner');
           location.hash = target;
           await route();
         },
@@ -1071,7 +1082,7 @@ async function route() {
     }
     else if (view === 'track') await tracking();
     else if (['owner', 'queue', 'settings', 'transactions', 'payments', 'printers'].includes(view)) await owner(view);
-    else if (['admin', 'shops', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);
+    else if (['admin', 'shops', 'registrations', 'audit', 'reports', 'settings-admin'].includes(view)) await admin(view);
     else auth(false);
   } catch (error) {
     mount(`<main class="container"><section class="panel"><h1>We couldn’t open this page.</h1><p class="error">${escape(error.message)}</p><a href="#login">Sign in</a> · <a href="#print">Try your shop again</a></section></main>`);

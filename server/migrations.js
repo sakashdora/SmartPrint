@@ -7,6 +7,8 @@
 // `schema_migrations` records that it did. A migration that cannot run is reported (and, with
 // REQUIRE_MIGRATIONS=true, stops the server from starting) instead of being skipped silently.
 //
+import { backfillBusinessOrgs } from './orgs.js';
+
 // Rules for new migrations: additive only (expand, backfill, contract in later releases), idempotent, no
 // Business column drops or renames, and valid on both PostgreSQL (`postgres` true) and SQLite.
 export const migrations = [
@@ -32,6 +34,16 @@ export const migrations = [
         'CREATE INDEX IF NOT EXISTS quotes_expires ON quotes(expires)',
         'CREATE INDEX IF NOT EXISTS leases_expires ON print_leases(expires, state)'
       ]) await tx.query(sql);
+    }
+  }
+  ,
+  {
+    id: '0004_organizations',
+    description: 'Organizations, memberships, registrations, invitations; every shop wrapped by a business organization',
+    async up(tx) {
+      for (const table of ['organizations', 'memberships', 'organization_registrations', 'invitations', 'auth_tokens', 'audit_log_v2', 'email_outbox']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`);
+      await tx.query('SELECT organization_id FROM shops LIMIT 1');
+      await backfillBusinessOrgs(tx);
     }
   }
 ];

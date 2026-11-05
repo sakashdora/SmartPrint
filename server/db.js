@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = '.data/smartprint.sqlite' } = {}) {
@@ -75,7 +75,8 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
             ['shop_payments', 'qr_image', 'TEXT'],
             ['sessions', 'mfa', 'INTEGER NOT NULL DEFAULT 0'],
             ['devices', 'paused', 'INTEGER NOT NULL DEFAULT 0'],
-            ['devices', 'paused_note', 'TEXT']
+            ['devices', 'paused_note', 'TEXT'],
+            ['shops', 'organization_id', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -129,6 +130,7 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = '.da
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN paused_note TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE shops ADD COLUMN organization_id TEXT;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {
