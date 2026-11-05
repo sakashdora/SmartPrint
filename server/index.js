@@ -17,17 +17,37 @@ import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
 import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
 import { transitionOrder } from './state-machine.js';
 import { requestLogger, logEvent } from './logger.js';
+import { applyMigrations } from './migrations.js';
 
 const now = () => new Date().toISOString();
 const fail = (status, message) => Object.assign(new Error(message), { status });
 export async function createApp({ database, seed = true } = {}) {
   const config = configuration();
+  // A developer machine whose .env points at the real database writes real customer data. Say so loudly.
+  if (!config.production && !database && process.env.DATABASE_URL) {
+    try {
+      const host = new URL(process.env.DATABASE_URL).hostname;
+      if (!['localhost', '127.0.0.1', '::1', 'db'].includes(host)) {
+        console.warn(`[SmartPrint DB] WARNING: this non-production server is using the remote database "${host}". Anything you do here changes that database. Use a separate Neon branch for development and testing.`);
+        if (process.env.REFUSE_REMOTE_DB_IN_DEV === 'true') throw new Error('REFUSE_REMOTE_DB_IN_DEV is set: not starting a development server against a remote database.');
+      }
+    } catch (error) { if (/REFUSE_REMOTE_DB_IN_DEV/.test(error.message)) throw error; }
+  }
   const db = database ?? await openDatabase();
   try {
     await db.migrate();
     console.log(`[SmartPrint DB] Database schema verified and up to date (${db.kind}).`);
   } catch (migrationError) {
     console.warn('[SmartPrint DB] Automatic startup migration warning:', migrationError.message);
+  }
+  // Record and verify versioned changes. A change that did not land is reported loudly; set
+  // REQUIRE_MIGRATIONS=true to refuse to start in any environment; production refuses by default.
+  const migrated = await applyMigrations(db, { log: message => console.log(message) });
+  if (migrated.failed) {
+    const message = '[SmartPrint DB] Migration ' + migrated.failed.id + ' could not be applied: ' + migrated.failed.error + '. Run npm run migrate with the database owner login (MIGRATION_DATABASE_URL).';
+    // In production a half-migrated database must stop the deploy (the previous version keeps serving) rather than start and fail requests.
+    if (process.env.REQUIRE_MIGRATIONS === 'true' || (config.production && process.env.ALLOW_PENDING_MIGRATIONS !== 'true')) throw new Error(message);
+    console.error(message);
   }
   const key = loadKey();
   if (seed && !process.env.DATABASE_URL && !config.production) {
@@ -124,14 +144,7 @@ export async function createApp({ database, seed = true } = {}) {
     if (!changed.length) return;
     const targetStatus = changed[0].status;
     await tx.query('INSERT INTO transactions (id,order_id,shop_id,amount,method,reference,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), order.id, order.shop_id, order.amount, order.method, reference, now()]);
-    try {
-      await tx.query('SAVEPOINT collect_hist_sp');
-      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, 'system', 'payment.collected', reference, now()]);
-      await tx.query('RELEASE SAVEPOINT collect_hist_sp');
-    } catch (histErr) {
-      await tx.query('ROLLBACK TO SAVEPOINT collect_hist_sp').catch(() => {});
-      console.warn('[SmartPrint] Non-critical order_history audit insert failed in collect:', histErr.message);
-    }
+    await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, 'system', 'payment.collected', reference, now()]);
   };
   app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
@@ -309,14 +322,7 @@ export async function createApp({ database, seed = true } = {}) {
       opts.file_name = fileName;
       opts.priority = 0;
       await tx.query('INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, quote.shop_id, quote.document_id, digest(receipt), JSON.stringify(opts), quote.pages, quote.sides, quote.sheets, quote.amount, req.body.method, now()]);
-      try {
-        await tx.query('SAVEPOINT order_history_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, 'created', 'awaiting_payment', 'customer', 'order.created', req.body.method, now()]);
-        await tx.query('RELEASE SAVEPOINT order_history_sp');
-      } catch (histErr) {
-        await tx.query('ROLLBACK TO SAVEPOINT order_history_sp').catch(() => {});
-        console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
-      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, 'created', 'awaiting_payment', 'customer', 'order.created', req.body.method, now()]);
       if (req.body.method === 'upi') {
         const [payee] = await tx.query('SELECT * FROM shop_payments WHERE shop_id=$1', [quote.shop_id]);
         if (!payee) throw fail(409, 'This shop has not set up UPI. Choose cash.');
@@ -352,10 +358,6 @@ export async function createApp({ database, seed = true } = {}) {
   app.post('/api/orders/:id/payment', async (req, res) => {
     let [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2 AND payment='pending' AND status='awaiting_payment'", [req.params.id, digest(bearer(req))]);
     if (!order) throw fail(404, 'Payable order not found.');
-    if (order.method !== 'online') {
-      await db.query("UPDATE orders SET method='online' WHERE id=$1", [order.id]);
-      order.method = 'online';
-    }
     const keyId = process.env.RAZORPAY_KEY_ID, secret = process.env.RAZORPAY_KEY_SECRET;
     if (!config.payments || !keyId || !secret) throw fail(503, 'Online payments are unavailable.');
     const [document] = await db.query('SELECT id FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
@@ -372,15 +374,16 @@ export async function createApp({ database, seed = true } = {}) {
       await db.query('UPDATE orders SET provider_order=$1 WHERE id=$2 AND provider_order=$3', [provider.id, order.id, marker]); order.provider_order = provider.id;
     }
     if (order.provider_order.startsWith('creating:')) throw fail(409, 'Payment setup needs reconciliation. Contact the shop.');
+    // Switch the method only now: if online payment is unavailable the order must stay payable at the counter.
+    if (order.method !== 'online') {
+      await db.query("UPDATE orders SET method='online' WHERE id=$1 AND payment='pending' AND status='awaiting_payment'", [order.id]);
+      order.method = 'online';
+    }
     res.json({ key: keyId, order_id: order.provider_order, amount: order.amount, currency: 'INR' });
   });
   app.post('/api/orders/:id/payment/verify', async (req, res) => {
     let [order] = await db.query("SELECT * FROM orders WHERE id=$1 AND token=$2", [req.params.id, digest(bearer(req))]);
     if (!order) throw fail(404, 'Order not found.');
-    if (order.method !== 'online') {
-      await db.query("UPDATE orders SET method='online' WHERE id=$1", [order.id]);
-      order.method = 'online';
-    }
     if (order.payment === 'paid') return res.json({ verified: true, status: order.status });
     if (order.status !== 'awaiting_payment') throw fail(409, 'Order is not awaiting payment.');
 
@@ -404,6 +407,11 @@ export async function createApp({ database, seed = true } = {}) {
     await db.transaction(async tx => {
       const inserted = await tx.query('INSERT INTO payment_events (id,created) VALUES ($1,$2) ON CONFLICT(id) DO NOTHING RETURNING id', [razorpay_payment_id, now()]);
       if (!inserted.length) return;
+      // Only a payment whose signature has been verified may change how the order is paid.
+      if (order.method !== 'online') {
+        await tx.query("UPDATE orders SET method='online' WHERE id=$1 AND payment='pending'", [order.id]);
+        order.method = 'online';
+      }
       await collect(tx, order, razorpay_payment_id);
       await audit(tx, 'gateway.verify', 'payment.verified', order.id);
     });
@@ -495,15 +503,15 @@ export async function createApp({ database, seed = true } = {}) {
       if (cached) return res.status(cached.status).json(cached.body);
     }
     const order = await ownerOrder(req);
-    const changed = await db.query("UPDATE orders SET status='printing' WHERE id=$1 AND payment='paid' AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
+    // The status change and its history row commit together: a failed history write must not leave a silent gap.
+    const changed = await db.transaction(async tx => {
+      const rows = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND payment='paid' AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);
+      if (rows.length) await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'manual', now()]);
+      return rows;
+    });
     if (!changed.length) {
       if (idempKey && order.status === 'printing') return res.json({ ok: true });
       throw fail(409, 'Only a paid queued order with an available file can start.');
-    }
-    try {
-      await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'manual', now()]);
-    } catch (histErr) {
-      console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
     }
     await audit(db, req.user.id, 'print.started', order.id);
     createNotification(db, {
@@ -522,12 +530,10 @@ export async function createApp({ database, seed = true } = {}) {
     const order = await ownerOrder(req);
     if (order.payment !== 'paid' || !['printing', 'queued'].includes(order.status)) throw fail(409, 'Start a paid order before opening its print file.');
     if (order.status === 'queued') {
-      await db.query("UPDATE orders SET status='printing' WHERE id=$1", [order.id]);
-      try {
-        await db.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'download', now()]);
-      } catch (histErr) {
-        console.warn('[SmartPrint] Non-critical order_history audit insert failed:', histErr.message);
-      }
+      await db.transaction(async tx => {
+        await tx.query("UPDATE orders SET status='printing' WHERE id=$1", [order.id]);
+        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, 'queued', 'printing', req.user.id, 'print.started', 'download', now()]);
+      });
     }
     if ((await db.query('SELECT order_id FROM print_leases WHERE order_id=$1', [order.id])).length) throw fail(409, 'The connector is handling this print. Check its physical output before taking further action.');
     const [doc] = await db.query('SELECT * FROM documents WHERE id=$1 AND expires>$2', [order.document_id, now()]);
@@ -548,14 +554,7 @@ export async function createApp({ database, seed = true } = {}) {
         if (idempKey && order.status === 'completed') return;
         throw fail(409, 'Only a printing order can be completed.');
       }
-      try {
-        await tx.query('SAVEPOINT complete_hist_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'completed', req.user.id, 'print.confirmed.file_deleted', 'physical_output_verified', now()]);
-        await tx.query('RELEASE SAVEPOINT complete_hist_sp');
-      } catch (histErr) {
-        await tx.query('ROLLBACK TO SAVEPOINT complete_hist_sp').catch(() => {});
-        console.warn('[SmartPrint] Non-critical order_history audit insert failed in complete:', histErr.message);
-      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'completed', req.user.id, 'print.confirmed.file_deleted', 'physical_output_verified', now()]);
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       await audit(tx, req.user.id, 'print.confirmed.file_deleted', order.id);
@@ -658,6 +657,18 @@ export async function createApp({ database, seed = true } = {}) {
       await tx.query("UPDATE orders SET status='expired',deleted_at=$1 WHERE document_id=$2 AND status<>'completed'", [now(), doc.id]);
       await tx.query('DELETE FROM documents WHERE id=$1', [doc.id]); await audit(tx, 'cleanup', 'file.expired.deleted', doc.id);
     }
+    // A quote lives 15 minutes but its prepared document used to live 24 hours even when nobody ordered it,
+    // so anonymous quotes could fill a shop's storage quota for a day. Once every quote of a document has
+    // expired (plus a grace period that covers an order being written at the expiry instant) and no order
+    // refers to it, the document is deleted. Documents without quotes (owner test pages and remote prints
+    // always have an order) are never touched here.
+    const grace = new Date(Date.now() - 5 * 60000).toISOString();
+    await tx.query('DELETE FROM documents WHERE EXISTS (SELECT 1 FROM quotes q WHERE q.document_id=documents.id) AND NOT EXISTS (SELECT 1 FROM quotes q WHERE q.document_id=documents.id AND q.expires>$1) AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.document_id=documents.id)', [grace]);
+    // Housekeeping for tables that otherwise grow forever. payment_events, orders, transactions, order_history
+    // and audit are deliberately kept: they are financial evidence or dedupe records.
+    await tx.query('DELETE FROM quotes WHERE expires<=$1', [new Date(Date.now() - 7 * 86400000).toISOString()]);
+    await tx.query('DELETE FROM idempotency_keys WHERE expires<=$1', [now()]);
+    await tx.query('DELETE FROM notifications WHERE created<=$1', [new Date(Date.now() - 90 * 86400000).toISOString()]);
   });
   const maintain = async () => { await cleanup(); await sweepLeases(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
   app.get('/maintenance', async (req, res) => { if (!process.env.CRON_SECRET || digest(req.headers.authorization || '') !== digest(`Bearer ${process.env.CRON_SECRET}`)) return res.sendStatus(401); await maintain(); res.json({ ok: true }); });

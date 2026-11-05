@@ -475,12 +475,18 @@ await scanAndReportLocalPrinters();
 const printerScanner = setInterval(() => scanAndReportLocalPrinters(), 60000);
 
 // Conversion can take minutes. Keep it out of the paid-print dispatch loop.
+// Idle polling is the dominant load on the server (every shop PC polls around the clock), so an idle
+// connector slows down gradually: 1 s right after activity, up to 4 s for claims and 3 s for preparations
+// when nothing has happened for a while. Any job resets it immediately.
+const idleDelay = (streak, base, max) => Math.min(max, base + Math.floor(streak / 10) * 500);
 async function preparationLoop() {
+  let idleStreak = 0;
   while (running && processorSecret) {
     if (!secret || authFailed) { await new Promise(resolve => setTimeout(resolve, 5000)); continue; }
     try {
       const preparation = await request('/api/device/preparations/claim', { method: 'POST' });
       if (preparation) {
+        idleStreak = 0;
         try { await prepareJob(preparation); }
         catch {
           await request(`/api/device/preparations/${preparation.id}/fail`, {
@@ -492,11 +498,13 @@ async function preparationLoop() {
     } catch (prepErr) {
       log(`[Preview] Preparation loop notice: ${prepErr.message}`);
     }
-    if (running) await new Promise(resolve => setTimeout(resolve, 1500));
+    idleStreak++;
+    if (running) await new Promise(resolve => setTimeout(resolve, idleDelay(idleStreak, 1500, 3000)));
   }
 }
 const preparing = preparationLoop();
 let claimRetryDelay = 1000;
+let claimIdleStreak = 0;
 let lastClaimErrorLog = 0;
 while (running) {
   // Unlinked or rejected: wait for the dashboard to link this PC instead of polling with a bad key.
@@ -504,11 +512,14 @@ while (running) {
   try {
     // Claim print jobs
     const print = await request('/api/device/claim', { method: 'POST' });
-    claimRetryDelay = 1000;
     if (print) {
+      claimIdleStreak = 0;
+      claimRetryDelay = 1000;
       await printJob(print);
       continue;
     }
+    claimIdleStreak++;
+    claimRetryDelay = idleDelay(claimIdleStreak, 1000, 4000);
   } catch (err) {
     // Exponential retry backoff on network failure with periodic log
     if (Date.now() - lastClaimErrorLog > 30000) {

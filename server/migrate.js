@@ -1,4 +1,5 @@
 import { openDatabase } from './db.js';
+import { applyMigrations } from './migrations.js';
 // `npm start` runs this before the server. On a developer machine a local-operator
 // MIGRATION_DATABASE_URL (often the production owner login) must not be migrated silently, so a
 // non-production start skips it; `npm run migrate` remains the explicit way to migrate that database.
@@ -11,6 +12,11 @@ if (process.env.npm_lifecycle_event === 'start' && process.env.NODE_ENV !== 'pro
   try {
     await db.migrate();
     console.log(`Schema applied to ${db.kind}`);
+    const result = await applyMigrations(db);
+    if (result.failed) {
+      console.error(`Migration ${result.failed.id} failed: ${result.failed.error}`);
+      process.exitCode = 1;
+    }
   } catch (error) {
     console.error('Migration notice:', error.code || error.name || error.message);
     if (!error.message?.includes('already exists')) {

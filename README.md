@@ -23,6 +23,8 @@ npm start
 
 Open http://localhost:3000. This loads `.env` and uses Neon. Register a shop, approve it using your admin account, then configure prices, UPI and a printer. With `CONNECTOR_PROCESSING=true`, previews require the shop connector.
 
+> **Development safety.** `npm start` with a remote `DATABASE_URL` in `.env` changes that database. Point development at a separate Neon branch, never the production database. Set `REFUSE_REMOTE_DB_IN_DEV=true` to make a development server refuse to start against any remote database.
+
 For an isolated UI demonstration, stop the real server and run `npm run demo` from a shell without inherited production variables. Demo accounts: `owner@smartprint.local` / `admin@smartprint.local`, password `SmartPrintDemo!2026`. These accounts exist only in local SQLite. Demo processing is unscanned and must stay local.
 
 ## Deploy and connect a shop
@@ -43,6 +45,16 @@ First production sign-in requires authenticator enrollment. Change the initial p
 - Persistent hashed sessions, MFA, distributed rate limits, tenant/role checks, Origin checks, encrypted files, audit events and operator recovery.
 
 A customer's UPI reference never marks payment paid. The shop must verify its own bank credit. Refund recording does not transfer money. Windows spool submission does not prove physical output; the owner confirms it. Mobile uses the responsive website and Windows bridge, not a native silent-print app. Auto-crop is not perspective correction.
+
+## Database changes (migrations)
+
+Schema changes are listed in `server/migrations.js` and recorded in `schema_migrations`. The web process verifies them at startup; **in production it refuses to start if one cannot be applied** (the previous version keeps serving). Apply them first with the database owner login:
+
+```powershell
+npm run migrate    # uses MIGRATION_DATABASE_URL; run it BEFORE deploying a release that adds a migration
+```
+
+`scripts/census.sql` is a read-only report of the database (run it on a restored snapshot or a Neon branch).
 
 ## Verify and maintain
 

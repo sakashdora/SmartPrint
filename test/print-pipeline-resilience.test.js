@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.js';
 import { openDatabase } from '../server/db.js';
 import { token, digest, encrypt, loadKey, hashPassword } from '../server/security.js';
-import { sweepLeases, deviceMetadata } from '../server/devices.js';
+import { sweepLeases } from '../server/devices.js';
 
 async function listen(service) {
   const server = service.app.listen(0, '127.0.0.1');
@@ -210,7 +210,7 @@ test('Device pause state prevents job claiming until resumed', async () => {
   const { server, url } = await listen(service);
 
   // Pause device in metadata
-  deviceMetadata.set(devId, { is_paused: 1, status_note: 'Paused by owner' });
+  await db.query("UPDATE devices SET paused=1, paused_note='Paused by owner' WHERE id=$1", [devId]);
 
   // Claim when paused should return null
   const claimPaused = await request(url, '/api/device/claim', { method: 'POST', token: devTok });
@@ -218,13 +218,33 @@ test('Device pause state prevents job claiming until resumed', async () => {
   assert.equal(claimPaused.data, null);
 
   // Resume device
-  deviceMetadata.set(devId, { is_paused: 0, status_note: 'Ready' });
+  await db.query('UPDATE devices SET paused=0, paused_note=NULL WHERE id=$1', [devId]);
 
   // Claim when resumed should succeed
   const claimResumed = await request(url, '/api/device/claim', { method: 'POST', token: devTok });
   assert.equal(claimResumed.status, 200);
   assert.equal(claimResumed.data.id, orderId);
 
+  await new Promise(r => server.close(r));
+  await service.close();
+});
+
+test('A printer pause survives a server restart and is shown to the owner', async () => {
+  const db = await openDatabase({ url: null, path: ':memory:' });
+  await db.migrate();
+  const shopId = randomUUID(), devId = randomUUID(), docId = randomUUID(), orderId = randomUUID(), devTok = token();
+  await db.query("INSERT INTO users (id,email,password,role) VALUES ('u4','owner4@test.invalid','hash','owner')");
+  await db.query("INSERT INTO shops (id,owner_id,slug,name,location,status) VALUES ($1,'u4','s4','Shop 4','Loc','active')", [shopId]);
+  await db.query("INSERT INTO devices (id,shop_id,name,token,active,heartbeat,paused,paused_note) VALUES ($1,$2,'P4',$3,1,$4,1,'Paused: 2 older jobs waiting')", [devId, shopId, digest(devTok), new Date().toISOString()]);
+  await db.query("INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,'p','i','t','2099-01-01')", [docId, shopId]);
+  await db.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created) VALUES ($1,$2,$3,'t','{}',1,1,1,200,'cash','paid','queued',$4)", [orderId, shopId, docId, new Date().toISOString()]);
+  // A freshly started application on the same database has no in-memory state at all.
+  const service = await createApp({ database: db, seed: false });
+  const { server, url } = await listen(service);
+  const claim = await request(url, '/api/device/claim', { method: 'POST', token: devTok });
+  assert.equal(claim.status, 200);
+  assert.equal(claim.data, null, 'a paused printer must not claim jobs after a restart');
+  assert.equal((await db.query('SELECT status FROM orders WHERE id=$1', [orderId]))[0].status, 'queued');
   await new Promise(r => server.close(r));
   await service.close();
 });

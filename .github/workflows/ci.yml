@@ -18,3 +18,40 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
+
+  # The same suite against a real, disposable PostgreSQL. The default `npm test` run uses SQLite, which
+  # serialises every query and therefore cannot prove row-lock or constraint behaviour.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: smartprint
+          POSTGRES_PASSWORD: smartprint_ci
+          POSTGRES_DB: smartprint_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U smartprint -d smartprint_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SMARTPRINT_TEST_DATABASE_URL: postgresql://smartprint:smartprint_ci@localhost:5432/smartprint_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node --test test/postgres-integration.test.js
+
+  # Fails the build if a credential-looking value is committed.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

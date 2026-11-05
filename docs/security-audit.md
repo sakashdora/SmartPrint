@@ -38,7 +38,7 @@ SmartPrint handles sensitive customer documents, proprietary shop pricing, finan
   - Auth routes enforce `limitRate(db, 'auth', req.ip, 40, 900)` to prevent brute-force attacks on passwords and MFA tokens.
 
 ### E. Cryptography & Data at Rest
-- **Password Storage:** Uses `scrypt` with RFC-compliant parameters ($N=32768, r=8, p=3$) and 16-byte random salts.
+- **Password Storage:** Argon2id (64 MiB memory, 3 iterations, parallelism 4). Legacy scrypt hashes (N=32768, r=8, p=3) are still verified and upgraded to Argon2id at the next sign-in.
 - **Document Payloads:** Encrypted with AES-256-GCM using a 256-bit key (`FILE_ENCRYPTION_KEY`). Initialization vectors (12 bytes) and authentication tags (16 bytes) are unique per chunk.
 - **Zero-Retention Life Cycle:** Encrypted documents and chunks are immediately deleted upon confirmed printing or order cancellation. Expired temporary uploads are deleted every 60 seconds by background maintenance workers.
 

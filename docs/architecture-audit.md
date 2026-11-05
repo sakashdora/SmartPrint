@@ -79,7 +79,7 @@ graph TD
    - The Windows Print Agent runs locally on the shop's Windows PC, securely polling the cloud backend using a unique hashed device token (`devices` table).
    - Remote owner approvals from mobile browsers travel to the cloud DB; the local Windows agent claims the lease, retrieves the encrypted PDF, and delivers it to the local Windows spooler via SumatraPDF.
 
-4. **Idempotency & Concurrency Deficits (Addressed in Phase 4-5):**
+4. **Idempotency & Concurrency Deficits (partly addressed):** a durable idempotency layer and atomic conditional UPDATEs protect the money and print paths. `server/state-machine.js` documents the permitted transitions but is not yet called by the route handlers (tracked in docs/architecture-v2/13).
    - Previously, rapid double taps on "Place Order" or "Collect Cash" could fail with 409 or create redundant transactions.
    - Missing centralized state machine permitted ad-hoc status queries across UI routes.
    - A dedicated idempotency layer with persisted keys and atomic status transitions was required to protect financial and printing workflows.

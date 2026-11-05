@@ -169,8 +169,6 @@ export async function scanWindowsPrinters() {
   }
 }
 
-export const deviceMetadata = new Map();
-
 // Keys issued by Connect for an existing printer, waiting for their connector's first check-in.
 // Kept in memory: pairing completes within seconds, and an unused key simply expires.
 export const pendingKeys = new Map();
@@ -202,7 +200,8 @@ export async function holdBacklog(db, device) {
   );
   const waiting = Number(count);
   if (!waiting) return { cancelledTests: staleTests.length, held: 0 };
-  deviceMetadata.set(device.id, { ...(deviceMetadata.get(device.id) || {}), is_paused: 1, status_note: `Paused: ${waiting} older job${waiting === 1 ? '' : 's'} waiting` });
+  // Persisted: a restart or deploy must not release the backlog this hold exists to stop.
+  await db.query('UPDATE devices SET paused=1, paused_note=$1 WHERE id=$2', [`Paused: ${waiting} older job${waiting === 1 ? '' : 's'} waiting`, device.id]);
   await createNotification(db, {
     shopId: device.shop_id,
     eventType: 'print.backlog_held',
@@ -310,7 +309,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
       Object.assign(device, { name: printerName, color, duplex });
     }
-    deviceMetadata.set(device.id, { is_paused: 0 });
+    await db.query('UPDATE devices SET paused=0, paused_note=NULL WHERE id=$1', [device.id]);
     await audit(db, req.user.id, 'device.autoconnected', device.id);
     res.json({
       ok: true,
@@ -324,15 +323,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
-    res.json(rows.map(d => {
-      const meta = deviceMetadata.get(d.id) || {};
+    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
+    res.json(rows.map(({ paused, paused_note, ...d }) => {
       // Same 3-minute window the dashboard and job routing use.
       const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000));
       return {
         ...d,
-        is_paused: meta.is_paused ?? 0,
-        status_note: meta.is_paused ? (meta.status_note || 'Paused by owner') : isOnline ? 'Ready' : 'Offline · connector not running'
+        is_paused: Number(paused) ? 1 : 0,
+        status_note: Number(paused) ? (paused_note || 'Paused by owner') : isOnline ? 'Ready' : 'Offline · connector not running'
       };
     }));
   });
@@ -344,20 +342,16 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active) VALUES ($1,$2,$3,$4,$5,$6,1)', [
       id, shop.id, name, digest(secret), req.body.color === true ? 1 : 0, req.body.duplex === true ? 1 : 0
     ]);
-    deviceMetadata.set(id, { is_paused: 0 });
     await audit(db, req.user.id, 'device.paired', id);
     res.status(201).json({ id, token: secret });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT id FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    const [device] = await db.query('SELECT id, paused FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Device not found.');
-    const meta = deviceMetadata.get(device.id) || { is_paused: 0 };
-    const nextState = meta.is_paused ? 0 : 1;
-    meta.is_paused = nextState;
-    meta.status_note = nextState ? 'Paused by owner' : 'Ready';
-    deviceMetadata.set(device.id, meta);
+    const nextState = Number(device.paused) ? 0 : 1;
+    await db.query('UPDATE devices SET paused=$1, paused_note=$2 WHERE id=$3', [nextState, nextState ? 'Paused by owner' : null, device.id]);
     await audit(db, req.user.id, nextState ? 'device.paused' : 'device.resumed', device.id);
     res.json({ ok: true, is_paused: nextState });
   });
@@ -382,13 +376,14 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
 
   app.post('/api/owner/print-job', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [onlineDevice] = await db.query(
-      'SELECT id, name, color, duplex FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 ORDER BY (heartbeat) DESC LIMIT 1',
+    const onlineDevices = await db.query(
+      'SELECT id, name, color, duplex FROM devices WHERE shop_id=$1 AND active=1 AND heartbeat>$2 ORDER BY (heartbeat) DESC',
       [shop.id, new Date(Date.now() - 180000).toISOString()]
     );
-    if (!onlineDevice) {
+    if (!onlineDevices.length) {
       throw fail(503, 'No shop printer is currently online. Ensure the print connector is active on your shop computer.');
     }
+    let onlineDevice = onlineDevices[0];
 
     let files;
     if (req.body.files) {
@@ -414,6 +409,9 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     } catch (err) {
       throw fail(400, err.message);
     }
+    // A colour or two-sided job must go to a printer that can do it, never to whichever printer checked in last.
+    onlineDevice = onlineDevices.find(device => printerSupports(device, options));
+    if (!onlineDevice) throw fail(409, 'No online shop printer supports these settings. Choose black & white / single-sided, or connect a compatible printer.');
 
     let prepared;
     try {
@@ -499,17 +497,10 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       if (!requeued.length) throw fail(409, 'This order changed while retrying. Refresh and check its status.');
       await tx.query("DELETE FROM print_leases WHERE order_id=$1", [order.id]);
 
-      try {
-        await tx.query("SAVEPOINT retry_hist_sp");
-        await tx.query(
-          "INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-          [randomUUID(), order.id, order.status, 'queued', req.user.id, 'order.retried', `Attempt ${nextAttempt}`, now()]
-        );
-        await tx.query("RELEASE SAVEPOINT retry_hist_sp");
-      } catch (histErr) {
-        await tx.query("ROLLBACK TO SAVEPOINT retry_hist_sp").catch(() => {});
-        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed:', histErr.message);
-      }
+      await tx.query(
+        "INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        [randomUUID(), order.id, order.status, 'queued', req.user.id, 'order.retried', `Attempt ${nextAttempt}`, now()]
+      );
 
       await audit(tx, req.user.id, 'order.retried', order.id);
     });
@@ -613,8 +604,8 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     const result = await db.transaction(async tx => {
       // Serialize claims from duplicated connector processes using the same credential, and read the
       // device's capabilities under that lock so a capability report mid-request is respected.
-      const [device] = await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id, color, duplex', [now(), req.device.id]);
-      if (deviceMetadata.get(req.device.id)?.is_paused) return null;
+      const [device] = await tx.query('UPDATE devices SET heartbeat=$1, active=1 WHERE id=$2 RETURNING id, color, duplex, paused', [now(), req.device.id]);
+      if (Number(device.paused)) return null;
       const [existing] = await tx.query("SELECT order_id FROM print_leases WHERE device_id=$1 AND state IN ('claimed','submitted') AND expires>$2", [req.device.id, now()]);
       if (existing) return null;
       const candidates = await tx.query("SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.shop_id=$1 AND o.status='queued' AND o.payment='paid' AND s.status='active' ORDER BY o.created ASC LIMIT 200", [req.device.shop_id]);
@@ -657,14 +648,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       const errorMsg = String(req.body.error || '');
       const changed = await tx.query('UPDATE print_leases SET state=$1,expires=$2,detail=$3 WHERE order_id=$4 AND state=$5 RETURNING order_id', [event, new Date(Date.now() + 600000).toISOString(), errorMsg, order.id, order.lease_state]);
       if (!changed.length) throw fail(409, 'Print state changed. Do not resubmit.');
-      try {
-        await tx.query('SAVEPOINT dev_hist_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, errorMsg || event, now()]);
-        await tx.query('RELEASE SAVEPOINT dev_hist_sp');
-      } catch (histErr) {
-        await tx.query('ROLLBACK TO SAVEPOINT dev_hist_sp').catch(() => {});
-        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed:', histErr.message);
-      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, targetStatus, req.device.id, `device.${event}`, errorMsg || event, now()]);
       await audit(tx, req.device.id, `device.${event}`, order.id);
     });
     res.json({ ok: true });
@@ -676,14 +660,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       const changed = await tx.query("UPDATE orders SET status='failed' WHERE id=$1 AND shop_id=$2 AND status IN ('needs_review','awaiting_confirmation','printing') RETURNING id, status", [req.params.id, shop.id]);
       if (!changed.length) throw fail(409, 'This order does not need print review.');
       await tx.query('DELETE FROM print_leases WHERE order_id=$1', [req.params.id]);
-      try {
-        await tx.query('SAVEPOINT resolve_hist_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), req.params.id, changed[0].status, 'failed', req.user.id, 'print.stopped_by_owner', 'manual_stop', now()]);
-        await tx.query('RELEASE SAVEPOINT resolve_hist_sp');
-      } catch (histErr) {
-        await tx.query('ROLLBACK TO SAVEPOINT resolve_hist_sp').catch(() => {});
-        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed in resolve-failed:', histErr.message);
-      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), req.params.id, changed[0].status, 'failed', req.user.id, 'print.stopped_by_owner', 'manual_stop', now()]);
       await audit(tx, req.user.id, 'print.stopped_by_owner', req.params.id);
     }); res.json({ ok: true });
   });
@@ -712,14 +689,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
         await tx.query('DELETE FROM print_leases WHERE order_id=$1', [order.id]);
       }
       await tx.query('DELETE FROM documents WHERE id=$1', [order.document_id]);
-      try {
-        await tx.query('SAVEPOINT cancel_hist_sp');
-        await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
-        await tx.query('RELEASE SAVEPOINT cancel_hist_sp');
-      } catch (histErr) {
-        await tx.query('ROLLBACK TO SAVEPOINT cancel_hist_sp').catch(() => {});
-        console.warn('[SmartPrint Devices] Non-critical order_history audit insert failed in cancel:', histErr.message);
-      }
+      await tx.query('INSERT INTO order_history (id,order_id,from_status,to_status,actor,action,detail,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), order.id, order.status, 'cancelled', req.user.id, 'order.cancelled', 'manual', now()]);
       await audit(tx, req.user.id, 'order.cancelled', order.id);
       return { ok: true };
     });

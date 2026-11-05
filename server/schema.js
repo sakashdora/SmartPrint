@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS rate_limits (id TEXT PRIMARY KEY, count INTEGER NOT N
 CREATE TABLE IF NOT EXISTS mfa (user_id TEXT PRIMARY KEY REFERENCES users(id), payload BYTEA NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step BIGINT NOT NULL DEFAULT -1, recovery_codes TEXT DEFAULT '[]', created TEXT);
 CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, public_key BYTEA NOT NULL, counter BIGINT NOT NULL DEFAULT 0, device_type TEXT, backed_up INTEGER DEFAULT 0, transports TEXT, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
-CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), name TEXT NOT NULL, token TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, heartbeat TEXT, color INTEGER NOT NULL DEFAULT 0, duplex INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, shop_id TEXT NOT NULL REFERENCES shops(id), name TEXT NOT NULL, token TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, heartbeat TEXT, color INTEGER NOT NULL DEFAULT 0, duplex INTEGER NOT NULL DEFAULT 0, paused INTEGER NOT NULL DEFAULT 0, paused_note TEXT);
 CREATE TABLE IF NOT EXISTS print_leases (order_id TEXT PRIMARY KEY REFERENCES orders(id), device_id TEXT NOT NULL REFERENCES devices(id), token TEXT NOT NULL, expires TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'claimed', detail TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS refunds (order_id TEXT PRIMARY KEY REFERENCES orders(id), shop_id TEXT NOT NULL REFERENCES shops(id), amount INTEGER NOT NULL, method TEXT NOT NULL, state TEXT NOT NULL, reference TEXT, reason TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS worker_status (id TEXT PRIMARY KEY, last_success TEXT NOT NULL);
@@ -42,4 +42,9 @@ CREATE INDEX IF NOT EXISTS notifications_shop ON notifications(shop_id, created)
 CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, created);
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS orders_shop_status ON orders(shop_id, status);
+CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS audit_created ON audit(created);
+CREATE INDEX IF NOT EXISTS orders_created ON orders(created);
+CREATE INDEX IF NOT EXISTS quotes_expires ON quotes(expires);
+CREATE INDEX IF NOT EXISTS leases_expires ON print_leases(expires, state);
 `;
