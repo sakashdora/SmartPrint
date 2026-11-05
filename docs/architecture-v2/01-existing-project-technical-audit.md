@@ -104,6 +104,31 @@ Lease states: `claimed → submitted → awaiting_confirmation`, plus `failed`/`
 | P8 | Admin console: read-only lists, no pagination, client-side search, placeholder reports/settings. | `public/app.js:715-718` [V] |
 | P9 | Retention: live documents are deleted correctly, but `orders.options` (including the customer's file name) is kept forever, and `quotes`, `notifications`, `order_history`, `audit`, `idempotency_keys`, `payment_events` are **never purged**. | grep of `DELETE FROM` in `server/` [V] |
 
+## 4b. Broken functionality
+
+No feature was found **broken in a way the 97 tests or the code paths show** **[T][V]**. Items that behave incorrectly under specific conditions are listed as defects in §5 (S1, S11) and as partial functionality in §4 (P1, P5). Features that cannot work as implemented:
+
+| Item | Why it cannot work | Evidence |
+|---|---|---|
+| Customer sign-in / `#track` for a `customer` user | No code creates a `customer` user; the role and redirects are dead | `INSERT INTO users` occurs only for owner, admin and demo seeds [V] |
+| Several printers behind one connector | Connector holds a single printer name and one bridge port per PC | `connector/index.js` [V] |
+| Recording a gateway refund | Refund route rejects `online`; `refunds` allows one row per order | `payments.js:130`, `schema.js:19` [V] |
+| Printing with no cloud connection | Claim, document download and every state change require the server | `connector/index.js` [V] |
+
+## 4c. Missing functionality (relative to the stated goals)
+
+| Area | Missing today **[V]** |
+|---|---|
+| Tenancy | Organizations, memberships, org-level roles, multi-user shops, multi-shop owners |
+| Registration | Organization types, representative details, rejection with reason, request-info, e-mail verification, notification |
+| Identity | Student/staff accounts, College ID login, bulk import, self-service password reset, session list/idle timeout |
+| Education | Institutions, campuses, departments, pools, policies, usage reports, operator console |
+| Money | Wallet, ledger, holds, top-ups, per-organization gateway, partial refunds, reconciliation jobs |
+| Printing | Multi-printer agent, per-agent credentials and rotation, attempt history, pages-printed reporting, release-at-printer, weighted fair queue, persistent local queue, offline mode, agent auto-update, agent health alerts |
+| Security | Per-tenant encryption keys, support-access grants, tamper-evident audit, central monitoring and alerting, secret scanning (added in Phase 1 CI), documented backup/restore drill |
+| Operations | Staging environment, PostgreSQL in CI (added in Phase 1), deploy promotion gate, error tracker |
+| Admin console | Pagination, server-side search, real reports and platform settings |
+
 ## 5. Defects and risks (security, correctness)
 
 | ID | Severity | Finding | Evidence |

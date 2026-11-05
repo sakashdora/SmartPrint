@@ -1,6 +1,6 @@
 # Smart Print · Architecture Analysis and Implementation Plan (v2)
 
-Analysis and planning only. No source code, database, deployment or existing file was changed; these 18 files are the only additions. Repository state analysed: `main` @ `1a1e59b`.
+Analysis and plan produced for `main` @ `1a1e59b`. After the plan was approved, **Phase 0–1 only** was implemented and deployed (commits `11960a1`, `5b19277`; see the status note in [14](14-phased-implementation-roadmap.md)). Phases 2–8 and all Education Mode work are **not started** and wait for explicit approval.
 
 ## Documents
 
@@ -27,5 +27,5 @@ Analysis and planning only. No source code, database, deployment or existing fil
 ## Evidence labels
 **[V]** verified in source · **[T]** verified by running the existing tests (97 tests: 96 pass, 1 skipped, SQLite, isolated) · **[A]** assumption · **[U]** not verifiable here (production, Neon, Render, printers, Razorpay) · **[R]** recommendation.
 
-## Not done (by design)
-No live printer, production API, Neon database or Render service was touched. Production data was not inspected, so counts of existing shops/orders are unknown (a read-only census is a Phase 0 task). No load test was run.
+## Limits of the evidence
+The analysis itself did not touch a live printer, the production API, Neon or Render, and no production data was inspected, so counts of existing shops and orders are unknown (`scripts/census.sql` is provided for that). No load test was run. Only Phase 1 changes touched production (the Neon migration and a Render deploy).

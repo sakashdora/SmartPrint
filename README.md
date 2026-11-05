@@ -31,6 +31,8 @@ For an isolated UI demonstration, stop the real server and run `npm run demo` fr
 
 Follow [Vercel and Windows setup](docs/08-deployment-and-shop-setup.md). Upload only the listed runtime variables to Vercel. Never upload `.env`, `.data`, migration credentials, admin credentials or the processor secret.
 
+Shop owners are reminded to enrol two-factor sign-in when `OWNER_MFA_REQUIRED_FROM` (an ISO date such as `2026-12-01`) is set, and must have it from that date on; unset keeps it optional for owners. Admins always need it in production.
+
 First production sign-in requires authenticator enrollment. Change the initial password in Account settings, save it privately, then remove the local delivery file.
 
 ## Included

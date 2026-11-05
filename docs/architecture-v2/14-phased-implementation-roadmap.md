@@ -23,6 +23,8 @@ gantt
 ```
 P2 and P3 can run in parallel (disjoint tables/files) once P1 is done. P5/P6 can run in parallel after P4.
 
+> **Status (2026-11-05):** Phase 1 is implemented and deployed (commits `11960a1`, `5b19277`) and the owner-MFA date policy and lifecycle guard test are added after it. Phase 0 is done as far as the repository allows (PostgreSQL job and secret scan in CI, API contract test, census script, dev-database warning). **Needs infrastructure or your action, not code:** staging environment and deploy promotion gate, restore drill, confirming the exposed password from commit `885501f` was rotated. **Deliberately deferred:** pages-printed reporting (moves to the Phase 3 agent, where real progress is tracked) and a capability block at order creation (would stop owners who print manually).
+
 **Standing rule for every phase:** merge only if (1) the Business regression suite is green on SQLite **and** PostgreSQL, (2) the v1 API contract snapshot is unchanged, (3) a rollback was rehearsed, (4) the change is behind an org-level feature flag until accepted.
 
 ---
@@ -133,25 +135,52 @@ P2 and P3 can run in parallel (disjoint tables/files) once P1 is done. P5/P6 can
 
 | Field | Content |
 |---|---|
-| 1 Objective | Configurable WFQ with aging, per-user caps, optional release code. |
-| 3 Required changes | `queue_classes`, scheduler module, simulation harness, release-code flow, operator reprioritise. Fields 2,4–12 summarised: depends on P3/P4; DB: new table + `print_jobs.vft`; API: release endpoint; UI: queue position/ETA; agent: release token check; security: codes single-use, short-lived; |
-| 9–10 Testing & acceptance | Discrete-event simulation: class throughput within ±5 % of weights over 1 000 jobs; no job waits > `max_wait_target` while capacity exists; 200 simultaneous submits keep claim p95 < 300 ms. |
-| 11–12 Risk & rollback | Mis-tuned weights → per-pool switch back to `fifo_priority`. |
+| 1 Objective | Configurable Weighted Fair Queueing with Aging, per-user caps, optional release code at the printer. |
+| 2 Existing dependencies | Phase 3 claim query and attempts; Phase 4 jobs and pools; Business FIFO scheduler stays as the `fifo_priority` option. |
+| 3 Required changes | Scheduler module (virtual-time tags, aging score), `queue_classes` state, per-user queued cap, operator reprioritise within caps, release-code issue/verify, discrete-event simulation harness. |
+| 4 Database impact | `queue_classes(pool_id, class, f_last)`; `print_jobs.vft`, `priority_boost`, `release_code_hash`; partial index on queued jobs by score inputs. |
+| 5 API impact | `POST /jobs/:id/release`; queue endpoints return position/estimate; pool scheduler settings in `/pools`. |
+| 6 Frontend impact | Queue position and ETA for users; operator reprioritise control; admin scheduler settings with a "preview effect" table. |
+| 7 Agent impact | Release verification at the agent's LAN page or via cloud; no change to claim safety rules. |
+| 8 Security | Release codes single-use, short-lived, rate limited; reprioritisation audited; boost capped to prevent queue jumping abuse. |
+| 9 Testing | Simulation: throughput per class within ±5 % of weights over 1 000 jobs; aging bound test; per-user cap test; 200 simultaneous submits keep claim p95 < 300 ms on PostgreSQL; Business regression unchanged. |
+| 10 Acceptance | No eligible job waits longer than `max_wait_target` while capacity exists; weights honoured within ±5 %; a user with 100 copies cannot delay others beyond the cap. |
+| 11 Risks | Mis-tuned weights cause perceived unfairness; added scheduler state under contention. |
+| 12 Rollback | Per-pool switch back to `fifo_priority` (instant, no data change); release requirement off by policy. |
 
 ## Phase 7 — Offline modes (L)
 
 | Field | Content |
 |---|---|
-| 1 Objective | O1 finish-what-is-downloaded (already from P3), O2 LAN portal for staff, then student reservations. |
-| 3 Required changes | Local outbox/sync, `offline_reservations`, `reservation_spends`, signed tokens, local verifier cache, LAN portal (HTTPS with local CA or pairing), conflict cases UI. |
-| 4–7 Impact | DB: two tables; API: `/sync`, reservations; UI: student reserve screen, admin offline policy; agent: LAN portal + spend log. |
-| 8 Security | Agent-bound tokens, PIN verifiers, bounded limits, monotonic clock rules. |
-| 9–10 Testing & acceptance | Unplug WAN for N hours test on the real shop PC; double-spend attempts across two agents impossible; replayed sync batch has no effect; after reconnection ledger = local spend log. |
-| 11–12 Risk & rollback | Highest complexity; **ship staff-only first**; policy flag per org; disabling stops LAN portal and expires reservations. |
+| 1 Objective | O1 finish-what-is-downloaded (delivered with the Phase 3 local queue), O2 LAN portal for staff first, then student offline reservations. |
+| 2 Existing dependencies | Phase 3 agent (local SQLite queue, journal, fencing), Phase 5 ledger and holds, Phase 4 policies. |
+| 3 Required changes | Agent outbox and `POST /sync`, reservation issue/close, signed reservation tokens, local PIN verifier cache, LAN portal (HTTPS with pairing), local spend log with monotonic sequence numbers, reconciliation case handling. |
+| 4 Database impact | `offline_reservations`, `reservation_spends` (PK `(agent_id, seq)`), `sync_batches`, `reconciliation_cases`; ledger entry kinds `reserve`/`reservation_capture`/`reservation_release`. |
+| 5 API impact | `/wallet/reservations`, `/agent/v2/sync`, admin offline policy endpoints. |
+| 6 Frontend impact | Student "reserve for offline use" screen; admin policy and reconciliation views; operator view of offline-printed jobs. |
+| 7 Agent impact | LAN portal, offline authentication against cached verifiers, local limit enforcement, encrypted store, replay-safe sync client. |
+| 8 Security | Agent-bound tokens, expiry using elapsed monotonic time, PIN verifiers hashed (Argon2id) and removed on expiry, bounded daily caps, tamper-evident local log. |
+| 9 Testing | Cut the WAN for hours on the real shop PC (with consent); double-spend attempts across two agents; replayed and out-of-order sync batches; clock skew; agent crash mid-spend; reservation cancelled while offline. |
+| 10 Acceptance | Offline spend never exceeds the reservation in any run; replay has no effect; after reconnection ledger equals the local spend log; expiry releases the remainder exactly once. |
+| 11 Risks | Highest complexity and financial edge cases; LAN portal expands the attack surface; user expectation of "offline" differs from what is feasible. |
+| 12 Rollback | Policy flag disables the LAN portal and new reservations; existing reservations expire; staff-only mode can ship first and stay. |
 
-## Phase 8 — Hardening and integrations (M)
+## Phase 8 — Hardening, operations and integrations (M)
 
-Load tests (k6), external penetration test, DR drill with key custody, monitoring/alerting finalised, support-access workflow, ERP import/webhooks, accessibility review, documentation and runbooks. Acceptance: all numbers in [15](15-testing-and-acceptance-criteria.md) §6 met; restore RTO measured; pen-test highs closed.
+| Field | Content |
+|---|---|
+| 1 Objective | Prove the platform under load and failure, close security findings, finish operations and integration hooks. |
+| 2 Existing dependencies | Phases 0–7 complete; monitoring stack chosen. |
+| 3 Required changes | k6 load suites, external penetration test and fixes, DR/restore and key-custody drills, central logging/metrics/alerts, support-access workflow UI, outbound webhooks and import API for ERP/college systems, accessibility and localisation review, runbooks. |
+| 4 Database impact | Partitioning of `audit_log_v2`/`queue_events`, retention jobs, read-replica role and reporting views. |
+| 5 API impact | Webhook subscription endpoints, signed event payloads, import/sync endpoints; OpenAPI published. |
+| 6 Frontend impact | Admin health dashboards, grant approval screen, accessibility fixes. |
+| 7 Agent impact | Canary/stable channels exercised in production; update-signature rotation procedure. |
+| 8 Security | Pen-test highs closed; secrets rotation drill; verify platform roles cannot read documents; CSP unification. |
+| 9 Testing | Targets in [15](15-testing-and-acceptance-criteria.md) §6; chaos tests for alerts; restore timing. |
+| 10 Acceptance | All §6 numbers met; RPO ≤ 15 min and RTO ≤ 2 h demonstrated; zero open high findings; alerts fire within 2 min in drills. |
+| 11 Risks | Findings late in the schedule; cost of monitoring and pen-test; integration scope creep. |
+| 12 Rollback | Nothing here changes core behaviour; each item is configuration or additive; webhooks can be disabled per organization. |
 
 ## Cross-phase dependency table
 

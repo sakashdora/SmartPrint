@@ -1078,6 +1078,6 @@ async function route() {
   }
 }
 window.addEventListener('hashchange', async () => { stopUpdates(); await route(); window.scrollTo(0, 0); });
-try { [health, me] = await Promise.all([api('/api/health'), api('/api/me')]); await route(); } catch (error) { app.textContent = `Unable to connect: ${error.message}`; }
+try { [health, me] = await Promise.all([api('/api/health'), api('/api/me')]); await route(); if (me?.mfaGraceEnds && !sessionStorage.getItem('mfa-reminded')) { sessionStorage.setItem('mfa-reminded', '1'); notify(`Set up two-factor sign-in (Account > Security) before ${new Date(me.mfaGraceEnds).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}; it will be required after that date.`); } } catch (error) { app.textContent = `Unable to connect: ${error.message}`; }
 
 

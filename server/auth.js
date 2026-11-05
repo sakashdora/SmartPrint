@@ -6,7 +6,7 @@ import {
   generateAuthenticationOptions,
   verifyAuthenticationResponse
 } from '@simplewebauthn/server';
-import { token, digest, hashPassword, checkPassword, encrypt, decrypt, totpStep, base32, limitRate } from './security.js';
+import { token, digest, hashPassword, checkPassword, encrypt, decrypt, totpStep, base32, limitRate, mfaPolicy } from './security.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const webauthnChallenges = new Map();
@@ -90,10 +90,9 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     const secret = token();
     await db.query('INSERT INTO sessions (id,user_id,expires,mfa) VALUES ($1,$2,$3,$4)', [digest(secret), user.id, new Date(Date.now() + 8 * 3600000).toISOString(), mfa ? 1 : 0]);
     res.cookie('sp_session', secret, cookieOptions);
-    const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
-    const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+    const policy = mfaPolicy(user, mfa, config.production);
     const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
-    return { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfaRequired: Boolean(enforceMfa && !mfa) };
+    return { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfaRequired: policy.mfaRequired, ...(policy.graceEnds ? { mfaGraceEnds: policy.graceEnds } : {}) };
   }
   const requireSession = (req, res, next) => req.user ? next() : next(fail(401, 'Please sign in.'));
 
@@ -109,8 +108,7 @@ export function authRoutes(app, db, key, config, onSessionInvalidate) {
     const passkeys = await db.query('SELECT id FROM passkeys WHERE user_id=$1', [user.id]);
     const hasPasskeys = passkeys.length > 0;
     const hasTotp = Boolean(mfa);
-    const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
-    const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+    const enforceMfa = mfaPolicy(user, false, config.production).required;
 
     let mfaSatisfied = false;
     if (hasTotp) {

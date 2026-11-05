@@ -62,3 +62,15 @@ export async function limitRate(db, scope, identity, max, seconds = 60) {
   const [row] = await db.query('INSERT INTO rate_limits (id,count,expires) VALUES ($1,1,$2) ON CONFLICT(id) DO UPDATE SET count=CASE WHEN rate_limits.expires<$3 THEN 1 ELSE rate_limits.count+1 END, expires=CASE WHEN rate_limits.expires<$3 THEN $2 ELSE rate_limits.expires END RETURNING count', [id, expires, now]);
   if (row.count > max) throw Object.assign(new Error('Too many attempts. Please try again later.'), { status: 429 });
 }
+
+// One place decides who must use a second factor.
+//  - ENFORCE_MFA=true      : everybody.
+//  - admins                : always in production.
+//  - shop owners           : from OWNER_MFA_REQUIRED_FROM (an ISO date). Before that date owners are only
+//                            reminded (`graceEnds`); unset keeps today's behaviour (not required).
+export function mfaPolicy(user, mfaDone, production = process.env.NODE_ENV === 'production') {
+  const from = Date.parse(process.env.OWNER_MFA_REQUIRED_FROM || '');
+  const dated = user.role === 'owner' && Number.isFinite(from);
+  const required = process.env.ENFORCE_MFA === 'true' || (user.role === 'admin' && production) || (dated && Date.now() >= from);
+  return { required, mfaRequired: Boolean(required && !mfaDone), graceEnds: dated && Date.now() < from && !mfaDone ? new Date(from).toISOString() : null };
+}

@@ -4,7 +4,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import QRCode from 'qrcode';
 import { openDatabase } from './db.js';
-import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt } from './security.js';
+import { token, digest, hashPassword, checkPassword, loadKey, encrypt, decrypt, mfaPolicy } from './security.js';
 import { price, validateOptions } from './print-options.js';
 import { configuration } from './config.js';
 import { authRoutes } from './auth.js';
@@ -15,7 +15,6 @@ import { paymentRoutes } from './payments.js';
 import { notificationRoutes, createNotification } from './notifications.js';
 import { uploadRoutes, resolveUploads, sendPdf } from './uploads.js';
 import { getIdempotentResult, saveIdempotentResult } from './idempotency.js';
-import { transitionOrder } from './state-machine.js';
 import { requestLogger, logEvent } from './logger.js';
 import { applyMigrations } from './migrations.js';
 
@@ -112,10 +111,9 @@ export async function createApp({ database, seed = true } = {}) {
         if (user.status === 'suspended' || user.status === 'disabled') {
           req.user = null;
         } else {
-          const adminMustMfa = user.role === 'admin' && (config.production || process.env.ENFORCE_MFA === 'true');
-          const enforceMfa = process.env.ENFORCE_MFA === 'true' || adminMustMfa;
+          const policy = mfaPolicy(user, user.mfa, config.production);
           const [shop] = user.role === 'owner' ? await db.query('SELECT status FROM shops WHERE owner_id=$1', [user.id]) : [];
-          req.user = { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfa: Boolean(user.mfa), mfaRequired: Boolean(enforceMfa && !user.mfa) };
+          req.user = { id: user.id, email: user.email, role: user.role, status: user.status || 'active', shopStatus: shop?.status || null, mfa: Boolean(user.mfa), mfaRequired: policy.mfaRequired, ...(policy.graceEnds ? { mfaGraceEnds: policy.graceEnds } : {}) };
         }
       }
     }
