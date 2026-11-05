@@ -8,6 +8,7 @@ import { storeObject, enqueueJob, cancelJob } from './queue.js';
 import { validateOptions, price } from './print-options.js';
 import { prepare } from './printing.js';
 import { readObject, markObjectDeleted } from './storage.js';
+import { walletRoutes, holdForJob, ensureAccount, balanceOf } from './wallet.js';
 
 const now = () => new Date().toISOString();
 const later = ms => new Date(Date.now() + ms).toISOString();
@@ -15,14 +16,14 @@ const fail = (status, message, code) => Object.assign(new Error(message), { stat
 
 // ---- Institution policies (validated; unknown keys are rejected) ----------------------------------------------
 export const DEFAULT_POLICIES = Object.freeze({
-  studentPrinting: 'disabled',      // 'disabled' until the wallet exists; 'free' lets students print without charge (pilot)
+  studentPrinting: 'disabled',      // 'disabled', 'free' (priced, never charged: pilot) or 'wallet' (held and charged from the student's wallet)
   maxPagesPerJob: 100, maxCopies: 20,
   colourStudents: true, colourStaff: true,
   retentionHoursAfterPrint: 0,      // 0 = delete the document as soon as the job is done
   studentRateBwMinor: 200, studentRateColourMinor: 1000
 });
 const POLICY_RULES = {
-  studentPrinting: v => ['disabled', 'free'].includes(v),
+  studentPrinting: v => ['disabled', 'free', 'wallet'].includes(v),
   maxPagesPerJob: v => Number.isInteger(v) && v >= 1 && v <= 500,
   maxCopies: v => Number.isInteger(v) && v >= 1 && v <= 100,
   colourStudents: v => typeof v === 'boolean', colourStaff: v => typeof v === 'boolean',
@@ -54,6 +55,7 @@ async function withPreparationSlot(fn) {
 }
 
 export function eduRoutes(app, { db, key, config }) {
+  walletRoutes(app, { db });
   const need = permission => requirePermission(db, permission);
   const link = path => new URL(path, config.origin).href;
 
@@ -304,17 +306,23 @@ export function eduRoutes(app, { db, key, config }) {
     if (prepared.pages > policies.maxPagesPerJob) throw fail(400, `At most ${policies.maxPagesPerJob} pages per job.`);
     const rates = { bw: policies.studentRateBwMinor, color: policies.studentRateColourMinor };
     const cost = price(prepared.pages, options, rates);
-    return { raw, options, prepared, student, jobClass: student ? 'student' : 'staff', quote: { pages: prepared.pages, sheets: cost.sheets, sides: cost.sides, costMinor: student ? cost.amount : 0, charged: false, payer: student ? 'student' : 'institution' } };
+    return { raw, options, prepared, student, jobClass: student ? 'student' : 'staff', quote: { pages: prepared.pages, sheets: cost.sheets, sides: cost.sides, costMinor: student ? cost.amount : 0, charged: student && policies.studentPrinting === 'wallet', payer: student ? 'student' : 'institution' } };
   }
   app.post('/api/v2/edu/jobs/quote', need('jobs.submit'), async (req, res) => {
     const { quote } = await buildJob(req, req.body);
+    if (quote.charged) {
+      const balance = await db.transaction(async tx => balanceOf(tx, await ensureAccount(tx, req.org.id, req.user.id, 'student')));
+      return res.json({ ...quote, balanceMinor: balance.available, shortfallMinor: Math.max(0, quote.costMinor - balance.available) });
+    }
     res.json(quote);
   });
   app.post('/api/v2/edu/jobs', need('jobs.submit'), async (req, res) => {
     const built = await buildJob(req, req.body);
     const jobId = await db.transaction(async tx => {
       const objectId = await storeObject(tx, req.org.id, Buffer.from(built.prepared.bytes), { encrypt, key });
-      const id = await enqueueJob(tx, { orgId: req.org.id, submitterId: req.user.id, jobClass: built.jobClass, objectId, options: { ...built.options, file_name: String(req.body.fileName ?? 'document').slice(0, 150) }, pages: built.quote.pages, sheets: built.quote.sheets, payer: built.student ? 'wallet' : 'institution', costMinor: built.quote.costMinor });
+      const id = await enqueueJob(tx, { orgId: req.org.id, submitterId: req.user.id, jobClass: built.jobClass, objectId, options: { ...built.options, file_name: String(req.body.fileName ?? 'document').slice(0, 150) }, pages: built.quote.pages, sheets: built.quote.sheets, payer: built.quote.charged ? 'wallet' : 'institution', costMinor: built.quote.costMinor });
+      // Wallet mode: the price is held now; if the balance is not enough the whole transaction (and the job) is rolled back.
+      if (built.quote.charged) await holdForJob(tx, { orgId: req.org.id, userId: req.user.id, jobId: id, amountMinor: built.quote.costMinor });
       await markObjectDeleted(tx, req.org.id, built.raw.id); // the raw upload is not kept
       return id;
     });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { token, digest } from './security.js';
 import { putObject, markObjectDeleted } from './storage.js';
+import { settleJob, releaseJob } from './wallet.js';
 
 // Education print queue: jobs, fenced attempts and the rules that keep a job from printing twice.
 //
@@ -187,6 +188,7 @@ export async function recordEvent(db, agent, attemptId, leaseToken, body) {
         await tx.query("UPDATE print_attempts SET state='completed', pages_reported=$1, finished=$2 WHERE id=$3", [printedPages, now(), attempt.id]);
         await tx.query("UPDATE print_jobs SET status='completed', pages_printed=$1, finished_at=$2 WHERE id=$3", [printedPages, now(), attempt.job_id]);
         await deleteObject(tx, agent.org_id, job.object_id);
+        await settleJob(tx, job, printedPages);
       } else if (attempt.state === 'claimed' || (body.nothingPrinted === true && !(pages > 0))) {
         // Nothing reached the printer, so the operator may retry safely.
         await tx.query("UPDATE print_attempts SET state='failed', error=$1, pages_reported=COALESCE($2,pages_reported), finished=$3 WHERE id=$4", [body.error ? String(body.error).slice(0, 300) : null, pages, now(), attempt.id]);
@@ -264,6 +266,8 @@ export async function cancelJob(tx, orgId, jobId, actor) {
   if (job.status === 'claimed') await tx.query("UPDATE print_attempts SET state='cancelled', finished=$1 WHERE job_id=$2 AND state='claimed'", [now(), job.id]);
   await tx.query("UPDATE print_jobs SET status='cancelled', finished_at=$1 WHERE id=$2", [now(), job.id]);
   await deleteObject(tx, orgId, job.object_id);
+  // Charge for any pages that already came out, give the rest back.
+  if (Number(job.pages_printed) > 0) await settleJob(tx, job, Number(job.pages_printed)); else await releaseJob(tx, job);
   await queueEvent(tx, orgId, job.id, 'job.cancelled', actor);
 }
 
@@ -274,6 +278,6 @@ export async function resolveUncertain(tx, orgId, jobId, { printed, pages }, act
   const count = Number.isInteger(pages) && pages >= 0 ? pages : (printed ? job.pages : 0);
   await tx.query("UPDATE print_attempts SET state=$1, pages_reported=$2, finished=$3 WHERE job_id=$4 AND state='uncertain'", [printed ? 'completed' : 'failed', count, now(), job.id]);
   await tx.query('UPDATE print_jobs SET status=$1, pages_printed=$2, finished_at=$3 WHERE id=$4', [printed ? 'completed' : 'failed', count, now(), job.id]);
-  if (printed) await deleteObject(tx, orgId, job.object_id);
+  if (printed) { await deleteObject(tx, orgId, job.object_id); await settleJob(tx, job, count); }
   await queueEvent(tx, orgId, job.id, 'job.uncertain_resolved', actor, { printed, pages: count });
 }

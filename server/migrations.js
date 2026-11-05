@@ -96,6 +96,23 @@ export const migrations = [
       await tx.query('SELECT dek_wrapped, dek_destroyed_at FROM organizations LIMIT 1');
     }
   }
+  ,
+  {
+    id: '0010_wallet_ledger',
+    description: 'Wallet accounts, balances, holds and an insert-only ledger',
+    async up(tx, { postgres }) {
+      for (const table of ['wallet_accounts', 'wallet_balances', 'ledger_entries', 'wallet_holds']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`);
+      // The ledger can only be appended to: the database itself refuses to change or remove an entry.
+      if (postgres) {
+        await tx.query("CREATE OR REPLACE FUNCTION smartprint.ledger_immutable() RETURNS trigger AS $fn$ BEGIN RAISE EXCEPTION 'ledger entries are immutable'; END $fn$ LANGUAGE plpgsql");
+        await tx.query('DROP TRIGGER IF EXISTS ledger_immutable ON smartprint.ledger_entries');
+        await tx.query('CREATE TRIGGER ledger_immutable BEFORE UPDATE OR DELETE ON smartprint.ledger_entries FOR EACH ROW EXECUTE FUNCTION smartprint.ledger_immutable()');
+      } else {
+        await tx.query("CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger_entries BEGIN SELECT RAISE(ABORT, 'ledger entries are immutable'); END");
+        await tx.query("CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger_entries BEGIN SELECT RAISE(ABORT, 'ledger entries are immutable'); END");
+      }
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();

@@ -1,7 +1,7 @@
 // Institution workspace for Education organizations. Loaded on demand; the shop and customer screens do not use it.
 const TABS = [
   ['overview', 'Overview', 'institution.profile.edit'], ['print', 'Print', 'jobs.submit'], ['queue', 'Queue', 'jobs.view_queue'],
-  ['people', 'People', 'users.read'], ['printers', 'Printers', 'printers.manage'], ['agents', 'Agents', 'agents.manage'], ['reports', 'Reports', 'reports.view_org']
+  ['wallet', 'My wallet', 'wallet.view_own'], ['wallets', 'Wallets', 'wallet.view_any'], ['people', 'People', 'users.read'], ['printers', 'Printers', 'printers.manage'], ['agents', 'Agents', 'agents.manage'], ['reports', 'Reports', 'reports.view_org']
 ];
 const ROLE_LABEL = r => String(r).replaceAll('_', ' ');
 const STATUS_TEXT = { queued: 'Waiting', claimed: 'Starting', submitted: 'Printing', completed: 'Printed', failed: 'Failed', uncertain: 'Check output', cancelled: 'Cancelled' };
@@ -54,7 +54,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     shell(`<section class="panel"><h2>Get started</h2><ul>${step(info.setup.agents > 0, 'Install the SmartPrint agent on the printer PC <a href="#edu/agents">(Agents)</a>')}${step(info.setup.printers > 0, 'Printers appear automatically once the agent runs <a href="#edu/printers">(Printers)</a>')}${step(info.setup.people > 1, 'Add staff and students <a href="#edu/people">(People)</a>')}</ul>
       <p class="muted">Departments and campuses are optional; add them whenever you need them. Students and staff sign in at <strong>#college-login</strong> with the institution code <strong>${escape(info.loginCode)}</strong> and their ID.</p></section>
       <section class="panel"><h2>Printing policies</h2><form id="policies">
-        <label class="field">Student printing<select name="studentPrinting"><option value="disabled" ${p.studentPrinting === 'disabled' ? 'selected' : ''}>Off (until the wallet is available)</option><option value="free" ${p.studentPrinting === 'free' ? 'selected' : ''}>On, free of charge (pilot)</option></select></label>
+        <label class="field">Student printing<select name="studentPrinting"><option value="disabled" ${p.studentPrinting === 'disabled' ? 'selected' : ''}>Off</option><option value="free" ${p.studentPrinting === 'free' ? 'selected' : ''}>On, free of charge (pilot)</option><option value="wallet" ${p.studentPrinting === 'wallet' ? 'selected' : ''}>On, charged from the student wallet</option></select></label>
         <label class="field">Max pages per job<input name="maxPagesPerJob" type="number" min="1" max="500" value="${p.maxPagesPerJob}"></label>
         <label class="field">Max copies<input name="maxCopies" type="number" min="1" max="100" value="${p.maxCopies}"></label>
         <label class="field"><span><input type="checkbox" name="colourStudents" ${p.colourStudents ? 'checked' : ''}> Students may print in colour</span></label>
@@ -139,6 +139,23 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
       }
       await refresh();
     });
+  } else if (current === 'wallet') {
+    const w = await api('/api/v2/edu/wallet'), rupees = v => `₹${(v / 100).toFixed(2)}`;
+    const label = { credit: 'Credit added', debit: 'Debit', hold: 'Reserved for a print', capture: 'Print charged', release: 'Reservation returned' };
+    shell(`<section class="panel"><h2>My wallet</h2><p><strong style="font-size:1.6em">${rupees(w.available)}</strong> available${w.held ? ` · ${rupees(w.held)} reserved for prints in progress` : ''}</p>
+      <p class="muted">Ask the counter to add money to your wallet.</p>
+      ${table(['When', 'What', 'Amount'], w.ledger.map(e => `<tr><td>${escape(time(e.created))}</td><td>${escape(label[e.kind] || e.kind)}${e.note ? `<br><small class="muted">${escape(e.note)}</small>` : ''}</td><td>${e.available_delta + e.held_delta === 0 ? '' : ''}${rupees(e.available_delta)}${e.held_delta ? ` <small class="muted">(${e.held_delta > 0 ? '+' : ''}${rupees(e.held_delta)} reserved)</small>` : ''}</td></tr>`))}</section>`);
+  } else if (current === 'wallets') {
+    const wallets = await api('/api/v2/edu/wallets'), check = await api('/api/v2/edu/wallets/verify'), rupees = v => `₹${(v / 100).toFixed(2)}`;
+    shell(`<section class="panel"><h2>Student wallets</h2><p class="muted">Ledger check: ${check.ok ? '✅ balanced' : `⚠️ ${escape(check.problems.join('; '))}`}</p>
+      ${table(['Student', 'ID', 'Available', 'Reserved', ''], wallets.map(w => `<tr><td>${escape(w.name)}</td><td>${escape(w.college_id)}</td><td>${rupees(w.available)}</td><td>${rupees(w.held)}</td><td><button class="secondary small" data-credit="${escape(w.user_id)}">Add money</button></td></tr>`))}</section>`);
+    act('[data-credit]', async el => {
+      const rupeesText = prompt('Amount received, in rupees:'); if (!rupeesText) { el.disabled = false; return; }
+      const note = prompt('Reason / receipt number:', 'Cash at the counter'); if (!note) { el.disabled = false; return; }
+      const amountMinor = Math.round(Number(rupeesText) * 100);
+      await api(`/api/v2/edu/wallets/${el.dataset.credit}/credit`, { method: 'POST', body: { amountMinor, note, idempotencyKey: crypto.randomUUID() } });
+      notify('Money added.'); await refresh();
+    });
   } else if (current === 'reports') {
     const r = await api('/api/v2/edu/reports/usage');
     const rows = Object.entries(r.byClass).map(([k, v]) => `<tr><td>${escape(k)}</td><td>${v.jobs}</td><td>${v.completed}</td><td>${v.pagesPrinted}</td><td>${v.colourJobs}</td></tr>`);
@@ -166,7 +183,7 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     };
     document.querySelector('#quote-btn').onclick = async event => {
       event.target.disabled = true;
-      try { const q = await api('/api/v2/edu/jobs/quote', { method: 'POST', body: { documentId: await upload(), options: optionsOf() } }); quoteBox.hidden = false; quoteBox.textContent = `${q.pages} pages, ${q.sheets} sheets${q.payer === 'student' ? `, rate value ₹${(q.costMinor / 100).toFixed(2)} (not charged yet)` : ', no charge'}.`; }
+      try { const q = await api('/api/v2/edu/jobs/quote', { method: 'POST', body: { documentId: await upload(), options: optionsOf() } }); quoteBox.hidden = false; quoteBox.textContent = `${q.pages} pages, ${q.sheets} sheets${q.payer === 'student' ? (q.charged ? `, ₹${(q.costMinor / 100).toFixed(2)} from your wallet${q.shortfallMinor ? ` — you are ₹${(q.shortfallMinor / 100).toFixed(2)} short` : ''}` : `, rate value ₹${(q.costMinor / 100).toFixed(2)} (not charged)`) : ', no charge'}.`; }
       catch (err) { notify(err.message); }
       event.target.disabled = false;
     };
