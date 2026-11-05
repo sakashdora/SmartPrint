@@ -46,7 +46,7 @@ jobs:
       - name: PostgreSQL tests
         run: |
           set +e
-          node --test --test-concurrency=1 test/postgres-integration.test.js test/phase3-agents.test.js test/phase6-queue.test.js test/storage.test.js test/phase5-wallet.test.js > pg-tests.log 2>&1
+          node --test --test-concurrency=1 test/postgres-integration.test.js test/phase3-agents.test.js test/phase6-queue.test.js test/storage.test.js test/phase5-wallet.test.js test/agent-v3.test.js > pg-tests.log 2>&1
           code=$?
           if [ $code -ne 0 ]; then
             # Job logs need a sign-in to read; an annotation does not. Put the failure details there.

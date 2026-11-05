@@ -72,5 +72,5 @@ export async function boot(t) {
     return enqueueJob(tx, { orgId, objectId, options, pages: 1, ...extra });
   });
   const number = async (sql, params) => Number((await db.query(sql, params))[0].n);
-  return { db, service, call, org, member, agent, job, number };
+  return { db, service, call, org, member, agent, job, number, base };
 }

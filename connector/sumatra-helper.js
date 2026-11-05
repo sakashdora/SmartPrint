@@ -313,6 +313,7 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
 }
 
 const LIST_JOBS = 'ConvertTo-Json -Compress -InputObject @(Get-PrintJob -PrinterName $env:SMARTPRINT_TARGET -ErrorAction Stop | Select-Object Id, DocumentName, PagesPrinted, @{ n = "JobStatus"; e = { [string]$_.JobStatus } }, @{ n = "Submitted"; e = { $_.SubmittedTime.ToUniversalTime().ToString("o") } })';
+export { listJobs as listPrintJobs }; // used by the v3 agent to follow a job to the end
 async function listJobs(printerName) {
   const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', LIST_JOBS], { timeout: 15000, windowsHide: true, env: { ...process.env, SMARTPRINT_TARGET: printerName } });
   const parsed = JSON.parse(stdout.trim() || '[]');
