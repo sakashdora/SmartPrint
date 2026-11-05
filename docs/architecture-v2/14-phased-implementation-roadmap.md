@@ -23,7 +23,22 @@ gantt
 ```
 P2 and P3 can run in parallel (disjoint tables/files) once P1 is done. P5/P6 can run in parallel after P4.
 
-> **Status (2026-11-05):** Phase 1 is implemented and deployed (commits `11960a1`, `5b19277`) and the owner-MFA date policy and lifecycle guard test are added after it. Phase 0 is done as far as the repository allows (PostgreSQL job and secret scan in CI, API contract test, census script, dev-database warning). **Needs infrastructure or your action, not code:** staging environment and deploy promotion gate, restore drill, confirming the exposed password from commit `885501f` was rotated. **Deliberately deferred:** pages-printed reporting (moves to the Phase 3 agent, where real progress is tracked) and a capability block at order creation (would stop owners who print manually).
+> **Status (2026-11-05, end of day):**
+>
+> | Phase | State |
+> |---|---|
+> | 0 Safety net | Done as far as the repository allows. Needs you: staging environment, deploy promotion gate, restore drill, secret-rotation check |
+> | 1 Fix existing problems | Done and deployed |
+> | 2 Tenancy, registration, sign-in | Done and deployed |
+> | 3 Agents, printers, fenced queue | Server done and deployed; **agent v3 built and tested with a simulated printer**, real-printer test plan in `docs/agent-v3.md`; no Windows service wrapper or signed auto-update yet |
+> | 4 Education core | Done and deployed (documents in the database until an object store is chosen) |
+> | 5 Wallet and payments | **Ledger, holds, capture, release, manual credit: built.** Payment-gateway top-ups and refunds to the original method: **not built** (needs the gateway and compliance decisions) |
+> | 6 Fair queueing | Built (weighted fair queueing with aging, maximum wait, per-user cap) |
+> | 7 Offline | Agent-bound reservations, PIN-checked offline spending, replay-safe sync, staff offline jobs: built. **The LAN portal students would use during an outage is not built** |
+> | 8 Hardening | CI runs the queue, wallet, storage, agent and offline tests on PostgreSQL. Load tests, external penetration test, restore drill, monitoring and ERP hooks: not done |
+> | Storage | S3-compatible object store and per-institution keys built; no bucket is configured yet |
+>
+> Owner MFA is date-controlled (`OWNER_MFA_REQUIRED_FROM`). Pages-printed reporting now exists in agent v3.
 
 **Standing rule for every phase:** merge only if (1) the Business regression suite is green on SQLite **and** PostgreSQL, (2) the v1 API contract snapshot is unchanged, (3) a rollback was rehearsed, (4) the change is behind an org-level feature flag until accepted.
 
