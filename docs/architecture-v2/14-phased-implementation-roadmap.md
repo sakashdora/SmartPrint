@@ -23,22 +23,23 @@ gantt
 ```
 P2 and P3 can run in parallel (disjoint tables/files) once P1 is done. P5/P6 can run in parallel after P4.
 
-> **Status (2026-11-05, end of day):**
+> **Status (2026-11-05, after gap closing; branch `gap-closing`, not yet released):**
 >
 > | Phase | State |
 > |---|---|
-> | 0 Safety net | Done as far as the repository allows. Needs you: staging environment, deploy promotion gate, restore drill, secret-rotation check |
+> | 0 Safety net | Done as far as the repository allows (CI on SQLite and PostgreSQL, API contract snapshot, secret scan, census script, restore/staging runbook). **Needs you:** a staging environment (Neon branch + Render service), the restore drill, confirming the exposed password was rotated |
 > | 1 Fix existing problems | Done and deployed |
-> | 2 Tenancy, registration, sign-in | Done and deployed |
-> | 3 Agents, printers, fenced queue | Server done and deployed; **agent v3 built and tested with a simulated printer**, real-printer test plan in `docs/agent-v3.md`; no Windows service wrapper or signed auto-update yet |
-> | 4 Education core | Done and deployed (documents in the database until an object store is chosen) |
-> | 5 Wallet and payments | **Ledger, holds, capture, release, manual credit: built.** Payment-gateway top-ups and refunds to the original method: **not built** (needs the gateway and compliance decisions) |
-> | 6 Fair queueing | Built (weighted fair queueing with aging, maximum wait, per-user cap) |
-> | 7 Offline | Agent-bound reservations, PIN-checked offline spending, replay-safe sync, staff offline jobs: built. **The LAN portal students would use during an outage is not built** |
-> | 8 Hardening | CI runs the queue, wallet, storage, agent and offline tests on PostgreSQL. Load tests, external penetration test, restore drill, monitoring and ERP hooks: not done |
+> | 2 Tenancy, registration, sign-in | Done and deployed. Added: administrator idle time-out (`ADMIN_IDLE_MINUTES`, default 60), a list of your sessions, sign out other devices |
+> | 3 Agents, printers, fenced queue | Done and deployed. Agent v3 verified on a real Brother printer (print, kill-mid-print to `uncertain`, outage page). Signed updater, rollback launcher and start-at-sign-in installer built. **Needs you:** the update signing key; unplugging USB mid-job and colour/duplex paper tests; a packaged `.exe`/Windows service is not built (a scheduled task is used instead) |
+> | 4 Education core | Done and deployed. Added: departments choose printer groups (pool access), people see only groups they may use |
+> | 5 Wallet and payments | Ledger, holds, capture, release, manual credit, online top-ups through each institution's own Razorpay account and refunds to source: built and deployed. **Needs you:** a real Razorpay test key for an end-to-end gateway run; compliance advice on stored value, GST and student data |
+> | 6 Fair queueing | Built and deployed (weighted fair queueing with aging, maximum wait, per-user cap) |
+> | 7 Offline | Built and deployed, including the agent's LAN outage page and staff offline PINs; verified on real hardware |
+> | 8 Hardening | CI runs the queue, wallet, storage, agent, offline, pools, sessions, monitoring and webhook suites on PostgreSQL. Built on `gap-closing`: nightly ledger verification, institution alerts (silent agent, printers unavailable while work waits, jobs stuck uncertain, ledger mismatch) with e-mail and a Prometheus `/metrics` endpoint; signed outbound webhooks (SSRF-safe, outbox, retries); a load-test script with measured results (`docs/load-test.md`, SQLite only). **Not done:** an external penetration test; a load run against PostgreSQL; the restore drill |
 > | Storage | S3-compatible object store and per-institution keys built; no bucket is configured yet |
 >
-> Owner MFA is date-controlled (`OWNER_MFA_REQUIRED_FROM`). Pages-printed reporting now exists in agent v3.
+> Not built, by choice or because it needs a decision: platform role split (reviewer/support) beyond the single platform admin, support-access grants for platform staff, multi-agent eligibility for one network printer. Owner MFA is date-controlled (`OWNER_MFA_REQUIRED_FROM`).
+> Releasing `gap-closing` needs migrations 0014-0017 on Neon first (`npm run migrate`), then a merge to `main`.
 
 **Standing rule for every phase:** merge only if (1) the Business regression suite is green on SQLite **and** PostgreSQL, (2) the v1 API contract snapshot is unchanged, (3) a rollback was rehearsed, (4) the change is behind an org-level feature flag until accepted.
 
