@@ -322,3 +322,22 @@ test('an admin test print is queued for the printer and respects capability', as
   const claim = (await a.call('/api/agent/v2/jobs/claim', { method: 'POST', body: { printerIds: [a.printers.Colour] } })).body.jobs[0];
   assert.equal(claim.options.file_name, 'SmartPrint_Diagnostic_Test.pdf');
 });
+
+test('a printer Windows reports as Offline is not offered work, even though its agent is alive', async t => {
+  const { org, agent, job, call, db } = await boot(t);
+  const admin = await org('offlineprinter');
+  const a = await agent(admin, 'PC', [{ name: 'Mono', color: false, duplex: false, status: 'Offline' }]);
+  await assert.rejects(() => job(admin.orgId), /No online printer/, 'refused at submit: nothing could print it');
+  const listed = (await call('/api/v2/edu/printers', { cookie: admin.cookie })).body[0];
+  assert.equal(listed.online, false);
+  // It comes back: the next report says Ready and work flows again.
+  await a.call('/api/agent/v2/printers/report', { method: 'POST', body: { printers: [{ name: 'Mono', color: false, duplex: false, status: 'Ready' }] } });
+  const jobId = await job(admin.orgId);
+  const claimJobs = async () => (await a.call('/api/agent/v2/jobs/claim', { method: 'POST', body: { printerIds: [a.printers.Mono] } })).body.jobs;
+  assert.equal((await claimJobs())[0].jobId, jobId);
+  // And if it goes Offline while a job is waiting, the job stays queued instead of being handed to a dead printer.
+  await job(admin.orgId);
+  await db.query("UPDATE print_attempts SET state='completed'");
+  await a.call('/api/agent/v2/printers/report', { method: 'POST', body: { printers: [{ name: 'Mono', color: false, duplex: false, status: 'Offline' }] } });
+  assert.deepEqual(await claimJobs(), []);
+});

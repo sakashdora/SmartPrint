@@ -30,6 +30,9 @@ jobSignal.setMaxListeners(0);
 export const printerSupports = (printer, job) =>
   (!Number(job.requires_color) || Number(printer.cap_color) === 1) && (!Number(job.requires_duplex) || Number(printer.cap_duplex) === 1);
 export const agentOnline = lastSeen => Boolean(lastSeen) && Date.now() - Date.parse(lastSeen) < AGENT_ONLINE_MS;
+// A printer Windows itself reports as Offline (unplugged, switched off, network copy without a device) cannot print, even
+// though its agent is alive. Real hardware showed this: an Offline Brother copy was still being offered work.
+export const printerUsable = printer => agentOnline(printer.agent_seen) && String(printer.device_status ?? '').toLowerCase() !== 'offline';
 
 const queueEvent = (tx, orgId, jobId, type, actor, data = {}) =>
   tx.query('INSERT INTO queue_events (id,org_id,job_id,type,actor,data,created) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), orgId, jobId, type, actor, JSON.stringify(data), now()]);
@@ -85,7 +88,7 @@ export async function enqueueJob(tx, { orgId, poolId = null, submitterId = null,
     "SELECT p.*, a.last_seen AS agent_seen FROM pool_members m JOIN printers p ON p.id=m.printer_id JOIN agents a ON a.id=p.agent_id WHERE m.pool_id=$1 AND p.org_id=$2 AND p.status='active' AND a.status='active'",
     [pool.id, orgId]
   );
-  if (!printers.some(p => printerSupports(p, job) && agentOnline(p.agent_seen))) {
+  if (!printers.some(p => printerSupports(p, job) && printerUsable(p))) {
     const needs = [job.requires_color && 'colour', job.requires_duplex && 'two-sided'].filter(Boolean).join(' and ');
     throw fail(409, `No online printer${needs ? ` that supports ${needs} printing` : ''} is available in this pool.`, 'job.no_compatible_printer');
   }
@@ -117,6 +120,7 @@ export async function claimJobs(db, agent, printerIds) {
       if (!printer) continue;
       const [busy] = await tx.query(`SELECT id FROM print_attempts WHERE printer_id=$1 AND state IN ('claimed','submitted','uncertain') LIMIT 1`, [printer.id]);
       if (busy) continue; // one job at a time per printer; an uncertain job blocks it until an operator decides
+      if (String(printer.device_status ?? '').toLowerCase() === 'offline') continue; // Windows says it cannot print
       const pools = await tx.query('SELECT p.id, p.scheduler, p.max_wait_seconds FROM pool_members m JOIN printer_pools p ON p.id=m.pool_id WHERE m.printer_id=$1 ORDER BY p.name', [printer.id]);
       if (!pools.length) continue;
       // Compatibility is decided in SQL and ONE row is taken per pool. Locking a long candidate list with SKIP LOCKED

@@ -54,7 +54,7 @@ export function agentRoutes(app, { db, key }) {
 
   app.get('/api/v2/edu/printers', managePrinters, async (req, res) => {
     const rows = await db.query('SELECT p.*, a.name AS agent_name, a.last_seen AS agent_seen, a.status AS agent_status FROM printers p JOIN agents a ON a.id=p.agent_id WHERE p.org_id=$1 ORDER BY p.display_name', [req.org.id]);
-    res.json(rows.map(({ agent_seen, ...p }) => ({ ...p, online: p.status === 'active' && p.agent_status === 'active' && agentOnline(agent_seen) })));
+    res.json(rows.map(({ agent_seen, ...p }) => ({ ...p, online: p.status === 'active' && p.agent_status === 'active' && agentOnline(agent_seen) && String(p.device_status ?? '').toLowerCase() !== 'offline' })));
   });
   app.patch('/api/v2/edu/printers/:id', managePrinters, async (req, res) => {
     const p = await printer(req), b = req.body;

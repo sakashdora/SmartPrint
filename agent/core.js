@@ -277,7 +277,7 @@ export class AgentCore {
       await this.syncOffline();
       for (const entry of this.liveJournal()) await this.#advance(entry);
       const busy = new Set(this.liveJournal().map(e => e.printer_id));
-      const idle = Object.values(this.printerIds).filter(id => !busy.has(id));
+      const idle = Object.entries(this.printerIds).filter(([name, id]) => !busy.has(id) && String(this.printerStatus?.[name] ?? '').toLowerCase() !== 'offline').map(([, id]) => id);
       if (!idle.length) return { jobs: 0 };
       const { jobs } = await this.#request('/api/agent/v2/jobs/claim', { method: 'POST', body: { printerIds: idle, waitSeconds: wait } });
       for (const claim of jobs) {
