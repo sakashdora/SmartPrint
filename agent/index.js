@@ -32,8 +32,9 @@ if (command === 'enroll') {
   sweepCache(dir, new Set(core.liveJournal().map(e => e.attempt_id)));
   log(`Agent ${core.settings.agentId} running against ${core.settings.url}`);
   if (args.portal) await startPortal(core, { port: Number(args.portal) || 17640, host: args['portal-host'] || '0.0.0.0', log }); // outage printing page for the campus network
-  await core.run({ signal: stop.signal });
+  const ended = await core.run({ signal: stop.signal });
   core.close();
+  if (ended?.update) process.exit(75); // exit code 75 tells the launcher to start the freshly installed version
 } else {
   console.error('Commands: enroll, run, status');
   process.exit(2);

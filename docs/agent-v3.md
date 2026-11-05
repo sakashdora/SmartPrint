@@ -8,12 +8,22 @@ The agent is the program on a Windows PC that has printers attached. It talks to
 2. On the printer PC (Node.js 24 installed, repository checked out):
    ```powershell
    node agent/index.js enroll --url https://your-smartprint-server --code THE-CODE
-   node agent/index.js run
+   .\scripts\install-agent-task.ps1 -Portal 17640   # start at every sign-in, restart if it stops (omit -Portal for no outage page)
    ```
-3. Printers appear under **Printers** with the capabilities Windows reports. A printer whose driver cannot answer stays *unknown*: it never receives a colour or two-sided job until an administrator sets it.
-4. `node agent/index.js status` shows enrolment and any unfinished jobs.
+   Or run it by hand: `node agent/launcher.js` (keeps it running and handles updates) or `node agent/index.js run`.
+3. Printers appear under **Printers** with the capabilities Windows reports. A printer whose driver cannot answer stays *unknown*: it never receives a colour or two-sided job until an administrator sets it. A printer Windows reports as *Offline* is never offered work.
+4. `node agent/index.js status` shows enrolment and any unfinished jobs. `.\scripts\install-agent-task.ps1 -Remove` uninstalls the task.
 
-To start at logon, create a Task Scheduler task that runs `node agent/index.js run` for the signed-in user (the credential is protected for that Windows user).
+The task runs the launcher as **you** (no administrator needed), because the agent's credential is protected with Windows DPAPI for your user. It does not touch the older shop connector.
+
+## Updates (signed)
+
+The agent installs a new version only if the release manifest is signed with the private key whose public half ships in `agent/update-public-key.pem`, and the downloaded package matches the signed SHA-256 and size. A hijacked server, bucket or link cannot make an agent run foreign code; equal or older versions are refused.
+
+- **One-time setup (you):** `node scripts/sign-agent-release.mjs --init --key C:\securegent-signing.pem` creates the key pair (keep the private key secret and backed up; commit only `agent/update-public-key.pem`). Until that public key is committed and agents are updated to include it, **updates are switched off**.
+- **Publishing a release:** build a `.tgz` containing an `agent/` folder, upload it somewhere reachable over HTTPS, then `node scripts/sign-agent-release.mjs --package agent-3.1.0.tgz --version 3.1.0 --url https://.../agent-3.1.0.tgz --key C:\securegent-signing.pem --out agent-release.json`, and set `AGENT_RELEASE_FILE` on the server to that file.
+- **What the agent does:** when idle (never mid-job) it verifies, unpacks the release beside the current one, exits with code 75, and the launcher starts the new version. The new version is *unconfirmed* until it reaches the server; if it does not within 2 minutes the launcher goes back to the previous version and deletes the bad one.
+- A code-signing certificate for Windows (to avoid SmartScreen warnings on a packaged `.exe`) is a separate, optional step and is not needed for this source-based install.
 
 ## What it guarantees
 
@@ -38,8 +48,17 @@ To start at logon, create a Task Scheduler task that runs `node agent/index.js r
 
 ## Not included yet
 
-- Running as a Windows *service* and a **signed auto-updater**. The server already tells an outdated agent to update (`updateRequired`) but nothing installs updates. Both need a code-signing certificate and a distribution channel.
-- **Real-printer validation.** The Windows driver reuses the shop connector's proven SumatraPDF/spooler code, but the v3 agent has only been tested with a simulated printer and with the job-tracking logic on recorded queue states. Before relying on it, run the test plan below with paper.
+- A packaged single-file `.exe` installer (the agent currently runs from the repository with Node).
+- Running as a true Windows *service* (the scheduled task covers start-at-sign-in and restart; a service would also run with nobody signed in, but then DPAPI would need machine scope).
+
+## Tested on real hardware (2026-11-05)
+
+On this PC (HP laptop; Brother DCP-T820DW and HP LaserJet 1020), against a throwaway local server, never production:
+- Enrolment, **real DPAPI vault**, and printer discovery: the Brother (USB copy) reported colour + two-sided, its network copy reported *Offline*, and the HP reported mono + simplex (driver-verified).
+- **The HP was not detected on USB** (powered off / unplugged) although Windows said "Normal". The agent waited 90 s, saw the spooler job make no progress, removed it from the Windows queue, reported a clean failure, and left no document behind: no surprise print later.
+- **One black-and-white test page on the Brother completed**: the job ended *completed*, pages printed = 1 (from the Windows queue), journal, encrypted cache and outbox empty afterwards.
+- Finding fixed: an Offline printer used to stay routable; it no longer does.
+Still to do with a person present: the remaining steps below (unplug mid-job, kill the process mid-print, network cut) and a test of the outage page in a real outage.
 
 ## Real-printer test plan (needs a person at the printer)
 

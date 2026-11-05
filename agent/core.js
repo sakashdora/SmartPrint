@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID, createCipheriv, createDecipheriv, scryptSync, timingSafeEqual } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { stageRelease, activate, confirm as confirmUpdate, isNewer } from './updater.js';
 
 // SmartPrint agent v3 core: talks to /api/agent/v2, keeps a durable local journal, and never prints a job twice.
 //
@@ -44,7 +45,10 @@ export class Vault {
 }
 
 export class AgentCore {
-  constructor({ dir, driver, url = null, fetchImpl = fetch, version = AGENT_VERSION, log = () => {}, instanceId = null, vaultMode, rotateAfterDays = 30, heartbeatMs = 15000, reportMs = 60000, hooks = {} }) {
+  constructor({ dir, driver, url = null, fetchImpl = fetch, version = AGENT_VERSION, log = () => {}, instanceId = null, vaultMode, rotateAfterDays = 30, heartbeatMs = 15000, reportMs = 60000, hooks = {}, updatePublicKey, updateCheckMs = 6 * 3600000, extract }) {
+    this.extract = extract; this.updateCheckMs = updateCheckMs; this.lastUpdateCheck = 0; this.updateReady = null;
+    const keyFile = new URL('./update-public-key.pem', import.meta.url);
+    this.updatePublicKey = updatePublicKey ?? (existsSync(keyFile) ? readFileSync(keyFile, 'utf8') : null); // no shipped key = updates are off
     this.hooks = hooks; this.dir = dir; this.driver = driver; this.fetch = fetchImpl; this.version = version; this.log = log; this.rotateAfterDays = rotateAfterDays;
     this.heartbeatMs = heartbeatMs; this.reportMs = reportMs;
     mkdirSync(join(dir, 'cache'), { recursive: true });
@@ -116,7 +120,27 @@ export class AgentCore {
     if (!force && Date.now() - this.lastHeartbeat < this.heartbeatMs) return;
     const result = await this.#request('/api/agent/v2/heartbeat', { method: 'POST', body: { version: this.version, printers: Object.entries(this.printerIds).map(([name, id]) => ({ id, status: this.printerStatus?.[name] ?? 'Unknown' })) } });
     this.lastHeartbeat = Date.now();
+    confirmUpdate(this.dir, this.version); // a freshly installed version proves itself by reaching the server
     if (result.updateRequired) { this.updateRequired = true; this.log(`[Agent] This version (${this.version}) is below the minimum; update to ${result.latestVersion}.`); }
+  }
+
+  // ---- updates ------------------------------------------------------------------------------------------------------
+  // Looks for a signed release when nothing is in flight. A release is installed only if its manifest verifies against the
+  // public key shipped with this agent and its package matches the signed checksum; it never downgrades.
+  async checkForUpdate({ force = false } = {}) {
+    if (!this.updatePublicKey || this.updateReady) return this.updateReady;
+    if (!force && Date.now() - this.lastUpdateCheck < this.updateCheckMs) return null;
+    if (this.liveJournal().length || this.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n) return null; // never in the middle of a job
+    this.lastUpdateCheck = Date.now();
+    const config = await this.#request('/api/agent/v2/config');
+    if (!config.release || !isNewer(config.release.manifest?.version ?? '0.0.0', this.version)) return null;
+    try {
+      const version = await stageRelease({ dir: this.dir, release: config.release, publicKeyPem: this.updatePublicKey, currentVersion: this.version, fetchImpl: this.fetch, ...(this.extract ? { extract: this.extract } : {}) });
+      activate(this.dir, version);
+      this.updateReady = version;
+      this.log(`[Agent] Version ${version} installed; restarting into it.`);
+    } catch (error) { this.log(`[Agent] ${error.message}`); }
+    return this.updateReady;
   }
 
   // ---- journal ----------------------------------------------------------------------------------------------------
@@ -305,6 +329,7 @@ export class AgentCore {
       await this.drainOutbox();
       await this.syncOffline();
       for (const entry of this.liveJournal()) await this.#advance(entry);
+      if (await this.checkForUpdate()) return { update: this.updateReady };
       const busy = new Set(this.liveJournal().map(e => e.printer_id));
       const idle = Object.entries(this.printerIds).filter(([name, id]) => !busy.has(id) && String(this.printerStatus?.[name] ?? '').toLowerCase() !== 'offline').map(([, id]) => id);
       if (!idle.length) return { jobs: 0 };
@@ -340,6 +365,7 @@ export class AgentCore {
     while (!signal?.aborted) {
       const result = await this.cycle({ wait: 20 }).catch(error => { this.log(`[Agent] ${error.message}`); return { offline: true }; });
       if (result.halted) { this.log(`[Agent] Stopped: ${result.halted}. Work in progress is kept in the journal.`); return result; }
+      if (result.update) return result; // the launcher starts the new version
       delay = result.offline ? Math.min(30000, delay * 2) : 1000;
       if (result.offline || !result.jobs) await sleep(result.offline ? delay : 500);
     }

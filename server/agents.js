@@ -5,6 +5,7 @@ import { generateTestPage } from './diagnostic-page.js';
 import { auditV2 } from './orgs.js';
 import { requirePermission } from './tenant.js';
 import { readObject } from './storage.js';
+import { readFileSync } from 'node:fs';
 import { ensureDefaultPool, storeObject, enqueueJob, claimJobs, recordEvent, renewLeases, releaseAgentWork, retryJob, cancelJob, resolveUncertain, jobSignal, agentOnline, LEASE_MS } from './queue.js';
 
 const now = () => new Date().toISOString();
@@ -206,7 +207,11 @@ export function agentRoutes(app, { db, key }) {
 
   app.get('/api/agent/v2/config', async (req, res) => {
     const printers = await db.query('SELECT id, windows_name, display_name, status, paused FROM printers WHERE agent_id=$1 AND org_id=$2', [req.agent.id, req.agent.org_id]);
-    res.json({ minVersion: MIN_AGENT_VERSION, latestVersion: LATEST_AGENT_VERSION, heartbeatSeconds: 15, maxClaimWaitSeconds: 25, leaseSeconds: LEASE_MS / 1000, printers });
+    // The signed release the operator published (AGENT_RELEASE_FILE, written by scripts/sign-agent-release.mjs). The server
+    // only passes it on; agents verify the signature themselves, so the server cannot make an agent run unsigned code.
+    let release = null;
+    if (process.env.AGENT_RELEASE_FILE) { try { release = JSON.parse(readFileSync(process.env.AGENT_RELEASE_FILE, 'utf8')); } catch { release = null; } }
+    res.json({ minVersion: MIN_AGENT_VERSION, latestVersion: release?.manifest?.version ?? LATEST_AGENT_VERSION, heartbeatSeconds: 15, maxClaimWaitSeconds: 25, leaseSeconds: LEASE_MS / 1000, printers, ...(release ? { release } : {}) });
   });
 
   app.post('/api/agent/v2/heartbeat', async (req, res) => {
