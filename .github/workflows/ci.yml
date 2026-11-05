@@ -43,7 +43,16 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: node --test --test-concurrency=1 test/postgres-integration.test.js test/phase3-agents.test.js
+      - name: PostgreSQL tests
+        run: |
+          set +e
+          node --test --test-concurrency=1 test/postgres-integration.test.js test/phase3-agents.test.js > pg-tests.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            # Job logs need a sign-in to read; an annotation does not. Put the failure details there.
+            node -e "const t=require('fs').readFileSync('pg-tests.log','utf8').split('\n');const keep=[];for(let i=0;i<t.length;i++){if(/✖|error:|message:|code:|Error|expected|actual|at .*test.*:\d+/.test(t[i]))keep.push(t[i].trim().slice(0,220))}console.log('::error title=PostgreSQL test failures::'+keep.slice(0,40).join('%0A'))"
+          fi
+          exit $code
 
   # Fails the build if a credential-looking value is committed.
   secrets:
