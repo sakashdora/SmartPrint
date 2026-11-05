@@ -82,7 +82,7 @@ test('enrolment, discovery and the default pool need no setup', async t => {
   const printers = (await call('/api/v2/edu/printers', { cookie: admin.cookie })).body;
   assert.ok(printers.every(p => p.online));
   assert.equal(printers.find(p => p.windows_name === 'HP LaserJet').cap_color, 0);
-  assert.equal((await db.query('SELECT COUNT(*) AS n FROM print_attempts'))[0].n, 0);
+  assert.equal(Number((await db.query('SELECT COUNT(*) AS n FROM print_attempts'))[0].n), 0);
   assert.ok(a.id);
 });
 
@@ -101,7 +101,7 @@ test('colour and two-sided jobs are never routed to a printer that cannot do the
   assert.deepEqual(monoClaim.body.jobs.map(j => j.jobId), [bwJob]);
   const colourClaim = await colour.call('/api/agent/v2/jobs/claim', { method: 'POST', body: { printerIds: [colour.printers.Colour] } });
   assert.deepEqual(colourClaim.body.jobs.map(j => j.jobId), [colourJob]);
-  assert.equal((await db.query('SELECT COUNT(*) AS n FROM print_attempts WHERE state=$1', ['claimed']))[0].n, 2);
+  assert.equal(Number((await db.query('SELECT COUNT(*) AS n FROM print_attempts WHERE state=$1', ['claimed']))[0].n), 2);
 });
 
 test('five agents claiming twenty jobs at once never take a job twice', async t => {
@@ -126,7 +126,7 @@ test('five agents claiming twenty jobs at once never take a job twice', async t 
   assert.deepEqual([...seen.keys()].sort(), [...jobs].sort());
   const attempts = await db.query('SELECT job_id, COUNT(*) AS n FROM print_attempts GROUP BY job_id');
   assert.ok(attempts.every(a => Number(a.n) === 1), 'exactly one attempt per job');
-  assert.equal((await db.query("SELECT COUNT(*) AS n FROM print_jobs WHERE status='completed'"))[0].n, 20);
+  assert.equal(Number((await db.query("SELECT COUNT(*) AS n FROM print_jobs WHERE status='completed'"))[0].n), 20);
 });
 
 test('the database itself refuses a second live attempt for one job', async t => {

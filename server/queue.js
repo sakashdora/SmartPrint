@@ -93,13 +93,16 @@ export async function claimJobs(db, agent, printerIds) {
       if (busy) continue; // one job at a time per printer; an uncertain job blocks it until an operator decides
       const pools = (await tx.query('SELECT pool_id FROM pool_members WHERE printer_id=$1', [printer.id])).map(r => r.pool_id);
       if (!pools.length) continue;
-      const marks = pools.map((_, i) => `$${i + 2}`).join(',');
-      const candidates = await tx.query(
-        `SELECT * FROM print_jobs WHERE org_id=$1 AND status='queued' AND pool_id IN (${marks}) ORDER BY priority_boost DESC, enqueued_at ASC LIMIT 50${skipLocked}`,
-        [agent.org_id, ...pools]
-      );
-      for (const job of candidates) {
-        if (!printerSupports(printer, job)) continue; // an incompatible job stays queued for a capable printer
+      // Compatibility is decided in SQL and ONE row is taken. Locking a long candidate list with SKIP LOCKED made a
+      // single agent lock every waiting job, so concurrent agents found nothing (PostgreSQL, 5 agents / 20 jobs).
+      const marks = pools.map((_, i) => `$${i + 4}`).join(',');
+      for (let tries = 0; tries < 3; tries++) {
+        const [job] = await tx.query(
+          `SELECT * FROM print_jobs WHERE org_id=$1 AND status='queued' AND (requires_color=0 OR $2=1) AND (requires_duplex=0 OR $3=1) AND pool_id IN (${marks}) ORDER BY priority_boost DESC, enqueued_at ASC LIMIT 1${skipLocked}`,
+          [agent.org_id, Number(printer.cap_color) === 1 ? 1 : 0, Number(printer.cap_duplex) === 1 ? 1 : 0, ...pools]
+        );
+        if (!job) break;
+        if (!printerSupports(printer, job)) break; // defence in depth: the SQL above already excludes these
         const taken = await tx.query("UPDATE print_jobs SET status='claimed' WHERE id=$1 AND status='queued' RETURNING id", [job.id]);
         if (!taken.length) continue;
         const [{ next }] = await tx.query('SELECT COALESCE(MAX(attempt_no),0)+1 AS next FROM print_attempts WHERE job_id=$1', [job.id]);
