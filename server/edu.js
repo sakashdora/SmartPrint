@@ -25,6 +25,8 @@ export const DEFAULT_POLICIES = Object.freeze({
   offlineStaffPrinting: false,
   maxReservationMinor: 20000,       // most a student may keep reserved at once (paise)
   reservationHours: 24,
+  onlineTopups: false,              // students may add money online (needs the institution's own Razorpay keys)
+  minTopupMinor: 1000,
   offlineStaffDailyPages: 200       // most pages one staff member may print through an agent's offline portal per day
 });
 const POLICY_RULES = {
@@ -38,7 +40,9 @@ const POLICY_RULES = {
   offlineStudentPrinting: v => typeof v === 'boolean', offlineStaffPrinting: v => typeof v === 'boolean',
   maxReservationMinor: v => Number.isInteger(v) && v >= 100 && v <= 1000000,
   reservationHours: v => Number.isInteger(v) && v >= 1 && v <= 168,
-  offlineStaffDailyPages: v => Number.isInteger(v) && v >= 1 && v <= 5000
+  offlineStaffDailyPages: v => Number.isInteger(v) && v >= 1 && v <= 5000,
+  onlineTopups: v => typeof v === 'boolean',
+  minTopupMinor: v => Number.isInteger(v) && v >= 100 && v <= 1000000
 };
 export async function policiesOf(db, orgId) {
   const [row] = await db.query('SELECT policies, version FROM institution_settings WHERE org_id=$1', [orgId]);

@@ -59,15 +59,33 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
         <label class="field">Max copies<input name="maxCopies" type="number" min="1" max="100" value="${p.maxCopies}"></label>
         <label class="field"><span><input type="checkbox" name="colourStudents" ${p.colourStudents ? 'checked' : ''}> Students may print in colour</span></label>
         <label class="field"><span><input type="checkbox" name="colourStaff" ${p.colourStaff ? 'checked' : ''}> Staff may print in colour</span></label>
-        <label class="field">Keep printed documents (hours, 0 = delete at once)<input name="retentionHoursAfterPrint" type="number" min="0" max="720" value="${p.retentionHoursAfterPrint}"></label>
+        <label class="field"><span><input type="checkbox" name="onlineTopups" ${p.onlineTopups ? 'checked' : ''}> Students may add money online (needs the payment settings below)</span></label>
+                <label class="field">Keep printed documents (hours, 0 = delete at once)<input name="retentionHoursAfterPrint" type="number" min="0" max="720" value="${p.retentionHoursAfterPrint}"></label>
         <label class="field">Student rate, black &amp; white (paise per side)<input name="studentRateBwMinor" type="number" min="0" value="${p.studentRateBwMinor}"></label>
         <label class="field">Student rate, colour (paise per side)<input name="studentRateColourMinor" type="number" min="0" value="${p.studentRateColourMinor}"></label>
         <button class="primary">Save policies</button></form></section>`);
+    if (can('payments.configure')) {
+      const pay = await api('/api/v2/edu/payments/settings').catch(() => ({ configured: false }));
+      document.querySelector('#policies').insertAdjacentHTML('afterend', `<section class="panel"><h2>Online payments (Razorpay)</h2>
+        <p class="muted">Money from student top-ups goes straight to <strong>your own</strong> Razorpay account. Create the keys in your Razorpay dashboard and add the webhook address shown below.</p>
+        ${pay.configured ? `<p>Status: <strong>${pay.enabled ? 'on' : 'off'}</strong> (${escape(pay.mode)} mode, key ${escape(pay.keyId)}).<br>Webhook address: <input readonly style="width:100%" value="${escape(pay.webhookUrl)}" onclick="this.select()"><br><small class="muted">Subscribe it to payment.captured, payment.failed and refund.processed.</small></p>` : '<p class="muted">Not set up yet.</p>'}
+        <form id="pay-form"><label class="field">Key ID<input name="keyId" required placeholder="rzp_test_…" autocomplete="off"></label>
+        <label class="field">Key secret<input name="keySecret" type="password" required autocomplete="off"></label>
+        <label class="field">Webhook secret<input name="webhookSecret" type="password" required autocomplete="off"></label>
+        <label class="field"><span><input type="checkbox" name="confirmLive"> These are LIVE keys and I am authorised to take real payments</span></label>
+        <button class="primary">Save payment settings</button></form></section>`);
+      document.querySelector('#pay-form').onsubmit = async event => {
+        event.preventDefault();
+        const f = event.target;
+        try { await api('/api/v2/edu/payments/settings', { method: 'PUT', body: { keyId: f.keyId.value.trim(), keySecret: f.keySecret.value, webhookSecret: f.webhookSecret.value, confirmLive: f.confirmLive.checked } }); notify('Payment settings saved. Secrets are stored encrypted and are never shown again.'); await refresh(); }
+        catch (err) { notify(err.message); }
+      };
+    }
     document.querySelector('#policies').onsubmit = async event => {
       event.preventDefault();
       const f = event.target, num = n => Number(f[n].value);
       try {
-        await api('/api/v2/edu/institution/policies', { method: 'PUT', body: { version: info.version, policies: { studentPrinting: f.studentPrinting.value, maxPagesPerJob: num('maxPagesPerJob'), maxCopies: num('maxCopies'), colourStudents: f.colourStudents.checked, colourStaff: f.colourStaff.checked, retentionHoursAfterPrint: num('retentionHoursAfterPrint'), studentRateBwMinor: num('studentRateBwMinor'), studentRateColourMinor: num('studentRateColourMinor') } } });
+        await api('/api/v2/edu/institution/policies', { method: 'PUT', body: { version: info.version, policies: { studentPrinting: f.studentPrinting.value, maxPagesPerJob: num('maxPagesPerJob'), maxCopies: num('maxCopies'), colourStudents: f.colourStudents.checked, colourStaff: f.colourStaff.checked, onlineTopups: f.onlineTopups.checked, retentionHoursAfterPrint: num('retentionHoursAfterPrint'), studentRateBwMinor: num('studentRateBwMinor'), studentRateColourMinor: num('studentRateColourMinor') } } });
         notify('Policies saved.'); await refresh();
       } catch (err) { notify(err.message); }
     };
@@ -143,8 +161,25 @@ export async function eduApp(view, { api, mount, escape, notify, route }) {
     const w = await api('/api/v2/edu/wallet'), rupees = v => `₹${(v / 100).toFixed(2)}`;
     const label = { credit: 'Credit added', debit: 'Debit', hold: 'Reserved for a print', capture: 'Print charged', release: 'Reservation returned' };
     shell(`<section class="panel"><h2>My wallet</h2><p><strong style="font-size:1.6em">${rupees(w.available)}</strong> available${w.held ? ` · ${rupees(w.held)} reserved for prints in progress` : ''}</p>
-      <p class="muted">Ask the counter to add money to your wallet.</p>
+      <p class="muted" id="topup-note">Ask the counter to add money to your wallet.</p><p id="topup-slot"></p>
       ${table(['When', 'What', 'Amount'], w.ledger.map(e => `<tr><td>${escape(time(e.created))}</td><td>${escape(label[e.kind] || e.kind)}${e.note ? `<br><small class="muted">${escape(e.note)}</small>` : ''}</td><td>${e.available_delta + e.held_delta === 0 ? '' : ''}${rupees(e.available_delta)}${e.held_delta ? ` <small class="muted">(${e.held_delta > 0 ? '+' : ''}${rupees(e.held_delta)} reserved)</small>` : ''}</td></tr>`))}</section>`);
+    // Online top-up through the institution's own payment account, when it has been switched on.
+    api('/api/v2/edu/wallet/topups/info').then(info => {
+      if (!info.enabled) return;
+      document.querySelector('#topup-note').textContent = 'Add money online, or ask the counter.';
+      const slot = document.querySelector('#topup-slot'); slot.innerHTML = '<button class="primary" id="topup">Add money</button>';
+      document.querySelector('#topup').onclick = async event => {
+        const rupeesText = prompt(`Amount in rupees (at least ₹${(info.minMinor / 100).toFixed(0)}):`, '100'); if (!rupeesText) return;
+        event.target.disabled = true;
+        try {
+          const order = await api('/api/v2/edu/wallet/topups', { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: { amountMinor: Math.round(Number(rupeesText) * 100) } });
+          if (!window.Razorpay) await new Promise((resolve, reject) => { const tag = document.createElement('script'); tag.src = 'https://checkout.razorpay.com/v1/checkout.js'; tag.onload = resolve; tag.onerror = () => reject(new Error('The payment page could not be loaded.')); document.head.appendChild(tag); });
+          new window.Razorpay({ key: order.keyId, order_id: order.orderId, amount: order.amount, currency: order.currency, name: org.name, description: 'Wallet top-up',
+            handler: async response => { try { await api(`/api/v2/edu/wallet/topups/${order.intentId}/confirm`, { method: 'POST', body: response }); notify('Money added to your wallet.'); await refresh(); } catch (err) { notify(err.message); } },
+            modal: { ondismiss: () => { event.target.disabled = false; } } }).open();
+        } catch (err) { notify(err.message); event.target.disabled = false; }
+      };
+    }).catch(() => {});
   } else if (current === 'wallets') {
     const wallets = await api('/api/v2/edu/wallets'), check = await api('/api/v2/edu/wallets/verify'), rupees = v => `₹${(v / 100).toFixed(2)}`;
     shell(`<section class="panel"><h2>Student wallets</h2><p class="muted">Ledger check: ${check.ok ? '✅ balanced' : `⚠️ ${escape(check.problems.join('; '))}`}</p>

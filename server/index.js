@@ -21,6 +21,7 @@ import { platformRoutes } from './platform.js';
 import { agentRoutes } from './agents.js';
 import { eduRoutes } from './edu.js';
 import { offlineRoutes, sweepReservations } from './offline.js';
+import { topupWebhook, topupRoutes } from './topups.js';
 import { configureStorage, sweepObjectStore } from './storage.js';
 import { sweepAttempts } from './queue.js';
 import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
@@ -78,7 +79,7 @@ export async function createApp({ database, seed = true } = {}) {
     });
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     if (config.production) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/')) {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path !== '/api/payments/webhook' && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/payments/webhook/')) {
       let origin = req.headers.origin;
       if (!origin && req.headers.referer) {
         try { origin = new URL(req.headers.referer).origin; } catch {}
@@ -126,7 +127,7 @@ export async function createApp({ database, seed = true } = {}) {
         }
       }
     }
-    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
+    if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/api/device/') && !req.path.startsWith('/api/agent/') && !req.path.startsWith('/api/v2/edu/') && !req.path.startsWith('/api/v2/payments/webhook/') && req.path !== '/api/payments/webhook' && !req.path.includes('/chunks/')) await limitRate(db, 'mutations', req.ip, 120);
     // Institution users share campus network addresses, so their writes are limited per person instead of per address.
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/v2/edu/') && req.user) await limitRate(db, 'edu-mutations', req.user.id, 240);
     if (req.path === '/api/quotes' || req.path === '/api/uploads') await limitRate(db, 'uploads', req.ip, 60, 900);
@@ -176,6 +177,7 @@ export async function createApp({ database, seed = true } = {}) {
     });
     res.json({ received: true });
   });
+  topupWebhook(app, { db });
   app.use(express.json({ limit: config.production ? '2mb' : '29mb' }));
   app.use((req, res, next) => { req.body ??= {}; next(); });
   app.get('/api/health', (req, res) => res.json({
@@ -650,6 +652,7 @@ export async function createApp({ database, seed = true } = {}) {
   agentRoutes(app, { db, key });
   eduRoutes(app, { db, key, config });
   offlineRoutes(app, { db });
+  topupRoutes(app, { db, config });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));

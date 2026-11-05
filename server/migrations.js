@@ -125,6 +125,12 @@ export const migrations = [
     description: 'Offline PIN verifiers for staff',
     async up(tx) { await tx.query('SELECT 1 FROM offline_staff_pins LIMIT 1'); }
   }
+  ,
+  {
+    id: '0013_online_topups',
+    description: 'Per-institution payment settings, top-up intents, gateway events and refunds',
+    async up(tx) { for (const table of ['payment_settings', 'payment_intents', 'gateway_events', 'refunds_v2']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`); }
+  }
 ];
 
 const now = () => new Date().toISOString();
