@@ -166,7 +166,7 @@ test('refund to the original payment method: wallet first, then the provider; re
   const refused = await refund({ amountMinor: 1000 });
   assert.equal(refused.status, 502);
   assert.equal((await s.wallet(s.student)).available, 3000, 'the debit was reversed');
-  assert.equal((await s.db.query("SELECT COUNT(*) AS n FROM refunds_v2 WHERE state='failed'"))[0].n, 1);
+  assert.equal(await s.number("SELECT COUNT(*) AS n FROM refunds_v2 WHERE state='failed'"), 1);
   s.gateway.state.refundFails = false;
   // Money the student already spent cannot be refunded: the wallet would go negative, and the provider is never asked.
   const before = s.gateway.calls.length;
