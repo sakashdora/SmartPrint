@@ -20,7 +20,11 @@ export const DEFAULT_POLICIES = Object.freeze({
   maxPagesPerJob: 100, maxCopies: 20,
   colourStudents: true, colourStaff: true,
   retentionHoursAfterPrint: 0,      // 0 = delete the document as soon as the job is done
-  studentRateBwMinor: 200, studentRateColourMinor: 1000
+  studentRateBwMinor: 200, studentRateColourMinor: 1000,
+  offlineStudentPrinting: false,    // students may reserve money for use while the internet is down
+  offlineStaffPrinting: false,
+  maxReservationMinor: 20000,       // most a student may keep reserved at once (paise)
+  reservationHours: 24
 });
 const POLICY_RULES = {
   studentPrinting: v => ['disabled', 'free', 'wallet'].includes(v),
@@ -29,7 +33,10 @@ const POLICY_RULES = {
   colourStudents: v => typeof v === 'boolean', colourStaff: v => typeof v === 'boolean',
   retentionHoursAfterPrint: v => Number.isInteger(v) && v >= 0 && v <= 720,
   studentRateBwMinor: v => Number.isInteger(v) && v >= 0 && v <= 100000,
-  studentRateColourMinor: v => Number.isInteger(v) && v >= 0 && v <= 100000
+  studentRateColourMinor: v => Number.isInteger(v) && v >= 0 && v <= 100000,
+  offlineStudentPrinting: v => typeof v === 'boolean', offlineStaffPrinting: v => typeof v === 'boolean',
+  maxReservationMinor: v => Number.isInteger(v) && v >= 100 && v <= 1000000,
+  reservationHours: v => Number.isInteger(v) && v >= 1 && v <= 168
 };
 export async function policiesOf(db, orgId) {
   const [row] = await db.query('SELECT policies, version FROM institution_settings WHERE org_id=$1', [orgId]);

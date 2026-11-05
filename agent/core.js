@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, createCipheriv, createDecipheriv, scryptSync, timingSafeEqual } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -56,7 +56,10 @@ export class AgentCore {
     this.db = new DatabaseSync(join(dir, 'agent.db'));
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     this.db.exec(`CREATE TABLE IF NOT EXISTS journal (attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, printer_id TEXT NOT NULL, lease_token TEXT NOT NULL, state TEXT NOT NULL, sha256 TEXT, options TEXT, pages INTEGER, created TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL, lease_token TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, attempt_id TEXT NOT NULL, lease_token TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, college_id TEXT NOT NULL, limit_minor INTEGER NOT NULL, server_spent_minor INTEGER NOT NULL, state TEXT NOT NULL, expires TEXT NOT NULL, pin_salt TEXT NOT NULL, pin_hash TEXT NOT NULL, failures INTEGER NOT NULL DEFAULT 0, ack_pending INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS spend_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, reservation_id TEXT NOT NULL, job_ref TEXT, pages INTEGER NOT NULL, amount_minor INTEGER NOT NULL, at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS offline_jobs (seq INTEGER PRIMARY KEY AUTOINCREMENT, college_id TEXT NOT NULL, pages INTEGER NOT NULL, file_name TEXT, at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);`);
     this.status = 'idle'; this.lastHeartbeat = 0; this.lastReport = 0; this.printerIds = this.settings.printerIds || {};
   }
   close() { if (!this.closed) { this.closed = true; this.db.close(); } }
@@ -105,6 +108,7 @@ export class AgentCore {
     this.printerIds = Object.fromEntries(result.printers.map(p => [p.name, p.id]));
     this.printerStatus = Object.fromEntries(printers.map(p => [p.name, p.status]));
     this.lastReport = Date.now(); this.#save();
+    await this.fetchGrants().catch(() => {}); // offline reservations bound to this agent
   }
   async heartbeat(force = false) {
     if (!force && Date.now() - this.lastHeartbeat < this.heartbeatMs) return;
@@ -136,6 +140,68 @@ export class AgentCore {
       this.db.prepare('DELETE FROM outbox WHERE seq=?').run(item.seq);
     }
     return true;
+  }
+
+  // ---- offline spending -----------------------------------------------------------------------------------------------
+  // The server hands this agent the reservations bound to it. While the internet is down a student is identified by the
+  // PIN chosen at reservation time and every spend is written to a numbered local log; the server applies the log when the
+  // agent is back online, once per (agent, sequence number), so nothing can be charged twice.
+  static PIN_ATTEMPTS = 5;
+  #wall() { // a clock set backwards must never extend a reservation
+    const last = this.settings.lastWall || 0, now = Date.now();
+    if (now < last - 5 * 60000) return { rollback: true, now: last };
+    this.settings.lastWall = Math.max(last, now); this.#save();
+    return { rollback: false, now: this.settings.lastWall };
+  }
+  async fetchGrants() {
+    const { grants } = await this.#request('/api/agent/v2/offline/grants');
+    const keep = new Set(grants.map(g => g.id));
+    const upsert = this.db.prepare("INSERT INTO grants (id,college_id,limit_minor,server_spent_minor,state,expires,pin_salt,pin_hash,failures) VALUES (?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET server_spent_minor=excluded.server_spent_minor, state=excluded.state, expires=excluded.expires, failures=0");
+    for (const g of grants) upsert.run(g.id, g.collegeId, g.limitMinor, g.spentMinor, g.state, g.expires, g.pin.salt, g.pin.hash);
+    // Reservations the server no longer lists are finished; they can never be spent from again.
+    for (const row of this.db.prepare("SELECT id FROM grants WHERE state IN ('active','closing')").all()) if (!keep.has(row.id)) this.db.prepare("UPDATE grants SET state='closed' WHERE id=?").run(row.id);
+    for (const g of grants) if (g.state === 'closing') this.db.prepare('UPDATE grants SET ack_pending=1 WHERE id=?').run(g.id);
+    return grants.length;
+  }
+  remainingMinor(grant) {
+    const local = this.db.prepare('SELECT COALESCE(SUM(amount_minor),0) AS n FROM spend_log WHERE reservation_id=? AND synced=0').get(grant.id).n;
+    return grant.limit_minor - grant.server_spent_minor - local;
+  }
+  // Returns { ok: true, remainingMinor } or throws an Error with a `code`.
+  localSpend({ collegeId, pin, pages, amountMinor, jobRef = null }) {
+    const refuse = (code, message) => { throw Object.assign(new Error(message), { code }); };
+    if (!Number.isInteger(pages) || pages < 1 || !Number.isInteger(amountMinor) || amountMinor < 1) refuse('offline.invalid', 'Invalid job.');
+    const grant = this.db.prepare("SELECT * FROM grants WHERE LOWER(college_id)=LOWER(?) AND state='active' ORDER BY expires DESC LIMIT 1").get(String(collegeId));
+    if (!grant) refuse('offline.no_reservation', 'There is no offline reservation for this ID at this print point.');
+    if (grant.failures >= AgentCore.PIN_ATTEMPTS) refuse('offline.locked', 'Too many wrong PINs. This reservation is locked until the print point is back online.');
+    const clock = this.#wall();
+    if (clock.rollback) refuse('offline.clock', 'The PC clock was set backwards; offline printing is paused until the internet is back.');
+    if (clock.now > Date.parse(grant.expires)) refuse('offline.expired', 'This reservation has expired.');
+    const candidate = scryptSync(String(pin ?? ''), grant.pin_salt, 32, { N: 16384 }), expected = Buffer.from(grant.pin_hash, 'hex');
+    if (!(candidate.length === expected.length && timingSafeEqual(candidate, expected))) {
+      this.db.prepare('UPDATE grants SET failures=failures+1 WHERE id=?').run(grant.id);
+      refuse('offline.wrong_pin', 'Wrong PIN.');
+    }
+    const remaining = this.remainingMinor(grant);
+    if (amountMinor > remaining) refuse('offline.insufficient', `Only ₹${(remaining / 100).toFixed(2)} is left on this reservation.`);
+    this.db.prepare('INSERT INTO spend_log (reservation_id,job_ref,pages,amount_minor,at) VALUES (?,?,?,?,?)').run(grant.id, jobRef, pages, amountMinor, new Date(clock.now).toISOString());
+    return { ok: true, remainingMinor: remaining - amountMinor };
+  }
+  recordOfflineStaffJob({ collegeId, pages, fileName = null }) {
+    this.db.prepare('INSERT INTO offline_jobs (college_id,pages,file_name,at) VALUES (?,?,?,?)').run(String(collegeId), pages, fileName, new Date(this.#wall().now).toISOString());
+  }
+  async syncOffline() {
+    const spends = this.db.prepare('SELECT seq, reservation_id AS reservationId, job_ref AS jobRef, pages, amount_minor AS amountMinor, at FROM spend_log WHERE synced=0 ORDER BY seq LIMIT 500').all();
+    const jobs = this.db.prepare('SELECT seq, college_id AS collegeId, pages, file_name AS fileName, at FROM offline_jobs WHERE synced=0 ORDER BY seq LIMIT 500').all();
+    const closed = this.db.prepare('SELECT id FROM grants WHERE ack_pending=1').all().map(r => r.id);
+    if (!spends.length && !jobs.length && !closed.length) return null;
+    const result = await this.#request('/api/agent/v2/sync', { method: 'POST', body: { spends, jobs, closed } });
+    // Everything sent has been recorded by the server (applied, repeated or turned into a case): never send it again.
+    this.db.prepare('UPDATE spend_log SET synced=1 WHERE seq<=?').run(spends.at(-1)?.seq ?? 0);
+    this.db.prepare('UPDATE offline_jobs SET synced=1 WHERE seq<=?').run(jobs.at(-1)?.seq ?? 0);
+    for (const id of closed) this.db.prepare("UPDATE grants SET state='closed', ack_pending=0 WHERE id=?").run(id);
+    await this.fetchGrants().catch(() => {});
+    return result;
   }
 
   // ---- the print path -----------------------------------------------------------------------------------------------
@@ -208,6 +274,7 @@ export class AgentCore {
       await this.rotateIfDue().catch(() => {});
       await this.reportPrinters(); await this.heartbeat();
       await this.drainOutbox();
+      await this.syncOffline();
       for (const entry of this.liveJournal()) await this.#advance(entry);
       const busy = new Set(this.liveJournal().map(e => e.printer_id));
       const idle = Object.values(this.printerIds).filter(id => !busy.has(id));

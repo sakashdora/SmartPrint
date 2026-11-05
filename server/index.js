@@ -20,6 +20,7 @@ import { applyMigrations } from './migrations.js';
 import { platformRoutes } from './platform.js';
 import { agentRoutes } from './agents.js';
 import { eduRoutes } from './edu.js';
+import { offlineRoutes, sweepReservations } from './offline.js';
 import { configureStorage, sweepObjectStore } from './storage.js';
 import { sweepAttempts } from './queue.js';
 import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
@@ -648,6 +649,7 @@ export async function createApp({ database, seed = true } = {}) {
   platformRoutes(app, { db, config });
   agentRoutes(app, { db, key });
   eduRoutes(app, { db, key, config });
+  offlineRoutes(app, { db });
   app.use('/api', (req, res, next) => next(fail(404, 'API route not found.')));
   app.use('/vendor/pdfjs', express.static('node_modules/pdfjs-dist/build', { index: false }));
   app.use('/vendor/pdfjs-fonts', express.static('node_modules/pdfjs-dist/standard_fonts', { index: false }));
@@ -686,7 +688,7 @@ export async function createApp({ database, seed = true } = {}) {
     await tx.query('DELETE FROM invitations WHERE expires<=$1 AND used_at IS NULL', [new Date(Date.now() - 30 * 86400000).toISOString()]);
     await tx.query('DELETE FROM notifications WHERE created<=$1', [new Date(Date.now() - 90 * 86400000).toISOString()]);
   });
-  const maintain = async () => { await cleanup(); await sweepLeases(db); await sweepAttempts(db); await sweepObjectStore(db).catch(error => console.warn('[Storage] sweep failed:', error.message)); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
+  const maintain = async () => { await cleanup(); await sweepLeases(db); await sweepAttempts(db); await sweepReservations(db).catch(error => console.warn('[Offline] reservation sweep failed:', error.message)); await sweepObjectStore(db).catch(error => console.warn('[Storage] sweep failed:', error.message)); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
   app.get('/maintenance', async (req, res) => { if (!process.env.CRON_SECRET || digest(req.headers.authorization || '') !== digest(`Bearer ${process.env.CRON_SECRET}`)) return res.sendStatus(401); await maintain(); res.json({ ok: true }); });
   app.get('/readyz', async (req, res) => { const [row] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); const ready = row && Date.now() - Date.parse(row.last_success) < 180000; res.status(ready ? 200 : 503).json({ ready: Boolean(ready) }); });
   app.use((error, req, res, next) => {

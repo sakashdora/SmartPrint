@@ -113,6 +113,12 @@ export const migrations = [
       }
     }
   }
+  ,
+  {
+    id: '0011_offline_reservations',
+    description: 'Offline reservations bound to one agent, replay-safe sync log, reconciliation cases',
+    async up(tx) { for (const table of ['offline_reservations', 'offline_sync_log', 'reconciliation_cases']) await tx.query(`SELECT 1 FROM ${table} LIMIT 1`); }
+  }
 ];
 
 const now = () => new Date().toISOString();
