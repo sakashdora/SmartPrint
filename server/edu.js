@@ -7,6 +7,7 @@ import { requirePermission } from './tenant.js';
 import { storeObject, enqueueJob, cancelJob } from './queue.js';
 import { validateOptions, price } from './print-options.js';
 import { prepare } from './printing.js';
+import { readObject, markObjectDeleted } from './storage.js';
 
 const now = () => new Date().toISOString();
 const later = ms => new Date(Date.now() + ms).toISOString();
@@ -298,7 +299,7 @@ export function eduRoutes(app, { db, key, config }) {
     if (options.copies > policies.maxCopies) throw fail(400, `At most ${policies.maxCopies} copies per job.`);
     if (options.color === 'color' && !(student ? policies.colourStudents : policies.colourStaff)) throw fail(400, 'Colour printing is not allowed for your account.');
     const prepared = await withPreparationSlot(async () => {
-      try { return await prepare([{ data: decrypt(raw, key).toString('base64') }], options); } catch (e) { throw fail(400, `Unable to prepare the file: ${e.message}`); }
+      try { return await prepare([{ data: (await readObject(db, raw)).toString('base64') }], options); } catch (e) { throw fail(400, `Unable to prepare the file: ${e.message}`); }
     });
     if (prepared.pages > policies.maxPagesPerJob) throw fail(400, `At most ${policies.maxPagesPerJob} pages per job.`);
     const rates = { bw: policies.studentRateBwMinor, color: policies.studentRateColourMinor };
@@ -314,7 +315,7 @@ export function eduRoutes(app, { db, key, config }) {
     const jobId = await db.transaction(async tx => {
       const objectId = await storeObject(tx, req.org.id, Buffer.from(built.prepared.bytes), { encrypt, key });
       const id = await enqueueJob(tx, { orgId: req.org.id, submitterId: req.user.id, jobClass: built.jobClass, objectId, options: { ...built.options, file_name: String(req.body.fileName ?? 'document').slice(0, 150) }, pages: built.quote.pages, sheets: built.quote.sheets, payer: built.student ? 'wallet' : 'institution', costMinor: built.quote.costMinor });
-      await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE id=$3 AND org_id=$4', [Buffer.alloc(0), now(), built.raw.id, req.org.id]); // the raw upload is not kept
+      await markObjectDeleted(tx, req.org.id, built.raw.id); // the raw upload is not kept
       return id;
     });
     res.status(201).json({ jobId, ...built.quote });

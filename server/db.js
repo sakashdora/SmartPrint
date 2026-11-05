@@ -84,7 +84,11 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['printer_pools', 'max_wait_seconds', 'INTEGER NOT NULL DEFAULT 900'],
             ['printer_pools', 'user_cap', 'INTEGER NOT NULL DEFAULT 5'],
             ['print_jobs', 'vft', 'DOUBLE PRECISION'],
-            ['print_jobs', 'sort_key', 'DOUBLE PRECISION']
+            ['print_jobs', 'sort_key', 'DOUBLE PRECISION'],
+            ['stored_objects', 'enc', "TEXT NOT NULL DEFAULT 'global'"],
+            ['stored_objects', 'purged_at', "TEXT"],
+            ['organizations', 'dek_wrapped', "TEXT"],
+            ['organizations', 'dek_destroyed_at', "TEXT"]
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -147,6 +151,10 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN user_cap INTEGER NOT NULL DEFAULT 5;"); } catch {}
       try { sqlite.exec("ALTER TABLE print_jobs ADD COLUMN vft DOUBLE PRECISION;"); } catch {}
       try { sqlite.exec("ALTER TABLE print_jobs ADD COLUMN sort_key DOUBLE PRECISION;"); } catch {}
+      try { sqlite.exec("ALTER TABLE stored_objects ADD COLUMN enc TEXT NOT NULL DEFAULT 'global';"); } catch {}
+      try { sqlite.exec("ALTER TABLE stored_objects ADD COLUMN purged_at TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE organizations ADD COLUMN dek_wrapped TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE organizations ADD COLUMN dek_destroyed_at TEXT;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

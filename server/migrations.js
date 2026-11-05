@@ -87,6 +87,15 @@ export const migrations = [
       await tx.query('SELECT 1 FROM queue_classes LIMIT 1');
     }
   }
+  ,
+  {
+    id: '0009_document_storage',
+    description: 'Per-institution document keys and object-store bookkeeping',
+    async up(tx) {
+      await tx.query('SELECT enc, purged_at FROM stored_objects LIMIT 1');
+      await tx.query('SELECT dek_wrapped, dek_destroyed_at FROM organizations LIMIT 1');
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();

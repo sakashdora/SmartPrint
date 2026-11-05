@@ -4,6 +4,7 @@ import { sendPdf } from './uploads.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { auditV2 } from './orgs.js';
 import { requirePermission } from './tenant.js';
+import { readObject } from './storage.js';
 import { ensureDefaultPool, storeObject, enqueueJob, claimJobs, recordEvent, renewLeases, releaseAgentWork, retryJob, cancelJob, resolveUncertain, jobSignal, agentOnline, LEASE_MS } from './queue.js';
 
 const now = () => new Date().toISOString();
@@ -276,7 +277,7 @@ export function agentRoutes(app, { db, key }) {
     const [object] = await db.query('SELECT * FROM stored_objects WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL AND expires>$3', [attempt.object_id, req.agent.org_id, now()]);
     if (!object) throw fail(404, 'The document is no longer available.');
     res.set('X-Content-SHA256', object.sha256);
-    sendPdf(req, res, decrypt(object, key));
+    sendPdf(req, res, await readObject(db, object));
   });
   app.post('/api/agent/v2/attempts/:id/events', async (req, res) => {
     res.json(await recordEvent(db, req.agent, req.params.id, req.headers['x-lease-token'], req.body));

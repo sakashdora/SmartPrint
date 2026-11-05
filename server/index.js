@@ -20,6 +20,7 @@ import { applyMigrations } from './migrations.js';
 import { platformRoutes } from './platform.js';
 import { agentRoutes } from './agents.js';
 import { eduRoutes } from './edu.js';
+import { configureStorage, sweepObjectStore } from './storage.js';
 import { sweepAttempts } from './queue.js';
 import { createBusinessOrg, backfillBusinessOrgs } from './orgs.js';
 
@@ -54,6 +55,7 @@ export async function createApp({ database, seed = true } = {}) {
     console.error(message);
   }
   const key = loadKey();
+  console.log(`[SmartPrint] Education documents are stored in: ${configureStorage({ master: key })}`);
   if (seed && !process.env.DATABASE_URL && !config.production) {
     for (const [id, email, role] of [['owner-demo', 'owner@smartprint.local', 'owner'], ['admin-demo', 'admin@smartprint.local', 'admin']]) {
       await db.query('INSERT INTO users (id,email,password,role) VALUES ($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING', [id, email, await hashPassword('SmartPrintDemo!2026'), role]);
@@ -678,13 +680,13 @@ export async function createApp({ database, seed = true } = {}) {
     // and audit are deliberately kept: they are financial evidence or dedupe records.
     await tx.query('DELETE FROM quotes WHERE expires<=$1', [new Date(Date.now() - 7 * 86400000).toISOString()]);
     await tx.query('DELETE FROM idempotency_keys WHERE expires<=$1', [now()]);
-    await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE expires<=$2 AND deleted_at IS NULL', [Buffer.alloc(0), now()]);
+    await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE expires<=$2 AND deleted_at IS NULL', [Buffer.alloc(0), now()]); // bucket copies are removed by sweepObjectStore
     await tx.query('DELETE FROM email_outbox WHERE created<=$1', [new Date(Date.now() - 14 * 86400000).toISOString()]);
     await tx.query('DELETE FROM auth_tokens WHERE expires<=$1', [new Date(Date.now() - 86400000).toISOString()]);
     await tx.query('DELETE FROM invitations WHERE expires<=$1 AND used_at IS NULL', [new Date(Date.now() - 30 * 86400000).toISOString()]);
     await tx.query('DELETE FROM notifications WHERE created<=$1', [new Date(Date.now() - 90 * 86400000).toISOString()]);
   });
-  const maintain = async () => { await cleanup(); await sweepLeases(db); await sweepAttempts(db); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
+  const maintain = async () => { await cleanup(); await sweepLeases(db); await sweepAttempts(db); await sweepObjectStore(db).catch(error => console.warn('[Storage] sweep failed:', error.message)); await db.query('DELETE FROM sessions WHERE expires<=$1', [now()]); await db.query('DELETE FROM rate_limits WHERE expires<=$1', [now()]); await db.query("INSERT INTO worker_status (id,last_success) VALUES ('cleanup',$1) ON CONFLICT(id) DO UPDATE SET last_success=$1", [now()]); };
   app.get('/maintenance', async (req, res) => { if (!process.env.CRON_SECRET || digest(req.headers.authorization || '') !== digest(`Bearer ${process.env.CRON_SECRET}`)) return res.sendStatus(401); await maintain(); res.json({ ok: true }); });
   app.get('/readyz', async (req, res) => { const [row] = await db.query("SELECT last_success FROM worker_status WHERE id='cleanup'"); const ready = row && Date.now() - Date.parse(row.last_success) < 180000; res.status(ready ? 200 : 503).json({ ready: Boolean(ready) }); });
   app.use((error, req, res, next) => {

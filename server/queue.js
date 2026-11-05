@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { token, digest } from './security.js';
+import { putObject, markObjectDeleted } from './storage.js';
 
 // Education print queue: jobs, fenced attempts and the rules that keep a job from printing twice.
 //
@@ -41,13 +42,9 @@ export async function ensureDefaultPool(tx, orgId) {
   return pool.id;
 }
 
-export async function storeObject(tx, orgId, bytes, { encrypt, key, expiresMs = 24 * 3600000, ownerId = null }) {
-  const { createHash } = await import('node:crypto');
-  const sealed = encrypt(bytes, key), id = randomUUID();
-  await tx.query('INSERT INTO stored_objects (id,org_id,size,sha256,iv,tag,payload,expires,created,owner_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-    [id, orgId, bytes.length, createHash('sha256').update(bytes).digest('hex'), sealed.iv, sealed.tag, sealed.payload, later(expiresMs), now(), ownerId]);
-  return id;
-}
+// Kept for existing callers: the `encrypt` and `key` options are ignored, documents are sealed with the
+// institution's own key by the storage module.
+export const storeObject = (tx, orgId, bytes, { expiresMs = 24 * 3600000, ownerId = null } = {}) => putObject(tx, orgId, bytes, { expiresMs, ownerId });
 
 // Default: the document is wiped as soon as the job is done. An institution may keep it for up to 30 days
 // (institution_settings.retentionHoursAfterPrint); the expiry sweep then wipes it.
@@ -56,7 +53,7 @@ async function deleteObject(tx, orgId, objectId) {
   const [settings] = await tx.query('SELECT policies FROM institution_settings WHERE org_id=$1', [orgId]);
   const hours = Number(JSON.parse(settings?.policies || '{}').retentionHoursAfterPrint) || 0;
   if (hours > 0) await tx.query('UPDATE stored_objects SET expires=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL', [later(hours * 3600000), objectId, orgId]);
-  else await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE id=$3 AND org_id=$4', [Buffer.alloc(0), now(), objectId, orgId]);
+  else await markObjectDeleted(tx, orgId, objectId);
 }
 
 // Weighted Fair Queueing with aging. Each class c has a weight w_c; a job of cost k gets the virtual finish time
