@@ -58,7 +58,9 @@ On this PC (HP laptop; Brother DCP-T820DW and HP LaserJet 1020), against a throw
 - **The HP was not detected on USB** (powered off / unplugged) although Windows said "Normal". The agent waited 90 s, saw the spooler job make no progress, removed it from the Windows queue, reported a clean failure, and left no document behind: no surprise print later.
 - **One black-and-white test page on the Brother completed**: the job ended *completed*, pages printed = 1 (from the Windows queue), journal, encrypted cache and outbox empty afterwards.
 - Finding fixed: an Offline printer used to stay routable; it no longer does.
-Still to do with a person present: the remaining steps below (unplug mid-job, kill the process mid-print, network cut) and a test of the outage page in a real outage.
+- **Agent killed mid-print (second session):** the process was killed the moment the server showed the job as *submitted*. After restart the journal said "submitted", the agent started **no print**, and the job became *uncertain* for a person to resolve. (Whether a page had already left the printer at the moment of the kill is exactly the case this state exists for.)
+- **Real outage:** with the server stopped, the agent's outage page said the internet was down, refused a wrong PIN (no print), and printed one page on the Brother for the right PIN, charging ₹3 from a ₹15 reservation. When the server returned, one spend was applied (no repeat), and the wallet ledger check reported no problems.
+Still to do with a person present: unplugging the USB cable mid-job (step 5 below), and the colour and two-sided paths on real paper.
 
 ## Real-printer test plan (needs a person at the printer)
 
