@@ -104,7 +104,7 @@ export function agentRoutes(app, { db, key }) {
   });
 
   app.get('/api/v2/edu/pools', managePools, async (req, res) => {
-    const pools = await db.query('SELECT id,name,scheduler,is_default FROM printer_pools WHERE org_id=$1 ORDER BY is_default DESC, name', [req.org.id]);
+    const pools = await db.query('SELECT id,name,scheduler,is_default,weights,aging_rate,max_wait_seconds,user_cap FROM printer_pools WHERE org_id=$1 ORDER BY is_default DESC, name', [req.org.id]);
     const members = await db.query('SELECT m.pool_id, m.printer_id FROM pool_members m JOIN printer_pools p ON p.id=m.pool_id WHERE p.org_id=$1', [req.org.id]);
     res.json(pools.map(p => ({ ...p, printerIds: members.filter(m => m.pool_id === p.id).map(m => m.printer_id) })));
   });
@@ -125,6 +125,28 @@ export function agentRoutes(app, { db, key }) {
       await tx.query('DELETE FROM pool_members WHERE pool_id=$1', [pool.id]);
       for (const id of ids) await tx.query('INSERT INTO pool_members (pool_id,printer_id) VALUES ($1,$2)', [pool.id, id]);
       await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'pool.members_set', targetType: 'pool', targetId: pool.id, data: { count: ids.length } });
+    });
+    res.json({ ok: true });
+  });
+
+  // Scheduler settings of a pool. Weights are relative shares per class; agingRate (cost units per second) makes old
+  // jobs overtake newer heavier-class work; maxWaitSeconds promotes any job that waited too long.
+  app.put('/api/v2/edu/pools/:id/scheduler', managePools, async (req, res) => {
+    const [pool] = await db.query('SELECT * FROM printer_pools WHERE id=$1 AND org_id=$2', [req.params.id, req.org.id]);
+    if (!pool) throw fail(404, 'Pool not found.');
+    const b = req.body, scheduler = b.scheduler ?? pool.scheduler;
+    if (!['fifo_priority', 'wfq_aging'].includes(scheduler)) throw fail(400, 'Scheduler must be fifo_priority or wfq_aging.');
+    let weights = pool.weights;
+    if (b.weights !== undefined) {
+      const entries = Object.entries(b.weights || {});
+      if (!entries.length || entries.some(([k, v]) => !['staff', 'student', 'operator'].includes(k) || !(Number(v) > 0) || Number(v) > 1000)) throw fail(400, 'Weights are positive numbers for staff, student and operator.');
+      weights = JSON.stringify(Object.fromEntries(entries.map(([k, v]) => [k, Number(v)])));
+    }
+    const num = (value, current, min, max, label) => { if (value === undefined) return current; const n = Number(value); if (!(n >= min && n <= max)) throw fail(400, `${label} must be between ${min} and ${max}.`); return n; };
+    const aging = num(b.agingRate, pool.aging_rate, 0, 100, 'Aging rate'), maxWait = Math.round(num(b.maxWaitSeconds, pool.max_wait_seconds, 10, 86400, 'Maximum wait')), cap = Math.round(num(b.userCap, pool.user_cap, 1, 1000, 'Per-user cap'));
+    await db.transaction(async tx => {
+      await tx.query('UPDATE printer_pools SET scheduler=$1, weights=$2, aging_rate=$3, max_wait_seconds=$4, user_cap=$5 WHERE id=$6 AND org_id=$7', [scheduler, weights, aging, maxWait, cap, pool.id, req.org.id]);
+      await auditV2(tx, { orgId: req.org.id, actorType: 'user', actorId: req.user.id, action: 'pool.scheduler_set', targetType: 'pool', targetId: pool.id, data: { scheduler, weights, aging, maxWait, cap } });
     });
     res.json({ ok: true });
   });

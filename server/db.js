@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
 import { schema } from './schema.js';
-const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles';
+const tableNames = 'users|shops|documents|quotes|orders|transactions|payment_events|audit|sessions|rate_limits|mfa|passkeys|devices|print_leases|refunds|worker_status|shop_payments|upi_receipts|uploads|upload_chunks|preparations|idempotency_keys|order_history|notifications|schema_migrations|organizations|memberships|organization_registrations|invitations|auth_tokens|audit_log_v2|email_outbox|agents|agent_credentials|printers|printer_pools|pool_members|stored_objects|print_jobs|print_attempts|queue_events|agent_health_events|institution_settings|campuses|departments|edu_profiles|queue_classes';
 const qualify = sql => sql.replace(new RegExp(`\\b(FROM|JOIN|UPDATE|INTO|TABLE IF NOT EXISTS|REFERENCES|ON)\\s+(${tableNames})\\b`, 'gi'), '$1 smartprint.$2');
 
 export async function openDatabase({ url = process.env.DATABASE_URL, path = process.env.SMARTPRINT_SQLITE_PATH || '.data/smartprint.sqlite' } = {}) {
@@ -77,7 +77,14 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['devices', 'paused', 'INTEGER NOT NULL DEFAULT 0'],
             ['devices', 'paused_note', 'TEXT'],
             ['shops', 'organization_id', 'TEXT'],
-            ['stored_objects', 'owner_id', 'TEXT']
+            ['stored_objects', 'owner_id', 'TEXT'],
+            ['printer_pools', 'vtime', 'DOUBLE PRECISION NOT NULL DEFAULT 0'],
+            ['printer_pools', 'weights', 'TEXT'],
+            ['printer_pools', 'aging_rate', 'DOUBLE PRECISION NOT NULL DEFAULT 0.05'],
+            ['printer_pools', 'max_wait_seconds', 'INTEGER NOT NULL DEFAULT 900'],
+            ['printer_pools', 'user_cap', 'INTEGER NOT NULL DEFAULT 5'],
+            ['print_jobs', 'vft', 'DOUBLE PRECISION'],
+            ['print_jobs', 'sort_key', 'DOUBLE PRECISION']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -133,6 +140,13 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN paused_note TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE shops ADD COLUMN organization_id TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE stored_objects ADD COLUMN owner_id TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN vtime DOUBLE PRECISION NOT NULL DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN weights TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN aging_rate DOUBLE PRECISION NOT NULL DEFAULT 0.05;"); } catch {}
+      try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN max_wait_seconds INTEGER NOT NULL DEFAULT 900;"); } catch {}
+      try { sqlite.exec("ALTER TABLE printer_pools ADD COLUMN user_cap INTEGER NOT NULL DEFAULT 5;"); } catch {}
+      try { sqlite.exec("ALTER TABLE print_jobs ADD COLUMN vft DOUBLE PRECISION;"); } catch {}
+      try { sqlite.exec("ALTER TABLE print_jobs ADD COLUMN sort_key DOUBLE PRECISION;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {

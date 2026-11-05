@@ -20,6 +20,8 @@ const fail = (status, message, code) => Object.assign(new Error(message), { stat
 export const LEASE_MS = 90000;
 export const AGENT_ONLINE_MS = 45000;
 export const LIVE_STATES = ['claimed', 'submitted', 'uncertain'];
+export const DEFAULT_WEIGHTS = Object.freeze({ staff: 3, student: 1, operator: 3 });
+export const COLOUR_COST_FACTOR = 2;
 export const jobSignal = new EventEmitter();
 jobSignal.setMaxListeners(0);
 
@@ -57,10 +59,28 @@ async function deleteObject(tx, orgId, objectId) {
   else await tx.query('UPDATE stored_objects SET payload=$1, deleted_at=$2 WHERE id=$3 AND org_id=$4', [Buffer.alloc(0), now(), objectId, orgId]);
 }
 
+// Weighted Fair Queueing with aging. Each class c has a weight w_c; a job of cost k gets the virtual finish time
+//   F = max(V, F_last[c]) + k / w_c         (V = the pool's virtual clock, F_last[c] = last tag given to the class)
+// and the pool serves the smallest F, so backlogged classes share the printers in proportion to their weights.
+// Aging: the claim order key is  F - rate * seconds_waited. Because every waiting job shares the same "now", that
+// ordering equals  F + rate * enqueue_time,  which is stored once as `sort_key` and indexed, no per-claim maths.
+async function fairTags(tx, pool, jobClass, cost, enqueuedSeconds) {
+  const weights = { ...DEFAULT_WEIGHTS, ...JSON.parse(pool.weights || '{}') };
+  const weight = Number(weights[jobClass]) > 0 ? Number(weights[jobClass]) : 1;
+  await tx.query('UPDATE printer_pools SET vtime=vtime WHERE id=$1', [pool.id]); // serialises tagging within the pool
+  const [{ vtime }] = await tx.query('SELECT vtime FROM printer_pools WHERE id=$1', [pool.id]);
+  await tx.query('INSERT INTO queue_classes (pool_id,class,f_last) VALUES ($1,$2,0) ON CONFLICT(pool_id, class) DO NOTHING', [pool.id, jobClass]);
+  const [{ f_last }] = await tx.query('SELECT f_last FROM queue_classes WHERE pool_id=$1 AND class=$2', [pool.id, jobClass]);
+  const vft = Math.max(Number(vtime), Number(f_last)) + cost / weight;
+  await tx.query('UPDATE queue_classes SET f_last=$1 WHERE pool_id=$2 AND class=$3', [vft, pool.id, jobClass]);
+  return { vft, sortKey: vft + Number(pool.aging_rate) * enqueuedSeconds };
+}
+
 // Rejects a job nobody can print instead of leaving it queued for ever: some active printer of the pool must
 // be able to do it and be reachable through an agent that reported in recently.
-export async function enqueueJob(tx, { orgId, poolId = null, submitterId = null, jobClass = 'staff', objectId, options = {}, pages, sheets = pages, payer = 'institution', costMinor = 0, priorityBoost = 0 }) {
-  const pool = poolId ? (await tx.query('SELECT id FROM printer_pools WHERE id=$1 AND org_id=$2', [poolId, orgId]))[0] : { id: await ensureDefaultPool(tx, orgId) };
+export async function enqueueJob(tx, { orgId, poolId = null, submitterId = null, jobClass = 'staff', objectId, options = {}, pages, sheets = pages, payer = 'institution', costMinor = 0, priorityBoost = 0, enqueuedAt = null }) {
+  const poolRef = poolId ?? await ensureDefaultPool(tx, orgId);
+  const [pool] = await tx.query('SELECT * FROM printer_pools WHERE id=$1 AND org_id=$2', [poolRef, orgId]);
   if (!pool) throw fail(404, 'Printer pool not found.');
   const job = { requires_color: options.color === 'color' ? 1 : 0, requires_duplex: options.duplex ? 1 : 0 };
   const printers = await tx.query(
@@ -71,10 +91,18 @@ export async function enqueueJob(tx, { orgId, poolId = null, submitterId = null,
     const needs = [job.requires_color && 'colour', job.requires_duplex && 'two-sided'].filter(Boolean).join(' and ');
     throw fail(409, `No online printer${needs ? ` that supports ${needs} printing` : ''} is available in this pool.`, 'job.no_compatible_printer');
   }
-  const id = randomUUID();
+  // A person cannot bury everybody else under a pile of jobs: at most `user_cap` waiting jobs per pool
+  // (operators are exempt).
+  if (submitterId && jobClass !== 'operator') {
+    const [{ n }] = await tx.query("SELECT COUNT(*) AS n FROM print_jobs WHERE pool_id=$1 AND submitter_id=$2 AND class<>'operator' AND status IN ('queued','claimed')", [pool.id, submitterId]);
+    if (Number(n) >= pool.user_cap) throw fail(429, `You already have ${pool.user_cap} jobs waiting. Wait for one to print or cancel one.`, 'queue.user_cap');
+  }
+  const id = randomUUID(), enqueued = enqueuedAt ?? now();
+  let vft = null, sortKey = null;
+  if (pool.scheduler === 'wfq_aging') ({ vft, sortKey } = await fairTags(tx, pool, jobClass, Number(sheets) * (job.requires_color ? COLOUR_COST_FACTOR : 1), Date.parse(enqueued) / 1000));
   await tx.query(
-    "INSERT INTO print_jobs (id,org_id,pool_id,submitter_id,class,status,object_id,options,pages,sheets,requires_color,requires_duplex,priority_boost,payer,cost_minor,enqueued_at) VALUES ($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-    [id, orgId, pool.id, submitterId, jobClass, objectId, JSON.stringify(options), pages, sheets, job.requires_color, job.requires_duplex, priorityBoost, payer, costMinor, now()]
+    "INSERT INTO print_jobs (id,org_id,pool_id,submitter_id,class,status,object_id,options,pages,sheets,requires_color,requires_duplex,priority_boost,payer,cost_minor,enqueued_at,vft,sort_key) VALUES ($1,$2,$3,$4,$5,'queued',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+    [id, orgId, pool.id, submitterId, jobClass, objectId, JSON.stringify(options), pages, sheets, job.requires_color, job.requires_duplex, priorityBoost, payer, costMinor, enqueued, vft, sortKey]
   );
   await queueEvent(tx, orgId, id, 'job.queued', submitterId, { pool: pool.id, pages });
   setImmediate(() => jobSignal.emit('job', orgId));
@@ -91,29 +119,36 @@ export async function claimJobs(db, agent, printerIds) {
       if (!printer) continue;
       const [busy] = await tx.query(`SELECT id FROM print_attempts WHERE printer_id=$1 AND state IN ('claimed','submitted','uncertain') LIMIT 1`, [printer.id]);
       if (busy) continue; // one job at a time per printer; an uncertain job blocks it until an operator decides
-      const pools = (await tx.query('SELECT pool_id FROM pool_members WHERE printer_id=$1', [printer.id])).map(r => r.pool_id);
+      const pools = await tx.query('SELECT p.id, p.scheduler, p.max_wait_seconds FROM pool_members m JOIN printer_pools p ON p.id=m.pool_id WHERE m.printer_id=$1 ORDER BY p.name', [printer.id]);
       if (!pools.length) continue;
-      // Compatibility is decided in SQL and ONE row is taken. Locking a long candidate list with SKIP LOCKED made a
-      // single agent lock every waiting job, so concurrent agents found nothing (PostgreSQL, 5 agents / 20 jobs).
-      const marks = pools.map((_, i) => `$${i + 4}`).join(',');
-      for (let tries = 0; tries < 3; tries++) {
-        const [job] = await tx.query(
-          `SELECT * FROM print_jobs WHERE org_id=$1 AND status='queued' AND (requires_color=0 OR $2=1) AND (requires_duplex=0 OR $3=1) AND pool_id IN (${marks}) ORDER BY priority_boost DESC, enqueued_at ASC LIMIT 1${skipLocked}`,
-          [agent.org_id, Number(printer.cap_color) === 1 ? 1 : 0, Number(printer.cap_duplex) === 1 ? 1 : 0, ...pools]
-        );
-        if (!job) break;
-        if (!printerSupports(printer, job)) break; // defence in depth: the SQL above already excludes these
-        const taken = await tx.query("UPDATE print_jobs SET status='claimed' WHERE id=$1 AND status='queued' RETURNING id", [job.id]);
-        if (!taken.length) continue;
-        const [{ next }] = await tx.query('SELECT COALESCE(MAX(attempt_no),0)+1 AS next FROM print_attempts WHERE job_id=$1', [job.id]);
-        const attemptId = randomUUID(), secret = token();
-        await tx.query(
-          "INSERT INTO print_attempts (id,org_id,job_id,printer_id,agent_id,attempt_no,state,lease_token_hash,lease_expires,created) VALUES ($1,$2,$3,$4,$5,$6,'claimed',$7,$8,$9)",
-          [attemptId, agent.org_id, job.id, printer.id, agent.id, Number(next), digest(secret), later(LEASE_MS), now()]
-        );
-        await queueEvent(tx, agent.org_id, job.id, 'attempt.claimed', agent.id, { attempt: Number(next), printer: printer.id });
-        claimed.push({ attemptId, leaseToken: secret, jobId: job.id, printerId: printer.id, attemptNo: Number(next), options: JSON.parse(job.options), pages: job.pages, objectId: job.object_id, leaseSeconds: LEASE_MS / 1000 });
-        break;
+      // Compatibility is decided in SQL and ONE row is taken per pool. Locking a long candidate list with SKIP LOCKED
+      // made a single agent lock every waiting job, so concurrent agents found nothing (PostgreSQL, 5 agents / 20 jobs).
+      let done = false;
+      for (const pool of pools) {
+        if (done) break;
+        // Fair pools: jobs that waited longer than the pool's target go first, then the aged virtual finish time.
+        const overdue = pool.scheduler === 'wfq_aging' ? `(CASE WHEN enqueued_at < '${new Date(Date.now() - Number(pool.max_wait_seconds) * 1000).toISOString()}' THEN 1 ELSE 0 END) DESC, ` : '';
+        const order = pool.scheduler === 'wfq_aging' ? `priority_boost DESC, ${overdue}sort_key ASC, enqueued_at ASC` : 'priority_boost DESC, enqueued_at ASC';
+        for (let tries = 0; tries < 3 && !done; tries++) {
+          const [job] = await tx.query(
+            `SELECT * FROM print_jobs WHERE org_id=$1 AND pool_id=$4 AND status='queued' AND (requires_color=0 OR $2=1) AND (requires_duplex=0 OR $3=1) ORDER BY ${order} LIMIT 1${skipLocked}`,
+            [agent.org_id, Number(printer.cap_color) === 1 ? 1 : 0, Number(printer.cap_duplex) === 1 ? 1 : 0, pool.id]
+          );
+          if (!job) break;
+          if (!printerSupports(printer, job)) break; // defence in depth: the SQL above already excludes these
+          const taken = await tx.query("UPDATE print_jobs SET status='claimed' WHERE id=$1 AND status='queued' RETURNING id", [job.id]);
+          if (!taken.length) continue;
+          if (job.vft !== null && job.vft !== undefined) await tx.query('UPDATE printer_pools SET vtime=CASE WHEN vtime<$1 THEN $1 ELSE vtime END WHERE id=$2', [Number(job.vft), pool.id]);
+          const [{ next }] = await tx.query('SELECT COALESCE(MAX(attempt_no),0)+1 AS next FROM print_attempts WHERE job_id=$1', [job.id]);
+          const attemptId = randomUUID(), secret = token();
+          await tx.query(
+            "INSERT INTO print_attempts (id,org_id,job_id,printer_id,agent_id,attempt_no,state,lease_token_hash,lease_expires,created) VALUES ($1,$2,$3,$4,$5,$6,'claimed',$7,$8,$9)",
+            [attemptId, agent.org_id, job.id, printer.id, agent.id, Number(next), digest(secret), later(LEASE_MS), now()]
+          );
+          await queueEvent(tx, agent.org_id, job.id, 'attempt.claimed', agent.id, { attempt: Number(next), printer: printer.id });
+          claimed.push({ attemptId, leaseToken: secret, jobId: job.id, printerId: printer.id, attemptNo: Number(next), options: JSON.parse(job.options), pages: job.pages, objectId: job.object_id, leaseSeconds: LEASE_MS / 1000 });
+          done = true;
+        }
       }
     }
     return claimed;

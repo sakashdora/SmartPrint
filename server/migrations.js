@@ -77,6 +77,16 @@ export const migrations = [
       }
     }
   }
+  ,
+  {
+    id: '0008_fair_queue',
+    description: 'Fair-queue state: pool scheduler settings, job virtual finish time and sort key, per-class clocks',
+    async up(tx) {
+      await tx.query('SELECT vtime, weights, aging_rate, max_wait_seconds, user_cap FROM printer_pools LIMIT 1');
+      await tx.query('SELECT vft, sort_key FROM print_jobs LIMIT 1');
+      await tx.query('SELECT 1 FROM queue_classes LIMIT 1');
+    }
+  }
 ];
 
 const now = () => new Date().toISOString();
