@@ -72,3 +72,7 @@ Tests use isolated local databases and no printer. The Neon check rolls back eve
 Keep `FILE_ENCRYPTION_KEY` unchanged across deployments: files and MFA depend on it. Rotate the original Neon owner password exposed in chat before public launch. Live SQL deletion does not erase retained backups or printer spool caches.
 
 [Full PRD and document pack](docs/README.md) · [Launch checklist](docs/06-test-and-release-plan.md) · [Operations](docs/09-operations-and-recovery.md)
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
