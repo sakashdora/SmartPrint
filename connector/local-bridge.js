@@ -57,16 +57,23 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
       if (!trusted) return send(403, { error: 'Origin not allowed.' });
       if (req.method === 'GET' && path === '/status') {
         const s = connector.state();
+        const includeVirtual = url.searchParams.get('virtual') === '1';
         return send(200, {
           app: 'smartprint-connector',
           version: 3,
+          connectorId: s.connectorId || null,
+          connectorVersion: s.connectorVersion || '2.1.0',
+          machineName: s.machineName || '',
           linked: s.linked,
           needsRelink: s.needsRelink,
           server: originOf(s.base),
           linkedHere: s.linked && originOf(s.base) === origin,
           printer: s.printer || '',
+          bindings: Array.isArray(s.bindings) ? s.bindings : [],
+          lastScanAt: s.lastScanAt || null,
+          lastScanError: s.lastScanError || null,
           // ?printers=0 is the cheap "is the connector running" check the Printers page polls.
-          printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh') })
+          printers: url.searchParams.get('printers') === '0' ? [] : await connector.printers({ fresh: url.searchParams.has('fresh'), includeVirtual })
         });
       }
       if (req.method === 'POST' && path === '/pair') {
@@ -79,8 +86,26 @@ export function createBridgeHandler(connector, { extraOrigins = [] } = {}) {
         if (s.linked && originOf(s.base) !== origin && body.replace !== true) {
           return send(409, { error: 'linked-elsewhere', server: originOf(s.base) });
         }
-        const result = await connector.pair({ url: origin, token, printer });
+        const result = await connector.pair({ url: origin, token, printer, ...(body.replace === true ? { replace: true } : {}) });
         return send(200, { ok: true, printer: result.printer });
+      }
+      if (req.method === 'POST' && path === '/unpair') {
+        const body = await readJson(req);
+        const printer = String(body.printer || '').trim().slice(0, 200);
+        if (!printer) return send(400, { error: 'Printer name is required.' });
+        if (typeof connector.unpair === 'function') {
+          await connector.unpair({ printer });
+        }
+        return send(200, { ok: true });
+      }
+      if (req.method === 'POST' && path === '/default-printer') {
+        const body = await readJson(req);
+        const printer = String(body.printer || '').trim().slice(0, 200);
+        if (!printer) return send(400, { error: 'Printer name is required.' });
+        if (typeof connector.setDefault === 'function') {
+          await connector.setDefault({ printer });
+        }
+        return send(200, { ok: true, printer });
       }
       return send(404, { error: 'Not found.' });
     } catch (error) {

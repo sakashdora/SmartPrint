@@ -86,20 +86,35 @@ const STATUS_BITS = [
   [0x20000, 'Toner low'], [0x400, 'Printing'], [0x4000, 'Processing'], [0x200, 'Busy'],
   [0x10000, 'Warming up'], [0x8000, 'Initializing'], [0x1000000, 'Power save'], [0x2000, 'Waiting']
 ];
-export function checkPrinterStatus(codeOrStr) {
-  if (codeOrStr == null || codeOrStr === '') return { status: 'Unknown', isOffline: false };
+export function checkPrinterStatus(codeOrStr, workOffline = false) {
+  if (workOffline === true) {
+    return { status: 'Offline', operationalStatus: 'Offline', isOffline: true, needsAttention: true, isBusy: false };
+  }
+  if (codeOrStr == null || codeOrStr === '') {
+    return { status: 'Unknown', operationalStatus: 'Unknown', isOffline: false, needsAttention: false, isBusy: false };
+  }
   if (typeof codeOrStr === 'string' && !/^\d+$/.test(codeOrStr)) {
-    if (/offline/i.test(codeOrStr)) return { status: 'Offline', isOffline: true };
-    if (/^(normal|ready|idle)$/i.test(codeOrStr)) return { status: 'Ready', isOffline: false };
-    return { status: codeOrStr, isOffline: false };
+    if (/offline/i.test(codeOrStr)) return { status: 'Offline', operationalStatus: 'Offline', isOffline: true, needsAttention: true, isBusy: false };
+    if (/paused/i.test(codeOrStr)) return { status: 'Paused', operationalStatus: 'Paused', isOffline: false, needsAttention: true, isBusy: false };
+    if (/error|jam|paper|door|toner|attention/i.test(codeOrStr)) return { status: codeOrStr, operationalStatus: 'Error', isOffline: false, needsAttention: true, isBusy: false };
+    if (/printing|processing|busy|warming|initializing/i.test(codeOrStr)) return { status: 'Ready', operationalStatus: 'Busy', isOffline: false, needsAttention: false, isBusy: true, detail: codeOrStr };
+    if (/^(normal|ready|idle)$/i.test(codeOrStr)) return { status: 'Ready', operationalStatus: 'Ready', isOffline: false, needsAttention: false, isBusy: false };
+    return { status: codeOrStr, operationalStatus: codeOrStr, isOffline: false, needsAttention: false, isBusy: false };
   }
   const code = Number(codeOrStr);
-  if (!Number.isInteger(code) || code === 0) return { status: 'Ready', isOffline: false };
-  if (code & 0x80) return { status: 'Offline', isOffline: true };
+  if (!Number.isInteger(code) || code === 0) return { status: 'Ready', operationalStatus: 'Ready', isOffline: false, needsAttention: false, isBusy: false };
+  if (code & 0x80) return { status: 'Offline', operationalStatus: 'Offline', isOffline: true, needsAttention: true, isBusy: false };
   const label = STATUS_BITS.find(([bit]) => code & bit)?.[1];
-  // Activity bits are a working printer; problem bits are reported but the spooler still queues.
-  if (!label || /Printing|Processing|Busy|Warming|Initializing|Power save|Waiting|Toner low/.test(label)) return { status: 'Ready', isOffline: false, detail: label };
-  return { status: label, isOffline: false };
+  if (!label || /Power save|Waiting|Toner low/.test(label)) {
+    return { status: 'Ready', operationalStatus: 'Ready', isOffline: false, needsAttention: /Toner low/.test(label || ''), isBusy: false, detail: label };
+  }
+  if (/Printing|Processing|Busy|Warming|Initializing/.test(label)) {
+    return { status: 'Ready', operationalStatus: label === 'Printing' ? 'Printing' : 'Busy', isOffline: false, needsAttention: false, isBusy: true, detail: label };
+  }
+  if (label === 'Paused') {
+    return { status: 'Paused', operationalStatus: 'Paused', isOffline: false, needsAttention: true, isBusy: false, detail: label };
+  }
+  return { status: label, operationalStatus: 'Error', isOffline: false, needsAttention: true, isBusy: false, detail: label };
 }
 
 const GENERIC_WORDS = new Set(['printer', 'printers', 'series', 'usb', 'wifi', 'wireless', 'network', 'copy', 'redirected', 'class', 'driver', 'pcl', 'pcl5', 'pcl6', 'ps', 'xl', 'gdi', 'universal', 'upd', 'the', 'and', 'on']);
@@ -198,11 +213,36 @@ export function resolveActivePrinter(targetName, printerList = []) {
 
 export async function getWindowsPrinters() {
   if (process.platform !== 'win32') return [];
-  // Get-Printer has no Default property, so the Windows default printer comes from Win32_Printer.
-  // PowerShell can take several seconds to start on a busy shop PC, so allow a generous timeout.
+  // Combines Get-Printer, Win32_Printer (Default & WorkOffline), and Get-PrinterPort (TCP/IP host address)
+  // in a single PowerShell invocation so USB, Wi-Fi, Ethernet, TCP/IP, Shared, and Virtual queues are captured.
   const ps = [
-    '$def = (Get-CimInstance -ClassName Win32_Printer -Filter "Default=TRUE" -ErrorAction SilentlyContinue | Select-Object -First 1).Name',
-    '$list = @(Get-Printer -ErrorAction SilentlyContinue | Select-Object Name, PrinterStatus, PortName, DriverName, @{ n = "Default"; e = { $_.Name -eq $def } })',
+    '$cim = @{}',
+    'Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue | ForEach-Object { $cim[[string]$_.Name] = $_ }',
+    '$ports = @{}',
+    'Get-PrinterPort -ErrorAction SilentlyContinue | ForEach-Object { $ports[[string]$_.Name] = $_ }',
+    '$list = @(Get-Printer -ErrorAction SilentlyContinue | ForEach-Object {',
+    '  $w = $cim[[string]$_.Name]; $pt = $ports[[string]$_.PortName];',
+    '  [pscustomobject]@{',
+    '    Name = [string]$_.Name;',
+    '    PrinterStatus = $_.PrinterStatus;',
+    '    PortName = [string]$_.PortName;',
+    '    PortHost = if ($pt -and $pt.PrinterHostAddress) { [string]$pt.PrinterHostAddress } else { "" };',
+    '    DriverName = [string]$_.DriverName;',
+    '    Default = if ($w) { [bool]$w.Default } else { $false };',
+    '    WorkOffline = if ($w) { [bool]$w.WorkOffline } else { $false };',
+    '    Shared = [bool]$_.Shared;',
+    '    ShareName = [string]$_.ShareName;',
+    '    Type = [string]$_.Type;',
+    '    Location = [string]$_.Location;',
+    '    Comment = [string]$_.Comment;',
+    '    JobCount = [int]($_.JobCount)',
+    '  }',
+    '})',
+    'if (-not $list.Count -and $cim.Count) {',
+    '  $list = @($cim.Values | ForEach-Object {',
+    '    [pscustomobject]@{ Name = [string]$_.Name; PrinterStatus = if ($_.WorkOffline) { 128 } else { 0 }; PortName = [string]$_.PortName; PortHost = ""; DriverName = [string]$_.DriverName; Default = [bool]$_.Default; WorkOffline = [bool]$_.WorkOffline; Shared = [bool]$_.Shared; ShareName = [string]$_.ShareName; Type = ""; Location = [string]$_.Location; Comment = [string]$_.Comment; JobCount = 0 }',
+    '  })',
+    '}',
     'ConvertTo-Json -Compress -InputObject $list'
   ].join('; ');
   try {
@@ -215,7 +255,18 @@ export async function getWindowsPrinters() {
   }
 }
 
-export async function printPdfToWindowsPrinter({ pdfPath, printerName, options = {}, sumatraPath = null }) {
+export async function setWindowsDefaultPrinter(printerName) {
+  if (process.platform !== 'win32' || !printerName) throw new Error('Default printer can only be set on Windows.');
+  const ps = '(New-Object -ComObject WScript.Network).SetDefaultPrinter($env:SMARTPRINT_TARGET)';
+  await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+    timeout: 15000,
+    windowsHide: true,
+    env: { ...process.env, SMARTPRINT_TARGET: String(printerName) }
+  });
+  return true;
+}
+
+export async function printPdfToWindowsPrinter({ pdfPath, printerName, options = {}, sumatraPath = null, exactOnly = false }) {
   if (!existsSync(pdfPath)) {
     throw new Error(`Print file not found at ${pdfPath}`);
   }
@@ -223,15 +274,25 @@ export async function printPdfToWindowsPrinter({ pdfPath, printerName, options =
   if (process.platform === 'win32') {
     const installed = await getWindowsPrinters();
     if (installed.length) {
-      // Re-resolved for every job: a USB printer moved to another socket (common with the HP LaserJet
-      // 1020/P1108) is reinstalled by Windows as "... (Copy 1)" on a new USB port.
-      const resolution = pickPrinter(printerName, installed);
-      if (!resolution.name) throw new Error(`${resolution.reason} Install the printer driver and print a Windows test page first.`);
-      if (resolution.switched) console.log(`[Print Helper] ${resolution.reason}`);
-      targetPrinter = resolution.name;
-      if (resolution.status === 'Offline') {
-        const port = installed.find(p => p.Name === targetPrinter)?.PortName;
-        throw new Error(`Printer "${targetPrinter}" is Offline in Windows (Port: ${port || 'Unknown'}). Check the USB cable and power. If the cable was moved to another USB socket, open Printer properties > Ports and tick the active USB00x port.`);
+      if (exactOnly) {
+        const exact = installed.find(p => p.Name && p.Name.toLowerCase() === String(printerName || '').toLowerCase());
+        if (!exact) throw new Error(`Selected printer "${printerName}" is not installed in Windows.`);
+        const st = checkPrinterStatus(exact.PrinterStatus, exact.WorkOffline);
+        if (st.isOffline) {
+          throw new Error(`Printer "${exact.Name}" is Offline in Windows (Port: ${exact.PortName || 'Unknown'}).`);
+        }
+        targetPrinter = exact.Name;
+      } else {
+        // Re-resolved for every job: a USB printer moved to another socket (common with the HP LaserJet
+        // 1020/P1108) is reinstalled by Windows as "... (Copy 1)" on a new USB port.
+        const resolution = pickPrinter(printerName, installed);
+        if (!resolution.name) throw new Error(`${resolution.reason} Install the printer driver and print a Windows test page first.`);
+        if (resolution.switched) console.log(`[Print Helper] ${resolution.reason}`);
+        targetPrinter = resolution.name;
+        if (resolution.status === 'Offline') {
+          const port = installed.find(p => p.Name === targetPrinter)?.PortName;
+          throw new Error(`Printer "${targetPrinter}" is Offline in Windows (Port: ${port || 'Unknown'}). Check the USB cable and power. If the cable was moved to another USB socket, open Printer properties > Ports and tick the active USB00x port.`);
+        }
       }
     }
   }

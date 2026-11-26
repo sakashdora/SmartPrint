@@ -7,7 +7,7 @@ import { price, validateOptions } from './print-options.js';
 import { generateTestPage } from './diagnostic-page.js';
 import { localProcess } from './process-client.js';
 import { logEvent } from './logger.js';
-import { classifyConnection, guessCapabilities } from './printer-capabilities.js';
+import { classifyConnection, guessCapabilities, extractManufacturerModel } from './printer-capabilities.js';
 import { createNotification } from './notifications.js';
 
 const runExec = promisify(execFile);
@@ -49,43 +49,62 @@ export function cleanPrinterList(list) {
   for (const p of Array.isArray(list) ? list : []) {
     if (!p || typeof p.name !== 'string' || !p.name.trim()) continue;
     const item = {};
-    for (const [k, v] of Object.entries(p).slice(0, 20)) {
+    for (const [k, v] of Object.entries(p).slice(0, 30)) {
       if (typeof v === 'string') item[k] = v.slice(0, 200);
       else if (typeof v === 'number' || typeof v === 'boolean') item[k] = v;
+      else if (k === 'paperSizes' && Array.isArray(v)) {
+        item.paperSizes = v.map(s => String(s || '').trim().slice(0, 40)).filter(Boolean).slice(0, 20);
+      }
     }
     item.name = p.name.trim().slice(0, 200);
     // The printers page renders these flags unescaped inside attributes, so they must be real booleans.
-    for (const flag of ['isWifi', 'isWired', 'isDefault', 'color', 'duplex']) if (flag in item) item[flag] = item[flag] === true;
+    for (const flag of ['isWifi', 'isWired', 'isNetwork', 'isShared', 'isVirtual', 'isDefault', 'color', 'duplex', 'verified', 'workOffline', 'needsAttention', 'isBusy']) {
+      if (flag in item) item[flag] = item[flag] === true;
+    }
     result.push(item);
     if (result.length >= MAX_SCANNED_PRINTERS) break;
   }
   return result;
 }
 
-export function formatPrinterList(rawList) {
+export function formatPrinterList(rawList, { includeVirtual = false } = {}) {
   return rawList
-    .filter(p => p && p.Name && !/OneNote|Fax|Microsoft XPS/i.test(p.Name))
+    .filter(p => p && p.Name && (includeVirtual || !/OneNote|Fax|Microsoft XPS/i.test(p.Name)))
     .map(p => {
       const port = String(p.PortName || '').trim();
       const driver = String(p.DriverName || '').trim();
       const name = String(p.Name || '').trim();
-      const { connectionType, isWifi, isWired } = classifyConnection({ name, port, driver });
+      const conn = classifyConnection({ name, port, driver, shared: Boolean(p.Shared), type: p.Type, portHost: p.PortHost });
       const guess = guessCapabilities(name, driver);
+      const { manufacturer, model } = extractManufacturerModel(name, driver);
       // Get-Printer reports the spooler bitmask: 0x80 is offline, other bits (busy, power save,
       // toner low, ...) still accept jobs.
       const code = Number(p.PrinterStatus);
-      const isOffline = p.PrinterStatus === 'Offline' || p.status === 'Offline' || (Number.isInteger(code) && (code & 0x80) !== 0);
+      const isOffline = Boolean(p.WorkOffline) || p.PrinterStatus === 'Offline' || p.status === 'Offline' || (Number.isInteger(code) && (code & 0x80) !== 0);
+      const operationalStatus = isOffline ? 'Offline' : (p.operationalStatus || (Number.isInteger(code) && (code & 0x1) ? 'Paused' : Number.isInteger(code) && (code & 0x2) ? 'Error' : Number.isInteger(code) && (code & 0x400) ? 'Printing' : Number.isInteger(code) && (code & 0x200) ? 'Busy' : 'Ready'));
       return {
         name,
         portName: port,
         driverName: driver,
-        connectionType,
-        isWifi,
-        isWired,
+        manufacturer,
+        model,
+        connectionType: conn.connectionType,
+        connectionCode: conn.connectionCode,
+        isWifi: conn.isWifi,
+        isWired: conn.isWired,
+        isNetwork: conn.isNetwork,
+        isShared: conn.isShared,
+        isVirtual: conn.isVirtual,
         isDefault: Boolean(p.Default || p.IsDefault),
+        workOffline: Boolean(p.WorkOffline),
         status: isOffline ? 'Offline' : 'Ready',
+        operationalStatus,
+        jobCount: Number.isFinite(Number(p.JobCount)) ? Number(p.JobCount) : 0,
         color: typeof p.color === 'boolean' ? p.color : guess.color,
-        duplex: typeof p.duplex === 'boolean' ? p.duplex : guess.duplex
+        duplex: typeof p.duplex === 'boolean' ? p.duplex : guess.duplex,
+        paperSizes: Array.isArray(p.paperSizes) ? p.paperSizes : [],
+        resolution: Number.isFinite(Number(p.resolution)) ? Number(p.resolution) : null,
+        verified: Boolean(p.verified)
       };
     });
 }
@@ -286,7 +305,7 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!printerName) throw fail(400, 'Choose a printer.');
 
     let [device] = await db.query(
-      'SELECT id, name, active, color, duplex, cap_source FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
+      'SELECT id, name, active, color, duplex, cap_source, is_default FROM devices WHERE shop_id=$1 AND LOWER(name) = LOWER($2) ORDER BY active DESC LIMIT 1',
       [shop.id, printerName]
     );
     // Capabilities come from the connector's driver probe on the shop PC (sent by the page) or stay
@@ -295,20 +314,44 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     // `manual: true` means the owner chose these on screen (they stay put; later scans never overwrite them).
     const capability = flag => typeof req.body[flag] === 'boolean' ? (req.body[flag] ? 1 : 0) : undefined;
     const manual = req.body.manual === true && capability('color') !== undefined && capability('duplex') !== undefined;
+    const str = (v, max = 160) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+    const meta = {
+      windowsQueueName: str(req.body.windowsQueueName || printerName, 160),
+      driverName: str(req.body.driverName, 160),
+      portName: str(req.body.portName, 160),
+      connectionType: str(req.body.connectionType, 60),
+      manufacturer: str(req.body.manufacturer, 80),
+      model: str(req.body.model, 120),
+      paperSizes: Array.isArray(req.body.paperSizes) ? JSON.stringify(req.body.paperSizes.map(s => String(s || '').trim().slice(0, 40)).filter(Boolean).slice(0, 20)) : null,
+      resolution: Number.isFinite(Number(req.body.resolution)) && Number(req.body.resolution) > 0 ? Number(req.body.resolution) : null,
+      isWindowsDefault: req.body.isWindowsDefault === true ? 1 : 0,
+      deviceStatus: str(req.body.deviceStatus, 40),
+      connectorId: str(req.body.connectorId, 100),
+      machineName: str(req.body.machineName, 100)
+    };
     const secret = token();
     if (!device) {
       const id = randomUUID();
+      const [hasDefault] = await db.query('SELECT id FROM devices WHERE shop_id=$1 AND active=1 AND is_default=1 LIMIT 1', [shop.id]);
+      const isDefault = hasDefault ? 0 : 1;
       // No heartbeat: the printer shows online only once its connector checks in with this key.
-      await db.query('INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source) VALUES ($1,$2,$3,$4,$5,$6,1,$7)', [
-        id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0, manual ? 'manual' : 'driver'
-      ]);
-      device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0 };
+      await db.query(
+        'INSERT INTO devices (id,shop_id,name,token,color,duplex,active,cap_source,windows_queue_name,driver_name,port_name,connection_type,manufacturer,model,paper_sizes,resolution,is_default,is_windows_default,device_status,connector_id,machine_name) VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)',
+        [
+          id, shop.id, printerName, digest(secret), capability('color') ?? 0, capability('duplex') ?? 0, manual ? 'manual' : 'driver',
+          meta.windowsQueueName, meta.driverName, meta.portName, meta.connectionType, meta.manufacturer, meta.model, meta.paperSizes, meta.resolution, isDefault, meta.isWindowsDefault, meta.deviceStatus, meta.connectorId, meta.machineName
+        ]
+      );
+      device = { id, name: printerName, active: 1, color: capability('color') ?? 0, duplex: capability('duplex') ?? 0, is_default: isDefault };
     } else {
       const keep = device.cap_source === 'manual' && !manual; // the owner's earlier choice wins over a detected value
       const color = keep ? device.color : capability('color') ?? device.color, duplex = keep ? device.duplex : capability('duplex') ?? device.duplex;
       // The current key keeps working until a connector actually checks in with the new one. A Connect
       // whose key never reaches the connector (blocked, closed, asleep) therefore cannot lock it out.
-      await db.query('UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4 WHERE id=$5', [printerName, color, duplex, manual || keep ? 'manual' : 'driver', device.id]);
+      await db.query(
+        'UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4, windows_queue_name=COALESCE($5,windows_queue_name), driver_name=COALESCE($6,driver_name), port_name=COALESCE($7,port_name), connection_type=COALESCE($8,connection_type), manufacturer=COALESCE($9,manufacturer), model=COALESCE($10,model), paper_sizes=COALESCE($11,paper_sizes), resolution=COALESCE($12,resolution), is_windows_default=$13, device_status=COALESCE($14,device_status), connector_id=COALESCE($15,connector_id), machine_name=COALESCE($16,machine_name) WHERE id=$17',
+        [printerName, color, duplex, manual || keep ? 'manual' : 'driver', meta.windowsQueueName, meta.driverName, meta.portName, meta.connectionType, meta.manufacturer, meta.model, meta.paperSizes, meta.resolution, meta.isWindowsDefault, meta.deviceStatus, meta.connectorId, meta.machineName, device.id]
+      );
       pendingKeys.set(digest(secret), { deviceId: device.id, expires: Date.now() + PENDING_KEY_MS });
       Object.assign(device, { name: printerName, color, duplex });
     }
@@ -320,20 +363,39 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       name: device.name,
       token: secret,
       color: Boolean(device.color),
-      duplex: Boolean(device.duplex)
+      duplex: Boolean(device.duplex),
+      isDefault: Boolean(device.is_default)
     });
   });
 
   app.get('/api/owner/devices', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const rows = await db.query('SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source FROM devices WHERE shop_id=$1 ORDER BY active DESC, name ASC', [shop.id]);
-    res.json(rows.map(({ paused, paused_note, ...d }) => {
+    const rows = await db.query(
+      'SELECT id,name,active,heartbeat,color,duplex,paused,paused_note,cap_source,connector_id,connector_version,machine_name,windows_queue_name,driver_name,port_name,connection_type,manufacturer,model,paper_sizes,resolution,is_default,is_windows_default,device_status,last_status_check,last_error,queue_depth FROM devices WHERE shop_id=$1 ORDER BY active DESC, is_default DESC, name ASC',
+      [shop.id]
+    );
+    res.json(rows.map(({ paused, paused_note, paper_sizes, ...d }) => {
       // Same 3-minute window the dashboard and job routing use.
       const isOnline = Boolean(d.active && d.heartbeat && (Date.now() - new Date(d.heartbeat).getTime() < 180000));
+      let parsedPapers = [];
+      if (paper_sizes) { try { parsedPapers = JSON.parse(paper_sizes); } catch {} }
+      const devStatus = d.device_status || (isOnline ? 'Ready' : 'Offline');
+      const statusNote = Number(paused)
+        ? (paused_note || 'Paused by owner')
+        : !isOnline
+          ? 'Offline · connector not running'
+          : devStatus === 'Offline'
+            ? 'Offline in Windows'
+            : devStatus === 'Error' || devStatus === 'Needs attention'
+              ? (d.last_error || `Printer ${devStatus.toLowerCase()}`)
+              : 'Ready';
       return {
         ...d,
+        paper_sizes: Array.isArray(parsedPapers) ? parsedPapers : [],
+        is_online: isOnline && devStatus !== 'Offline',
         is_paused: Number(paused) ? 1 : 0,
-        status_note: Number(paused) ? (paused_note || 'Paused by owner') : isOnline ? 'Ready' : 'Offline · connector not running'
+        operational_status: Number(paused) ? 'Paused' : !isOnline ? 'Offline' : devStatus,
+        status_note: statusNote
       };
     }));
   });
@@ -353,19 +415,42 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   // sets is never overwritten by what the connector detects; `useDetected: true` hands control back to detection.
   app.patch('/api/owner/devices/:id', owner, async (req, res) => {
     const shop = await ownerShop(req);
-    const [device] = await db.query('SELECT id, color, duplex, cap_source FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
+    const [device] = await db.query('SELECT id, name, color, duplex, cap_source, is_default FROM devices WHERE id=$1 AND shop_id=$2', [req.params.id, shop.id]);
     if (!device) throw fail(404, 'Printer not found.');
     if (req.body.useDetected === true) {
       await db.query("UPDATE devices SET cap_source='driver' WHERE id=$1", [device.id]);
       await audit(db, req.user.id, 'device.capabilities_auto', device.id);
       return res.json({ ok: true, cap_source: 'driver', color: Boolean(device.color), duplex: Boolean(device.duplex) });
     }
-    if (typeof req.body.color !== 'boolean' && typeof req.body.duplex !== 'boolean') throw fail(400, 'Choose colour and/or two-sided.');
+    const nextName = typeof req.body.name === 'string' && req.body.name.trim().length >= 2 ? req.body.name.trim().slice(0, 100) : null;
+    const hasCap = typeof req.body.color === 'boolean' || typeof req.body.duplex === 'boolean';
+    const hasDefault = req.body.isDefault === true;
+    if (!hasCap && !nextName && !hasDefault) throw fail(400, 'Choose colour and/or two-sided.');
     const color = typeof req.body.color === 'boolean' ? (req.body.color ? 1 : 0) : device.color;
     const duplex = typeof req.body.duplex === 'boolean' ? (req.body.duplex ? 1 : 0) : device.duplex;
-    await db.query("UPDATE devices SET color=$1, duplex=$2, cap_source='manual' WHERE id=$3", [color, duplex, device.id]);
-    await audit(db, req.user.id, 'device.capabilities_set', device.id);
-    res.json({ ok: true, cap_source: 'manual', color: Boolean(color), duplex: Boolean(duplex) });
+    const capSource = hasCap ? 'manual' : (device.cap_source || 'driver');
+    await db.transaction(async tx => {
+      if (hasDefault) {
+        await tx.query('UPDATE devices SET is_default=0 WHERE shop_id=$1', [shop.id]);
+      }
+      await tx.query('UPDATE devices SET name=$1, color=$2, duplex=$3, cap_source=$4, is_default=$5 WHERE id=$6', [
+        nextName || device.name, color, duplex, capSource, hasDefault ? 1 : device.is_default, device.id
+      ]);
+      await audit(tx, req.user.id, 'device.capabilities_set', device.id);
+    });
+    res.json({ ok: true, name: nextName || device.name, cap_source: capSource, color: Boolean(color), duplex: Boolean(duplex), isDefault: hasDefault || Boolean(device.is_default) });
+  });
+
+  app.post('/api/owner/devices/:id/default', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [device] = await db.query('SELECT id, name FROM devices WHERE id=$1 AND shop_id=$2 AND active=1', [req.params.id, shop.id]);
+    if (!device) throw fail(404, 'Active printer not found.');
+    await db.transaction(async tx => {
+      await tx.query('UPDATE devices SET is_default=0 WHERE shop_id=$1', [shop.id]);
+      await tx.query('UPDATE devices SET is_default=1 WHERE id=$1', [device.id]);
+      await audit(tx, req.user.id, 'device.set_default', device.id);
+    });
+    res.json({ ok: true, id: device.id, name: device.name });
   });
 
   app.post('/api/owner/devices/:id/pause', owner, async (req, res) => {
@@ -384,16 +469,34 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (!device) throw fail(404, 'Active device not found.');
     // A test page for an offline printer would sit in the queue and print by surprise later.
     if (!device.heartbeat || Date.now() - new Date(device.heartbeat).getTime() > 180000) throw fail(409, `${device.name} is offline: its SmartPrint connector is not running or not linked. Connect it from this page on the shop PC, then try again.`);
+    if (Number(device.paused)) throw fail(409, `${device.name} is currently paused. Resume it before sending a test print.`);
+    if (device.device_status === 'Offline') throw fail(409, `${device.name} is reported Offline by Windows. Check cable/power and refresh status.`);
     const testBytes = await generateTestPage(shop.name, device.name);
     const docId = randomUUID(), orderId = randomUUID(), receipt = token();
     const sealed = encrypt(testBytes, key);
-    const options = { color: device.color ? 'color' : 'bw', duplex: false, copies: 1, layout: 'single', range: '', file_name: 'SmartPrint_Diagnostic_Test.pdf', priority: 100 };
+    const options = { color: device.color ? 'color' : 'bw', duplex: false, copies: 1, layout: 'single', range: '', file_name: 'SmartPrint_Diagnostic_Test.pdf', priority: 100, targetDeviceId: device.id };
     await db.transaction(async tx => {
       await tx.query('INSERT INTO documents (id,shop_id,payload,iv,tag,expires) VALUES ($1,$2,$3,$4,$5,$6)', [docId, shop.id, sealed.payload, sealed.iv, sealed.tag, new Date(Date.now() + 86400000).toISOString()]);
-      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid','queued',$11)", [orderId, shop.id, docId, digest(receipt), JSON.stringify(options), 1, 1, 1, 0, 'cash', now()]);
+      await tx.query("INSERT INTO orders (id,shop_id,document_id,token,options,pages,sides,sheets,amount,method,payment,status,created,target_device_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid','queued',$11,$12)", [orderId, shop.id, docId, digest(receipt), JSON.stringify(options), 1, 1, 1, 0, 'cash', now(), device.id]);
       await audit(tx, req.user.id, 'device.test_printed', device.id);
     });
-    res.json({ ok: true, orderId, message: 'Test page queued for printer!' });
+    res.json({ ok: true, orderId, deviceId: device.id, stage: 'queued', message: `Test page queued specifically for ${device.name}. Waiting for connector...` });
+  });
+
+  app.get('/api/owner/devices/:id/test-print/:orderId', owner, async (req, res) => {
+    const shop = await ownerShop(req);
+    const [order] = await db.query(
+      'SELECT o.id, o.status, o.created, l.state AS lease_state, l.detail AS lease_detail FROM orders o LEFT JOIN print_leases l ON l.order_id=o.id WHERE o.id=$1 AND o.shop_id=$2',
+      [req.params.orderId, shop.id]
+    );
+    if (!order) throw fail(404, 'Test print job not found.');
+    res.json({
+      id: order.id,
+      status: order.status,
+      leaseState: order.lease_state || null,
+      detail: order.lease_detail || null,
+      created: order.created
+    });
   });
 
   app.post('/api/owner/print-job', owner, async (req, res) => {
@@ -552,7 +655,24 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
   });
   app.post('/api/device/heartbeat', async (req, res) => {
     // Respond immediately so device heartbeats are fast (<5ms) and never timeout
-    res.json({ ok: true });
+    res.json({ ok: true, deviceId: req.device.id, paused: Boolean(req.device.paused) });
+    const b = req.body || {};
+    if (b.connectorId || b.version || b.machineName || b.deviceStatus || b.lastError !== undefined || b.queueDepth !== undefined || b.isWindowsDefault !== undefined) {
+      db.query(
+        'UPDATE devices SET connector_id=COALESCE($1,connector_id), connector_version=COALESCE($2,connector_version), machine_name=COALESCE($3,machine_name), device_status=COALESCE($4,device_status), last_error=COALESCE($5,last_error), queue_depth=COALESCE($6,queue_depth), is_windows_default=COALESCE($7,is_windows_default), last_status_check=$8 WHERE id=$9',
+        [
+          typeof b.connectorId === 'string' ? b.connectorId.slice(0, 100) : null,
+          typeof b.version === 'string' ? b.version.slice(0, 40) : null,
+          typeof b.machineName === 'string' ? b.machineName.slice(0, 100) : null,
+          typeof b.deviceStatus === 'string' ? b.deviceStatus.slice(0, 40) : null,
+          b.lastError === null ? '' : (typeof b.lastError === 'string' ? b.lastError.slice(0, 300) : null),
+          Number.isInteger(b.queueDepth) ? b.queueDepth : null,
+          typeof b.isWindowsDefault === 'boolean' ? (b.isWindowsDefault ? 1 : 0) : null,
+          now(),
+          req.device.id
+        ]
+      ).catch(() => {});
+    }
     // Run cleanup asynchronously in background if overdue
     db.query("SELECT last_success FROM worker_status WHERE id='cleanup'").then(([worker]) => {
       if (!worker || Date.now() - Date.parse(worker.last_success) > 60000) {
@@ -565,11 +685,29 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
     if (list.length) {
       shopScannedPrinters.set(req.device.shop_id, list);
     }
-    // The connector reports the driver-verified capabilities of the printer it prints to. Only this
-    // device's own row is updated, and only from explicit booleans.
+    // The connector reports the driver-verified capabilities and Windows metadata of the printer it prints to.
     const capabilities = req.body.capabilities;
     if (capabilities && typeof capabilities.color === 'boolean' && typeof capabilities.duplex === 'boolean') {
-      await db.query("UPDATE devices SET color=$1, duplex=$2 WHERE id=$3 AND COALESCE(cap_source,'driver')<>'manual'", [capabilities.color ? 1 : 0, capabilities.duplex ? 1 : 0, req.device.id]);
+      const papers = Array.isArray(capabilities.paperSizes) ? JSON.stringify(capabilities.paperSizes.slice(0, 20)) : null;
+      const resDpi = Number.isFinite(Number(capabilities.resolution)) ? Number(capabilities.resolution) : null;
+      await db.query(
+        "UPDATE devices SET color=CASE WHEN COALESCE(cap_source,'driver')<>'manual' THEN $1 ELSE color END, duplex=CASE WHEN COALESCE(cap_source,'driver')<>'manual' THEN $2 ELSE duplex END, paper_sizes=COALESCE($3,paper_sizes), resolution=COALESCE($4,resolution), driver_name=COALESCE($5,driver_name), port_name=COALESCE($6,port_name), connection_type=COALESCE($7,connection_type), manufacturer=COALESCE($8,manufacturer), model=COALESCE($9,model), device_status=COALESCE($10,device_status), is_windows_default=COALESCE($11,is_windows_default), last_status_check=$12 WHERE id=$13",
+        [
+          capabilities.color ? 1 : 0,
+          capabilities.duplex ? 1 : 0,
+          papers,
+          resDpi,
+          typeof capabilities.driverName === 'string' ? capabilities.driverName.slice(0, 160) : null,
+          typeof capabilities.portName === 'string' ? capabilities.portName.slice(0, 160) : null,
+          typeof capabilities.connectionType === 'string' ? capabilities.connectionType.slice(0, 60) : null,
+          typeof capabilities.manufacturer === 'string' ? capabilities.manufacturer.slice(0, 80) : null,
+          typeof capabilities.model === 'string' ? capabilities.model.slice(0, 120) : null,
+          typeof capabilities.operationalStatus === 'string' ? capabilities.operationalStatus.slice(0, 40) : null,
+          typeof capabilities.isDefault === 'boolean' ? (capabilities.isDefault ? 1 : 0) : null,
+          now(),
+          req.device.id
+        ]
+      );
     }
     res.json({ ok: true, count: list.length });
   });
@@ -637,6 +775,9 @@ export function deviceRoutes(app, { db, key, ownerShop, requireRole, audit, main
       }).filter(c => c.options);
       parsed.sort((a, b) => ((b.options.priority || 0) - (a.options.priority || 0)) || a.order.created.localeCompare(b.order.created));
       for (const { order, options } of parsed) {
+        // If a job is targeted to a specific printer (e.g. Test Print), only that device may claim it.
+        const targetId = order.target_device_id || options.targetDeviceId;
+        if (targetId && targetId !== req.device.id) continue;
         // An incompatible job stays queued for a capable printer; it is never "only job, print anyway".
         if (!printerSupports(device, options)) { skipped.push({ id: order.id, options }); continue; }
         const changed = await tx.query("UPDATE orders SET status='printing' WHERE id=$1 AND status='queued' AND EXISTS (SELECT id FROM documents WHERE id=orders.document_id AND expires>$2) RETURNING id", [order.id, now()]);

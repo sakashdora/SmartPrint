@@ -3,10 +3,14 @@ import { promisify } from 'node:util';
 import { mkdir, writeFile, unlink, readFile, readdir, stat } from 'node:fs/promises';
 import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
-import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs } from './sumatra-helper.js';
-import { probePrinterCapabilities, classifyConnection, guessCapabilities } from '../server/printer-capabilities.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { ensureSumatraPDF, printPdfToWindowsPrinter, getWindowsPrinters, pickPrinter, checkPrinterStatus, clearStaleConnectorJobs, setWindowsDefaultPrinter } from './sumatra-helper.js';
+import { probePrinterCapabilities, classifyConnection, guessCapabilities, extractManufacturerModel } from '../server/printer-capabilities.js';
 import { startBridge, BRIDGE_PORT } from './local-bridge.js';
+
+const CONNECTOR_VERSION = '2.1.0';
+const machineName = process.env.COMPUTERNAME || hostname() || 'Windows-PC';
 
 const run = promisify(execFile);
 const root = resolve(process.env.LOCALAPPDATA || '.', 'SmartPrintConnector');
@@ -58,10 +62,44 @@ export function loadConfig() {
 }
 
 let savedConfig = loadConfig();
+let connectorId = savedConfig.ConnectorId || randomUUID();
+if (!savedConfig.ConnectorId) {
+  try {
+    await writeFile(settingsPath, JSON.stringify({ ...savedConfig, ConnectorId: connectorId }, null, 2), 'utf8');
+    savedConfig = loadConfig();
+  } catch {}
+}
 let base = (process.env.SMARTPRINT_URL || savedConfig.Url || 'http://localhost:3000').replace(/\/+$/, '');
 let secret = process.env.SMARTPRINT_DEVICE_TOKEN || savedConfig.Token;
 let printer = process.env.SMARTPRINT_PRINTER || savedConfig.Printer;
 const processorSecret = process.env.PROCESSOR_SECRET || savedConfig.ProcessorSecret;
+
+// Multi-printer bindings: each connected Windows printer has its own device token so multiple
+// printers on this PC operate independently without overwriting each other's credentials.
+function loadBindings(cfg) {
+  const list = Array.isArray(cfg.Bindings) ? cfg.Bindings.filter(b => b && b.token && b.printer) : [];
+  if (!list.length && secret) {
+    list.push({ url: base, token: secret, printer: printer || '', authFailed: false, lastError: null });
+  }
+  return list.map(b => ({ url: (b.url || base).replace(/\/+$/, ''), token: b.token, printer: b.printer, authFailed: false, lastError: null }));
+}
+let bindings = loadBindings(savedConfig);
+async function saveBindings() {
+  const primary = bindings[0] || {};
+  const cfg = loadConfig();
+  await writeFile(settingsPath, JSON.stringify({
+    ...cfg,
+    ConnectorId: connectorId,
+    Url: primary.url || base,
+    Token: primary.token || '',
+    Printer: primary.printer || '',
+    Bindings: bindings.map(b => ({ url: b.url, token: b.token, printer: b.printer })),
+    LastUpdated: new Date().toISOString()
+  }, null, 2), 'utf8');
+  secret = primary.token || '';
+  printer = primary.printer || '';
+  if (primary.url) base = primary.url;
+}
 
 // Record process PID for single-instance connector management
 const pidPath = join(root, 'connector.pid');
@@ -150,108 +188,79 @@ try {
   }
 } catch {}
 
-// This PC's real printers with driver-verified capabilities, for the Printers page. Software printers
-// (PDF, OneNote, PaperPort ...) are left out. Cached briefly because the page polls it.
-let lastScan = { at: 0, list: [] };
-async function collectLocalPrinters({ maxAge = 15000 } = {}) {
+// This PC's real printers with driver-verified capabilities, for the Printers page.
+// Cached briefly because the page polls it. Virtual printers are included only when requested.
+let lastScan = { at: 0, list: [], error: null };
+async function collectLocalPrinters({ maxAge = 15000, includeVirtual = false } = {}) {
   if (process.platform !== 'win32') return [];
-  if (Date.now() - lastScan.at < maxAge) return lastScan.list;
-  const rawWindows = await getWindowsPrinters();
-  const printers = [];
-  for (const p of rawWindows) {
-    if (!p || !p.Name) continue;
-    const port = String(p.PortName || '').trim(), name = String(p.Name).trim(), driver = String(p.DriverName || name).trim();
-    const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
-    if (connType === 'Virtual / PDF') continue;
-    printers.push({ name, portName: port, driverName: driver, connectionType: connType, isWifi, isWired, isDefault: Boolean(p.Default), status: checkPrinterStatus(p.PrinterStatus).status, ...guessCapabilities(name, driver), verified: false });
-  }
-  const capabilities = await probePrinterCapabilities(printers.map(p => p.name));
-  for (const p of printers) if (capabilities.has(p.name)) Object.assign(p, capabilities.get(p.name), { verified: true });
-  lastScan = { at: Date.now(), list: printers };
-  return printers;
-}
-
-async function scanAndReportLocalPrinters() {
-  if (process.platform !== 'win32' || !secret || authFailed) return;
+  if (Date.now() - lastScan.at < maxAge && !includeVirtual) return lastScan.list;
   try {
     const rawWindows = await getWindowsPrinters();
     const printers = [];
-
-    if (rawWindows.length) {
-      for (const p of rawWindows) {
-        if (!p || !p.Name || /OneNote|Fax|Microsoft XPS/i.test(p.Name)) continue;
-        const port = String(p.PortName || '').trim();
-        const name = String(p.Name || '').trim();
-        const driver = String(p.DriverName || name).trim();
-        const { status } = checkPrinterStatus(p.PrinterStatus);
-        const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port, driver });
-
-        printers.push({
-          name,
-          portName: port,
-          driverName: driver,
-          connectionType: connType,
-          isWifi,
-          isWired,
-          isDefault: Boolean(p.Default),
-          status,
-          ...guessCapabilities(name, driver)
-        });
-      }
+    for (const p of rawWindows) {
+      if (!p || !p.Name) continue;
+      const port = String(p.PortName || '').trim();
+      const name = String(p.Name).trim();
+      const driver = String(p.DriverName || name).trim();
+      const conn = classifyConnection({ name, port, driver, shared: Boolean(p.Shared), type: p.Type, portHost: p.PortHost });
+      if (conn.isVirtual && !includeVirtual) continue;
+      const st = checkPrinterStatus(p.PrinterStatus, p.WorkOffline);
+      const { manufacturer, model } = extractManufacturerModel(name, driver);
+      printers.push({
+        name,
+        portName: port,
+        driverName: driver,
+        manufacturer,
+        model,
+        connectionType: conn.connectionType,
+        connectionCode: conn.connectionCode,
+        isWifi: conn.isWifi,
+        isWired: conn.isWired,
+        isNetwork: conn.isNetwork,
+        isShared: conn.isShared,
+        isVirtual: conn.isVirtual,
+        isDefault: Boolean(p.Default),
+        workOffline: Boolean(p.WorkOffline),
+        status: st.status,
+        operationalStatus: st.operationalStatus,
+        needsAttention: st.needsAttention,
+        isBusy: st.isBusy,
+        jobCount: Number.isFinite(Number(p.JobCount)) ? Number(p.JobCount) : 0,
+        ...guessCapabilities(name, driver),
+        paperSizes: [],
+        resolution: null,
+        verified: false
+      });
     }
-
-    if (!printers.length) {
-      let defPrinter = '';
-      try {
-        const { stdout: defOut } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', '/v', 'Device'], { timeout: 3000, windowsHide: true });
-        const defMatch = defOut.match(/Device\s+REG_SZ\s+([^,]+)/i);
-        if (defMatch) defPrinter = defMatch[1].trim();
-      } catch {}
-
-      const { stdout } = await run('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices'], { timeout: 3000, windowsHide: true });
-      if (stdout && stdout.trim()) {
-        const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('HKEY_'));
-        for (const line of lines) {
-          const parts = line.split(/\s{2,}REG_SZ\s{2,}/);
-          if (!parts || !parts[0]) continue;
-          const name = parts[0].trim();
-          if (!name || /OneNote|Fax|Microsoft XPS/i.test(name)) continue;
-
-          let port = '';
-          try {
-            const { stdout: portOut } = await run('reg.exe', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Print\\Printers\\${name}`, '/v', 'Port'], { timeout: 1500, windowsHide: true });
-            const portMatch = portOut.match(/Port\s+REG_SZ\s+(.*)/i);
-            if (portMatch) port = portMatch[1].trim();
-          } catch {}
-
-          if (!port && parts[1]) {
-            port = (parts[1].split(',')[1] || '').trim();
-          }
-
-          const { connectionType: connType, isWifi, isWired } = classifyConnection({ name, port });
-
-          printers.push({
-            name,
-            portName: port,
-            driverName: name,
-            connectionType: connType,
-            isWifi,
-            isWired,
-            isDefault: Boolean(defPrinter && (name.toLowerCase() === defPrinter.toLowerCase())),
-            status: 'Ready',
-            ...guessCapabilities(name)
-          });
-        }
-      }
+    const capabilities = await probePrinterCapabilities(printers.map(p => p.name));
+    for (const p of printers) {
+      if (capabilities.has(p.name)) Object.assign(p, capabilities.get(p.name), { verified: true });
     }
+    if (!includeVirtual) {
+      lastScan = { at: Date.now(), list: printers, error: null };
+    }
+    return printers;
+  } catch (err) {
+    lastScan.error = err.message;
+    return lastScan.list;
+  }
+}
 
-    // Driver-reported capabilities replace the name-based guesses. Only driver data for the printer this
-    // connector prints to is sent as its capabilities; the server routes colour/two-sided jobs on it.
-    const capabilities = await probePrinterCapabilities([printer, ...printers.map(p => p.name)]);
-    for (const p of printers) Object.assign(p, capabilities.get(p.name) || {});
-    const own = capabilities.get(printer);
-    if (printers.length || own) {
-      await request('/api/device/printers/scanned', { method: 'POST', body: { printers, ...(own ? { capabilities: own } : {}) } }).catch(() => {});
+async function scanAndReportLocalPrinters() {
+  if (process.platform !== 'win32' || !bindings.length) return;
+  try {
+    const printers = await collectLocalPrinters({ maxAge: 0 });
+    for (const b of bindings) {
+      if (b.authFailed || !b.token) continue;
+      const own = printers.find(p => p.name.toLowerCase() === String(b.printer || '').toLowerCase());
+      if (printers.length || own) {
+        await request('/api/device/printers/scanned', {
+          method: 'POST',
+          token: b.token,
+          baseUrl: b.url,
+          body: { printers, ...(own ? { capabilities: own } : {}) }
+        }).catch(() => {});
+      }
     }
   } catch {}
 }
@@ -266,9 +275,22 @@ log(`  Print Engine: ${sumatra ? 'SumatraPDF Portable (' + sumatra + ')' : 'Nati
 log(`  Status      : ${secret ? 'ONLINE · Listening for shop print jobs...' : 'Waiting to be linked from the SmartPrint Printers page'}`);
 try {
   await startBridge({
-    state: () => ({ base, linked: Boolean(secret) && !authFailed, needsRelink: Boolean(secret) && authFailed, printer }),
-    printers: ({ fresh } = {}) => collectLocalPrinters({ maxAge: fresh ? 0 : 15000 }),
-    pair
+    state: () => ({
+      base,
+      connectorId,
+      connectorVersion: CONNECTOR_VERSION,
+      machineName,
+      linked: bindings.some(b => !b.authFailed),
+      needsRelink: bindings.length > 0 && bindings.every(b => b.authFailed),
+      printer,
+      bindings: bindings.map(b => ({ printer: b.printer, linked: !b.authFailed, needsRelink: b.authFailed, server: b.url })),
+      lastScanAt: lastScan.at ? new Date(lastScan.at).toISOString() : null,
+      lastScanError: lastScan.error
+    }),
+    printers: ({ fresh, includeVirtual } = {}) => collectLocalPrinters({ maxAge: fresh ? 0 : 15000, includeVirtual }),
+    pair,
+    unpair,
+    setDefault: ({ printer: targetName }) => setWindowsDefaultPrinter(targetName).then(() => { lastScan.at = 0; })
   }, { extraOrigins: String(process.env.SMARTPRINT_TRUSTED_ORIGINS || '').split(',').filter(Boolean), log });
 } catch (err) {
   if (err.code === 'EADDRINUSE') {
@@ -291,12 +313,13 @@ for (const name of await readdir(root)) {
   } catch {}
 }
 
-async function request(path, { method = 'GET', body, lease, binary, range } = {}) {
-  const url = new URL(path, base);
+async function request(path, { method = 'GET', body, lease, binary, range, token: overrideToken, baseUrl } = {}) {
+  const url = new URL(path, baseUrl || base);
+  const authToken = overrideToken || secret;
   const response = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${secret}`,
+      Authorization: `Bearer ${authToken}`,
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(lease ? { 'X-Lease-Token': lease } : {}),
       ...(range ? { Range: range } : {})
@@ -305,7 +328,7 @@ async function request(path, { method = 'GET', body, lease, binary, range } = {}
     signal: AbortSignal.timeout(30000)
   });
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 && !overrideToken) {
       const refreshed = loadConfig();
       if (refreshed.Token && refreshed.Token !== secret) {
         secret = refreshed.Token;
@@ -323,27 +346,47 @@ async function request(path, { method = 'GET', body, lease, binary, range } = {}
     err.status = response.status;
     throw err;
   }
-  if (authFailed) { authFailed = false; log('[Auth] Device key accepted again.'); }
+  if (authFailed && !overrideToken) { authFailed = false; log('[Auth] Device key accepted again.'); }
   return binary ? { bytes: Buffer.from(await response.arrayBuffer()), range: response.headers.get('Content-Range') } : response.json();
 }
 
 // Called by the local bridge when the owner clicks Connect on the Printers page of this PC. The key is
 // checked with the server before anything is saved.
-async function pair({ url, token, printer: chosen }) {
+async function pair({ url, token, printer: chosen, replace = false }) {
   const target = url.replace(/\/+$/, '');
-  const check = await fetch(new URL('/api/device/heartbeat', target), { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) }).catch(err => ({ ok: false, status: err.message }));
+  const check = await fetch(new URL('/api/device/heartbeat', target), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connectorId, version: CONNECTOR_VERSION, machineName }),
+    signal: AbortSignal.timeout(20000)
+  }).catch(err => ({ ok: false, status: err.message }));
   if (!check.ok) throw Object.assign(new Error(`The SmartPrint server did not accept this device key (${check.status}).`), { status: 400 });
   let name = chosen || printer || '';
   if (process.platform === 'win32') {
     const res = pickPrinter(name, await getWindowsPrinters());
     if (res.name) name = res.name;
   }
-  const cfg = loadConfig();
-  await writeFile(settingsPath, JSON.stringify({ ...cfg, Url: target, Token: token, Printer: name, LastUpdated: new Date().toISOString() }, null, 2), 'utf8');
+  if (replace) {
+    bindings = [];
+  }
+  const idx = bindings.findIndex(b => b.printer.toLowerCase() === name.toLowerCase());
+  const entry = { url: target, token, printer: name, authFailed: false, lastError: null };
+  if (idx >= 0) bindings[idx] = entry;
+  else bindings.push(entry);
   base = target; secret = token; printer = name; authFailed = false; lastScan.at = 0;
-  log(`[Connector] Linked from the dashboard to ${target}. Printer: "${name}".`);
+  await saveBindings();
+  log(`[Connector] Linked "${name}" to ${target} (total bound printers: ${bindings.length}).`);
   scanAndReportLocalPrinters().catch(() => {});
   return { printer: name };
+}
+
+async function unpair({ printer: targetName }) {
+  const before = bindings.length;
+  bindings = bindings.filter(b => b.printer.toLowerCase() !== String(targetName || '').toLowerCase());
+  if (bindings.length !== before) {
+    await saveBindings();
+    log(`[Connector] Unbound "${targetName}" from SmartPrint (Windows driver/queue untouched).`);
+  }
 }
 
 async function prepareJob(job) {
@@ -377,7 +420,10 @@ async function prepareJob(job) {
   console.log(`[Preview] Preparation complete for job ${job.id}`);
 }
 
-async function printJob(job) {
+async function printJob(job, binding = null) {
+  const activeToken = binding?.token || secret;
+  const activeUrl = binding?.url || base;
+  const targetPrinter = binding?.printer || printer;
   if (!/^[a-f0-9-]{36}$/.test(job.id)) throw new Error('Invalid job identifier.');
   const path = join(root, `${job.id}.pdf`), journal = join(root, `${job.id}.submitted`);
 
@@ -412,7 +458,7 @@ async function printJob(job) {
     const chunks = [];
     let start = 0, total;
     do {
-      const result = await request(`/api/device/jobs/${job.id}/document`, { binary: true, lease: job.token, range: `bytes=${start}-${start + 1048575}` });
+      const result = await request(`/api/device/jobs/${job.id}/document`, { binary: true, lease: job.token, range: `bytes=${start}-${start + 1048575}`, token: activeToken, baseUrl: activeUrl });
       chunks.push(result.bytes);
       total = Number(result.range?.split('/')[1] || result.bytes.length);
       start += result.bytes.length;
@@ -433,18 +479,26 @@ async function printJob(job) {
       submitted: new Date().toISOString()
     }), { flag: 'w', mode: 0o600 });
 
-    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'submitted' } });
+    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'submitted' }, token: activeToken, baseUrl: activeUrl });
 
-    log(`    Sending to physical printer: "${printer}"...`);
-    const printResult = await printPdfToWindowsPrinter({ pdfPath: path, printerName: printer, options: job.options, sumatraPath: sumatra });
+    log(`    Sending to physical printer: "${targetPrinter}"...`);
+    const printResult = await printPdfToWindowsPrinter({
+      pdfPath: path,
+      printerName: targetPrinter,
+      options: job.options,
+      sumatraPath: sumatra,
+      exactOnly: Boolean(job.options?.targetDeviceId)
+    });
 
-    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'awaiting_confirmation' } });
+    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'awaiting_confirmation' }, token: activeToken, baseUrl: activeUrl });
+    if (binding) binding.lastError = null;
     log(`✓ [Print Queued] Job #${job.id.slice(0, 8).toUpperCase()} sent to printer (${printResult.method}). Confirm physical output in SmartPrint.\n`);
   } catch (err) {
     log(`! [Print Error] Failed to submit job #${job.id}: ${err.message}`);
+    if (binding) binding.lastError = err.message;
     // Clean up journal on failure so retry will never be blocked
     await unlink(journal).catch(() => {});
-    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'failed', error: err.message } }).catch(() => {});
+    await request(`/api/device/jobs/${job.id}/events`, { method: 'POST', lease: job.token, body: { event: 'failed', error: err.message }, token: activeToken, baseUrl: activeUrl }).catch(() => {});
   } finally {
     await unlink(path).catch(() => {});
   }
@@ -455,16 +509,39 @@ process.on('SIGINT', () => { running = false; cleanupPid(); console.log('\nStopp
 process.on('SIGTERM', () => { running = false; cleanupPid(); console.log('\nStopping connector...'); });
 process.on('exit', cleanupPid);
 
-// Send device heartbeat every 10 seconds to ensure the printer never drops offline
-// While the key is rejected this is the only request, so it also notices a re-link.
-const heartbeat = setInterval(() => {
-  if (!secret) return;
-  request('/api/device/heartbeat', { method: 'POST' })
-    .catch(err => {
-      if (err.status !== 401) {
-        log(`[Heartbeat] Warning: Device heartbeat failed: ${err.message}`);
+// Send device heartbeat every 10 seconds for every bound printer on this PC
+const heartbeat = setInterval(async () => {
+  if (!bindings.length) return;
+  const cached = lastScan.list || [];
+  for (const b of bindings) {
+    if (!b.token) continue;
+    const match = cached.find(p => p.name.toLowerCase() === String(b.printer || '').toLowerCase());
+    request('/api/device/heartbeat', {
+      method: 'POST',
+      token: b.token,
+      baseUrl: b.url,
+      body: {
+        connectorId,
+        version: CONNECTOR_VERSION,
+        machineName,
+        deviceStatus: match ? (match.operationalStatus || match.status) : undefined,
+        queueDepth: match ? match.jobCount : undefined,
+        isWindowsDefault: match ? match.isDefault : undefined,
+        lastError: b.lastError || ''
+      }
+    }).then(() => {
+      if (b.authFailed) { b.authFailed = false; log(`[Auth] "${b.printer}" reconnected.`); }
+    }).catch(err => {
+      if (err.status === 401) {
+        if (!b.authFailed) {
+          b.authFailed = true;
+          log(`[Auth] Device key rejected (401) for "${b.printer}". Reconnect from SmartPrint > Printers.`);
+        }
+      } else {
+        log(`[Heartbeat] Warning for "${b.printer}": ${err.message}`);
       }
     });
+  }
 }, 10000);
 
 // Old SmartPrint jobs still waiting in a Windows queue would all print when a cable is plugged back in.
@@ -507,22 +584,26 @@ let claimRetryDelay = 1000;
 let claimIdleStreak = 0;
 let lastClaimErrorLog = 0;
 while (running) {
-  // Unlinked or rejected: wait for the dashboard to link this PC instead of polling with a bad key.
-  if (!secret || authFailed) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+  const activeBindings = bindings.filter(b => b.token && !b.authFailed);
+  if (!activeBindings.length) { await new Promise(resolve => setTimeout(resolve, 3000)); continue; }
+  let claimedAny = false;
   try {
-    // Claim print jobs
-    const print = await request('/api/device/claim', { method: 'POST' });
-    if (print) {
-      claimIdleStreak = 0;
-      claimRetryDelay = 1000;
-      await printJob(print);
-      continue;
+    for (const b of activeBindings) {
+      const print = await request('/api/device/claim', { method: 'POST', token: b.token, baseUrl: b.url });
+      if (print) {
+        claimedAny = true;
+        claimIdleStreak = 0;
+        claimRetryDelay = 1000;
+        await printJob(print, b);
+      }
     }
+    if (claimedAny) continue;
     claimIdleStreak++;
     claimRetryDelay = idleDelay(claimIdleStreak, 1000, 4000);
   } catch (err) {
-    // Exponential retry backoff on network failure with periodic log
-    if (Date.now() - lastClaimErrorLog > 30000) {
+    if (err.status === 401) {
+      // Handled per-binding on next heartbeat
+    } else if (Date.now() - lastClaimErrorLog > 30000) {
       log(`[Queue] Claim check notice (${err.status || err.message}). Will retry...`);
       lastClaimErrorLog = Date.now();
     }

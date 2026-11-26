@@ -160,6 +160,14 @@ export const migrations = [
     id: '0018_device_capability_source',
     description: 'Shop printers remember whether colour/two-sided were set by the owner (manual) or read from the driver',
     async up(tx) { await tx.query('SELECT cap_source FROM devices LIMIT 1'); }
+  },
+  {
+    id: '0019_printer_connect_metadata',
+    description: 'Shop printers store connector identity, driver/port metadata, paper sizes, operational status, default flag, and target_device_id on orders',
+    async up(tx) {
+      await tx.query('SELECT connector_id, connector_version, machine_name, windows_queue_name, driver_name, port_name, connection_type, manufacturer, model, paper_sizes, resolution, is_default, is_windows_default, device_status, last_status_check, last_error, queue_depth FROM devices LIMIT 1');
+      await tx.query('SELECT target_device_id FROM orders LIMIT 1');
+    }
   }
 ];
 

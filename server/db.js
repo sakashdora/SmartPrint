@@ -92,7 +92,25 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
             ['sessions', 'last_seen', 'TEXT'],
             ['sessions', 'user_agent', 'TEXT'],
             ['sessions', 'created', 'TEXT'],
-            ['devices', 'cap_source', 'TEXT']
+            ['devices', 'cap_source', 'TEXT'],
+            ['devices', 'connector_id', 'TEXT'],
+            ['devices', 'connector_version', 'TEXT'],
+            ['devices', 'machine_name', 'TEXT'],
+            ['devices', 'windows_queue_name', 'TEXT'],
+            ['devices', 'driver_name', 'TEXT'],
+            ['devices', 'port_name', 'TEXT'],
+            ['devices', 'connection_type', 'TEXT'],
+            ['devices', 'manufacturer', 'TEXT'],
+            ['devices', 'model', 'TEXT'],
+            ['devices', 'paper_sizes', 'TEXT'],
+            ['devices', 'resolution', 'INTEGER'],
+            ['devices', 'is_default', 'INTEGER NOT NULL DEFAULT 0'],
+            ['devices', 'is_windows_default', 'INTEGER NOT NULL DEFAULT 0'],
+            ['devices', 'device_status', 'TEXT'],
+            ['devices', 'last_status_check', 'TEXT'],
+            ['devices', 'last_error', 'TEXT'],
+            ['devices', 'queue_depth', 'INTEGER NOT NULL DEFAULT 0'],
+            ['orders', 'target_device_id', 'TEXT']
           ]) {
             try {
               await client.query(`SAVEPOINT sp_${table}_${column}`);
@@ -163,6 +181,24 @@ export async function openDatabase({ url = process.env.DATABASE_URL, path = proc
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE sessions ADD COLUMN created TEXT;"); } catch {}
       try { sqlite.exec("ALTER TABLE devices ADD COLUMN cap_source TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN connector_id TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN connector_version TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN machine_name TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN windows_queue_name TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN driver_name TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN port_name TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN connection_type TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN manufacturer TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN model TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN paper_sizes TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN resolution INTEGER;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN is_windows_default INTEGER NOT NULL DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN device_status TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN last_status_check TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN last_error TEXT;"); } catch {}
+      try { sqlite.exec("ALTER TABLE devices ADD COLUMN queue_depth INTEGER NOT NULL DEFAULT 0;"); } catch {}
+      try { sqlite.exec("ALTER TABLE orders ADD COLUMN target_device_id TEXT;"); } catch {}
     }),
     close: () => sqlite.close(),
     transaction: fn => serial(async () => {
